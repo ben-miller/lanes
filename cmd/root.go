@@ -17,6 +17,7 @@ func Execute() error {
 func init() {
 	rootCmd.AddCommand(
 		newInitCmd(),
+		newDNSCmd(),
 		newRegisterCmd(),
 		newUpCmd(),
 		newDownCmd(),

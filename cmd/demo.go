@@ -36,10 +36,6 @@ Safe to run multiple times — skips setup steps that are already done.`,
 }
 
 func runDemo(cmd *cobra.Command, args []string) error {
-	if os.Getuid() != 0 {
-		return fmt.Errorf("demo requires sudo to configure DNS\n\n  Run: sudo go run . demo\n  Or:  sudo spinner demo")
-	}
-
 	home, err := os.UserHomeDir()
 	if err != nil {
 		return err

@@ -15,7 +15,7 @@ const (
 )
 
 // EnsureProject adds dnsmasq wildcard resolution for domainSuffix and reloads
-// dnsmasq. Requires sudo for resolver directory writes.
+// dnsmasq. Prompts for sudo password inline when writing /etc/resolver/.
 func EnsureProject(domainSuffix string) error {
 	if err := addDnsmasqEntry(domainSuffix); err != nil {
 		return fmt.Errorf("dnsmasq.conf: %w", err)
@@ -66,11 +66,18 @@ func writeResolver(domain string) error {
 	if _, err := os.Stat(path); err == nil {
 		return nil // already exists
 	}
-	return os.WriteFile(path, []byte("nameserver 127.0.0.1\n"), 0644)
+	// /etc/resolver/ requires root — pipe content via sudo tee so the user
+	// gets a normal password prompt without re-running the whole command as root.
+	cmd := exec.Command("sudo", "tee", path)
+	cmd.Stdin = strings.NewReader("nameserver 127.0.0.1\n")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	return cmd.Run()
 }
 
 func reload() error {
-	cmd := exec.Command("brew", "services", "restart", "dnsmasq")
+	cmd := exec.Command("sudo", "brew", "services", "restart", "dnsmasq")
+	cmd.Stdin = os.Stdin
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	return cmd.Run()
