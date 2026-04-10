@@ -62,8 +62,13 @@ port_range = { min = 4100, max = 4199 }
 
 [server]
 command = "mix phx.server"
-env = { MIX_ENV = "dev" }
+
+[server.env]
+MIX_ENV = "dev"
+DATABASE_URL = "postgres://localhost/sheetwork_{branch}_dev"
 ```
+
+`{branch}` is a template variable spinner substitutes at runtime with the worktree's branch name. This is how spinner handles infrastructure conflicts across worktrees — not by running separate database instances, but by injecting branch-derived values for things like database names, so each worktree points at its own slice of a shared Postgres instance.
 
 ---
 
@@ -89,9 +94,17 @@ Served by spinner itself at `http://spinner.test` (or similar). Shows all regist
 
 ---
 
+## Infrastructure isolation
+
+The typical dev setup — app running locally, backing services (Postgres, Redis, etc.) in Docker — works naturally with spinner. The app is what spinner manages; the Docker services are started once with `docker-compose up -d` and forgotten. Spinner just injects the right env vars so each worktree connects to its own database within the shared instance.
+
+Per-worktree Docker Compose projects (true infrastructure isolation per branch) are possible via `docker-compose --project-name {branch}` but add significant complexity. Not a v1 concern — the shared-instance-with-per-branch-database approach covers realistic development scenarios without it.
+
+---
+
 ## What's deferred (v2)
 
-- **Docker support** — `command` abstraction is already compatible, but container port mapping needs specific handling
+- **Per-worktree Docker Compose projects** — true infrastructure isolation; spinner would manage `docker-compose --project-name {branch} up/down` alongside the app server
 - **Log rotation** — max size, TTL on log files
 - **`spinner attach [branch]`** — if tmux support is added, attach directly to a server's PTY session
 
