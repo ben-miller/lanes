@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/creack/pty"
@@ -89,11 +90,11 @@ func (s *Server) Stop() error {
 		return nil
 	}
 
-	cmd.Process.Signal(os.Interrupt)
+	cmd.Process.Signal(syscall.SIGTERM)
 	if done != nil {
 		select {
 		case <-done:
-		case <-time.After(10 * time.Second):
+		case <-time.After(3 * time.Second):
 			cmd.Process.Kill()
 			<-done
 		}
