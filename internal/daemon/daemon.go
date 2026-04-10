@@ -210,9 +210,15 @@ func (m *Manager) shutdown() {
 	}
 	m.mu.Unlock()
 
+	var wg sync.WaitGroup
 	for _, branch := range branches {
-		m.stopWorktree(branch)
+		wg.Add(1)
+		go func(b string) {
+			defer wg.Done()
+			m.stopWorktree(b)
+		}(branch)
 	}
+	wg.Wait()
 }
 
 func (m *Manager) saveState() {

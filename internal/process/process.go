@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/creack/pty"
 )
@@ -90,7 +91,12 @@ func (s *Server) Stop() error {
 
 	cmd.Process.Signal(os.Interrupt)
 	if done != nil {
-		<-done
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+			cmd.Process.Kill()
+			<-done
+		}
 	}
 	ptmx.Close()
 	cmd.Wait()
