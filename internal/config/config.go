@@ -28,6 +28,7 @@ type PortRange struct {
 
 type ServerSection struct {
 	Command string            `toml:"command"`
+	Setup   string            `toml:"setup"`
 	Env     map[string]string `toml:"env"`
 }
 
