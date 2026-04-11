@@ -113,7 +113,8 @@ func BuildAndReexec() error {
 
 	fmt.Fprintf(os.Stderr, "spinner: building %s...\n", short)
 
-	c := exec.Command("go", "build", "-ldflags", ldflags, "-o", binary, SourceDir)
+	c := exec.Command("go", "build", "-ldflags", ldflags, "-o", binary, ".")
+	c.Dir = SourceDir
 	c.Stdout = os.Stdout
 	c.Stderr = os.Stderr
 	if err := c.Run(); err != nil {
