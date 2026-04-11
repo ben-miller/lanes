@@ -33,7 +33,7 @@ http://fix-bar.sheetwork.test:4159       ← fix-bar worktree
 ```bash
 git clone https://github.com/bmiller/spinner
 cd spinner
-go build -o /usr/local/bin/spinner .
+go build -o ~/go/bin/spinner .
 ```
 
 ---
@@ -99,8 +99,12 @@ spinner down --all  # all registered projects
 | `spinner up --all -d` | Start all registered projects (detached only) |
 | `spinner down` | Stop current project |
 | `spinner down --all` | Stop all registered projects |
-| `spinner status` | Show all projects, worktrees, ports, and server status |
-| `spinner logs [branch]` | Tail logs for a worktree (default: current branch) |
+| `spinner status` | Show all projects, worktrees, ports, server status, and setup status |
+| `spinner logs [branch]` | Tail server logs for a worktree (default: current branch) |
+| `spinner setup [branch]` | Run the setup command for a worktree (default: current branch) |
+| `spinner setup --all` | Run setup for all worktrees with pending or failed status |
+| `spinner clean [branch]` | Remove spinner log artifacts for a worktree (default: current branch) |
+| `spinner clean --all` | Remove spinner log artifacts for all branches |
 | `spinner open [branch]` | Open worktree URL in default browser (default: current branch) |
 
 ---
@@ -119,11 +123,18 @@ port_range = { min = 4100, max = 4199 }
 
 [server]
 command = "mix phx.server"
+setup = "mix deps.get && mix ecto.migrate"   # optional
 
 [server.env]
 MIX_ENV = "dev"
 DATABASE_URL = "postgres://localhost/sheetwork_{branch}_dev"
 ```
+
+**`setup`** — optional shell command run by `spinner setup` before a worktree's server is first started. Use `&&` to sequence multiple steps. When configured:
+
+- New worktrees are marked `pending` automatically when detected by the watcher.
+- `spinner up` warns if a worktree hasn't been set up yet but still starts the server.
+- `spinner status` shows a SETUP column with status (`pending`, `ok`, `failed`, `setting up...`) and a hint when action is needed.
 
 **Template variables** — `{branch}` in any env value is replaced with the worktree's branch name at runtime. Use this to point each worktree at its own database, S3 bucket prefix, etc.
 
@@ -194,14 +205,18 @@ Spinner stores runtime state under `~/.local/share/spinner/`:
 ```
 ~/.local/share/spinner/
 └── myapp/
-    ├── daemon.pid      — PID of the running daemon
-    ├── state.json      — current worktree/server state (read by `spinner status`)
+    ├── daemon.pid              — PID of the running daemon
+    ├── spinner-state.json      — all worktree state: server status + setup status
     └── logs/
         ├── main.log
-        └── feature-foo.log
+        ├── feature-foo.log
+        ├── spinner-setup-main.log
+        └── spinner-setup-feature-foo.log
 ```
 
-Log files persist across restarts and accumulate until deleted manually. Log rotation is not yet implemented.
+`spinner-state.json` is written by both the daemon (server status, on a 5s tick) and the CLI (`spinner setup` updates setup status). Setup status persists across daemon restarts — the daemon merges it in on each save rather than overwriting it.
+
+Log files persist across restarts and accumulate until deleted manually. Use `spinner clean [branch]` to remove them.
 
 ---
 

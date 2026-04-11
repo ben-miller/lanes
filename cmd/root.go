@@ -23,6 +23,8 @@ func init() {
 		newDownCmd(),
 		newStatusCmd(),
 		newLogsCmd(),
+		newSetupCmd(),
+		newCleanCmd(),
 		newOpenCmd(),
 		newDaemonCmd(),
 		newTestenvCmd(),

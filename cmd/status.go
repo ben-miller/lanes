@@ -26,6 +26,11 @@ var (
 	styleProject = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("141"))
 	styleDim     = lipgloss.NewStyle().Foreground(lipgloss.Color("240"))
 	styleSep     = lipgloss.NewStyle().Foreground(lipgloss.Color("237"))
+
+	styleSetupOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("82"))
+	styleSetupPending = lipgloss.NewStyle().Foreground(lipgloss.Color("214"))
+	styleSetupFailed  = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Bold(true)
+	styleSetupRunning = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
 )
 
 func newStatusCmd() *cobra.Command {
@@ -62,35 +67,66 @@ func runStatus(cmd *cobra.Command, args []string) error {
 			continue
 		}
 
+		daemonRunning := s.DaemonPID > 0 && pidAlive(s.DaemonPID)
 		daemonStatus := styleStopped.Render("stopped")
-		if s.DaemonPID > 0 {
-			if pidAlive(s.DaemonPID) {
-				daemonStatus = styleRunning.Render("running")
-			}
+		if daemonRunning {
+			daemonStatus = styleRunning.Render("running")
 		}
 
 		fmt.Printf("  %s  %s\n", styleProject.Render(repo.Name), daemonStatus)
 		fmt.Printf("  %s\n", styleDim.Render(repo.Path))
 
-		if len(s.Worktrees) == 0 {
-			fmt.Printf("  %s\n", styleDim.Render("no worktrees"))
-		} else {
-			// Calculate column widths.
-			maxBranch, maxURL, maxPort := 6, 3, 4
-			for _, wt := range s.Worktrees {
-				if len(wt.Branch) > maxBranch {
-					maxBranch = len(wt.Branch)
-				}
-				if len(wt.URL) > maxURL {
-					maxURL = len(wt.URL)
-				}
-				portStr := fmt.Sprintf("%d", wt.Port)
-				if len(portStr) > maxPort {
-					maxPort = len(portStr)
+		// State already contains all worktrees (running + stopped) when daemon
+		// is active. When daemon is stopped, fall back to reading git directly.
+		worktrees := s.Worktrees
+		if !daemonRunning && len(worktrees) == 0 {
+			if gits, err := git.ListWorktrees(repo.Path); err == nil {
+				for _, wt := range gits {
+					if wt.Branch != "" {
+						worktrees = append(worktrees, state.WorktreeState{
+							Branch: wt.Branch,
+							Path:   wt.Path,
+							Status: state.StatusStopped,
+						})
+					}
 				}
 			}
+		}
 
-			// Header
+		if len(worktrees) == 0 {
+			fmt.Printf("  %s\n", styleDim.Render("no worktrees"))
+			fmt.Println()
+			continue
+		}
+
+		cfg, cfgErr := config.LoadProject(repo.Path)
+		hasSetup := cfgErr == nil && cfg.Server.Setup != ""
+
+		// Column widths.
+		maxBranch, maxURL, maxPort := 6, 3, 4
+		for _, wt := range worktrees {
+			if len(wt.Branch) > maxBranch {
+				maxBranch = len(wt.Branch)
+			}
+			if len(wt.URL) > maxURL {
+				maxURL = len(wt.URL)
+			}
+			portStr := fmt.Sprintf("%d", wt.Port)
+			if len(portStr) > maxPort {
+				maxPort = len(portStr)
+			}
+		}
+
+		if hasSetup {
+			fmt.Printf("  %s  %s  %s  %s  %s\n",
+				styleHeader.Render(pad("branch", maxBranch)),
+				styleHeader.Render(pad("url", maxURL)),
+				styleHeader.Render(pad("port", maxPort)),
+				styleHeader.Render(pad("status", 7)),
+				styleHeader.Render("setup"),
+			)
+			fmt.Printf("  %s\n", styleSep.Render(strings.Repeat("─", maxBranch+maxURL+maxPort+30)))
+		} else {
 			fmt.Printf("  %s  %s  %s  %s\n",
 				styleHeader.Render(pad("branch", maxBranch)),
 				styleHeader.Render(pad("url", maxURL)),
@@ -98,20 +134,45 @@ func runStatus(cmd *cobra.Command, args []string) error {
 				styleHeader.Render("status"),
 			)
 			fmt.Printf("  %s\n", styleSep.Render(strings.Repeat("─", maxBranch+maxURL+maxPort+20)))
+		}
 
-			for _, wt := range s.Worktrees {
-				statusStr := renderStatus(wt.Status)
+		for _, wt := range worktrees {
+			serverStatus := renderStatus(wt.Status)
+			if hasSetup {
+				fmt.Printf("  %s  %s  %s  %s  %s\n",
+					styleBranch.Render(pad(wt.Branch, maxBranch)),
+					styleURL.Render(pad(wt.URL, maxURL)),
+					stylePort.Render(pad(fmt.Sprintf("%d", wt.Port), maxPort)),
+					pad(serverStatus, 7),
+					renderSetupStatus(wt.SetupStatus, wt.Branch),
+				)
+			} else {
 				fmt.Printf("  %s  %s  %s  %s\n",
 					styleBranch.Render(pad(wt.Branch, maxBranch)),
 					styleURL.Render(pad(wt.URL, maxURL)),
 					stylePort.Render(pad(fmt.Sprintf("%d", wt.Port), maxPort)),
-					statusStr,
+					serverStatus,
 				)
 			}
 		}
 		fmt.Println()
 	}
 	return nil
+}
+
+func renderSetupStatus(s state.SetupStatus, branch string) string {
+	switch s {
+	case state.SetupStatusOK:
+		return styleSetupOK.Render("ok")
+	case state.SetupStatusPending, state.SetupStatusNone:
+		return styleSetupPending.Render("pending") + styleDim.Render("  → spinner setup "+branch)
+	case state.SetupStatusFailed:
+		return styleSetupFailed.Render("failed") + styleDim.Render("   → spinner setup "+branch)
+	case state.SetupStatusRunning:
+		return styleSetupRunning.Render("setting up...")
+	default:
+		return styleDim.Render(string(s))
+	}
 }
 
 func renderStatus(s state.Status) string {
