@@ -25,6 +25,8 @@ func init() {
 		newLogsCmd(),
 		newSetupCmd(),
 		newCleanCmd(),
+		newVersionCmd(),
+		newUpdateCmd(),
 		newOpenCmd(),
 		newDaemonCmd(),
 		newTestenvCmd(),

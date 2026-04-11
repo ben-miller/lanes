@@ -33,8 +33,10 @@ http://fix-bar.sheetwork.test:4159       ← fix-bar worktree
 ```bash
 git clone https://github.com/bmiller/spinner
 cd spinner
-go build -o ~/go/bin/spinner .
+make install
 ```
+
+`make install` builds with version info baked in (git SHA + source path), enabling `spinner update` and the staleness check in `spinner status`. A plain `go build` still works but version features will show "unknown".
 
 ---
 
@@ -106,6 +108,8 @@ spinner down --all  # all registered projects
 | `spinner clean [branch]` | Remove spinner log artifacts for a worktree (default: current branch) |
 | `spinner clean --all` | Remove spinner log artifacts for all branches |
 | `spinner open [branch]` | Open worktree URL in default browser (default: current branch) |
+| `spinner version` | Show version info and check if source has newer commits |
+| `spinner update` | Rebuild from source and restart (dev mode only) |
 
 ---
 
@@ -139,6 +143,15 @@ DATABASE_URL = "postgres://localhost/sheetwork_{branch}_dev"
 **Template variables** — `{branch}` in any env value is replaced with the worktree's branch name at runtime. Use this to point each worktree at its own database, S3 bucket prefix, etc.
 
 The `PORT` environment variable is always injected automatically — your server should bind to it.
+
+### Global user config: `~/.config/spinner/spinner.toml`
+
+Optional. Created manually if you want to configure global preferences:
+
+```toml
+[update]
+auto = true   # dev mode only: auto-rebuild and restart if source has newer commits
+```
 
 ### Global registry: `~/.config/spinner/registry.toml`
 

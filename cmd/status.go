@@ -6,6 +6,7 @@ import (
 	"strings"
 	"syscall"
 
+	"github.com/bmiller/spinner/internal/build"
 	"github.com/bmiller/spinner/internal/config"
 	"github.com/bmiller/spinner/internal/git"
 	"github.com/bmiller/spinner/internal/state"
@@ -157,6 +158,11 @@ func runStatus(cmd *cobra.Command, args []string) error {
 		}
 		fmt.Println()
 	}
+
+	if build.IsStale() {
+		fmt.Printf("  %s\n\n", styleSetupPending.Render("⚠  spinner is stale — run: spinner update"))
+	}
+
 	return nil
 }
 
