@@ -114,10 +114,10 @@ func handleDashboard(w http.ResponseWriter, r *http.Request) {
 
 	type pageData struct {
 		UpdatedAt string
-		Projects  []*state.ProjectState
+		Projects  []*state.SpinnerState
 	}
 
-	var projects []*state.ProjectState
+	var projects []*state.SpinnerState
 	for _, repo := range global.Repos {
 		s, err := state.Load(repo.Name)
 		if err != nil {
