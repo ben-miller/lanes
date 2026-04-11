@@ -42,6 +42,32 @@ type RepoEntry struct {
 	Name string `toml:"name"`
 }
 
+// UserConfig is the global user preferences file at ~/.config/spinner/spinner.toml.
+type UserConfig struct {
+	Update UserUpdateConfig `toml:"update"`
+}
+
+type UserUpdateConfig struct {
+	Auto bool `toml:"auto"`
+}
+
+func UserConfigPath() string {
+	home, _ := os.UserHomeDir()
+	return filepath.Join(home, ".config", "spinner", "spinner.toml")
+}
+
+func LoadUserConfig() (*UserConfig, error) {
+	path := UserConfigPath()
+	var cfg UserConfig
+	if _, err := os.Stat(path); os.IsNotExist(err) {
+		return &cfg, nil
+	}
+	if _, err := toml.DecodeFile(path, &cfg); err != nil {
+		return nil, fmt.Errorf("reading %s: %w", path, err)
+	}
+	return &cfg, nil
+}
+
 func GlobalConfigPath() string {
 	home, _ := os.UserHomeDir()
 	return filepath.Join(home, ".config", "spinner", "registry.toml")
