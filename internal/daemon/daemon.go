@@ -45,7 +45,7 @@ func (m *Manager) Run() error {
 		return fmt.Errorf("writing pid: %w", err)
 	}
 	defer state.RemovePID(projectName)
-	defer state.Remove(projectName)
+	defer state.ClearDaemon(projectName)
 
 	// Start servers for all existing worktrees.
 	worktrees, err := git.ListWorktrees(m.projectRoot)
@@ -100,6 +100,15 @@ func (m *Manager) startWorktree(wt git.Worktree) error {
 		return nil // detached HEAD, skip
 	}
 
+	if m.cfg.Server.Setup != "" {
+		st := state.GetWorktreeSetupStatus(m.cfg.Project.Name, wt.Branch)
+		if st == state.SetupStatusPending || st == state.SetupStatusNone {
+			log.Printf("warning: %s has not been set up — run: spinner setup %s", wt.Branch, wt.Branch)
+		} else if st == state.SetupStatusFailed {
+			log.Printf("warning: setup failed for %s — run: spinner setup %s", wt.Branch, wt.Branch)
+		}
+	}
+
 	p := port.Assign(wt.Branch, m.cfg.Project.PortRange.Min, m.cfg.Project.PortRange.Max)
 	env := config.ExpandEnv(m.cfg.Server.Env, wt.Branch)
 	env["PORT"] = fmt.Sprintf("%d", p)
@@ -142,8 +151,6 @@ func (m *Manager) stopWorktree(branch string) {
 }
 
 func (m *Manager) handleWatchEvent(ev watcher.Event) {
-	// ev.Name is the full path to the entry under .git/worktrees/
-	// We need to re-list worktrees to get the branch name.
 	worktrees, err := git.ListWorktrees(m.projectRoot)
 	if err != nil {
 		log.Printf("spinner: listing worktrees after event: %v", err)
@@ -151,7 +158,6 @@ func (m *Manager) handleWatchEvent(ev watcher.Event) {
 	}
 
 	if ev.Removed {
-		// Find which branch was removed by checking what we're running vs what exists now.
 		existing := map[string]bool{}
 		for _, wt := range worktrees {
 			existing[wt.Branch] = true
@@ -168,8 +174,6 @@ func (m *Manager) handleWatchEvent(ev watcher.Event) {
 			m.stopWorktree(branch)
 		}
 	} else {
-		// A new entry appeared under .git/worktrees/. git may still be writing
-		// the worktree metadata, so retry until ListWorktrees shows the new branch.
 		for attempt := 0; attempt < 10; attempt++ {
 			if attempt > 0 {
 				time.Sleep(250 * time.Millisecond)
@@ -192,6 +196,12 @@ func (m *Manager) handleWatchEvent(ev watcher.Event) {
 				continue
 			}
 			for _, wt := range newWTs {
+				if m.cfg.Server.Setup != "" {
+					if err := state.SetWorktreeSetupStatus(m.cfg.Project.Name, wt.Branch, state.SetupStatusPending); err != nil {
+						log.Printf("spinner: could not set setup status for %s: %v", wt.Branch, err)
+					}
+					log.Printf("spinner: new worktree %s detected — run: spinner setup %s", wt.Branch, wt.Branch)
+				}
 				if err := m.startWorktree(wt); err != nil {
 					log.Printf("spinner: failed to start new worktree %s: %v", wt.Branch, err)
 				}
@@ -221,33 +231,58 @@ func (m *Manager) shutdown() {
 	wg.Wait()
 }
 
+// saveState writes all worktrees (running and stopped) to spinner-state.json,
+// merging current server status with any existing setup status.
 func (m *Manager) saveState() {
-	worktrees, _ := git.ListWorktrees(m.projectRoot)
-	wtMap := map[string]git.Worktree{}
-	for _, wt := range worktrees {
-		wtMap[wt.Branch] = wt
+	// Load existing state to preserve setup status written by `spinner setup`.
+	existing, _ := state.Load(m.cfg.Project.Name)
+	existingByBranch := map[string]state.WorktreeState{}
+	for _, wt := range existing.Worktrees {
+		existingByBranch[wt.Branch] = wt
 	}
+
+	worktrees, _ := git.ListWorktrees(m.projectRoot)
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
 	var wtStates []state.WorktreeState
-	for branch, srv := range m.servers {
-		p := port.Assign(branch, m.cfg.Project.PortRange.Min, m.cfg.Project.PortRange.Max)
-		url := fmt.Sprintf("http://%s.%s:%d", branch, m.cfg.Project.DomainSuffix, p)
-		wt := wtMap[branch]
-		wtStates = append(wtStates, state.WorktreeState{
-			Branch:  branch,
-			Path:    wt.Path,
-			Port:    p,
-			URL:     url,
-			PID:     srv.PID(),
-			Status:  state.StatusRunning,
-			LogFile: filepath.Join(state.LogFile(m.cfg.Project.Name, branch)),
-		})
+	for _, wt := range worktrees {
+		if wt.Branch == "" {
+			continue
+		}
+		p := port.Assign(wt.Branch, m.cfg.Project.PortRange.Min, m.cfg.Project.PortRange.Max)
+		url := fmt.Sprintf("http://%s.%s:%d", wt.Branch, m.cfg.Project.DomainSuffix, p)
+
+		// Preserve setup status from existing state.
+		setupStatus := state.SetupStatusNone
+		var setupAt time.Time
+		if ex, ok := existingByBranch[wt.Branch]; ok {
+			setupStatus = ex.SetupStatus
+			setupAt = ex.SetupAt
+		}
+
+		wtState := state.WorktreeState{
+			Branch:      wt.Branch,
+			Path:        wt.Path,
+			Port:        p,
+			URL:         url,
+			LogFile:     filepath.Join(state.LogFile(m.cfg.Project.Name, wt.Branch)),
+			SetupStatus: setupStatus,
+			SetupAt:     setupAt,
+		}
+
+		if srv, running := m.servers[wt.Branch]; running {
+			wtState.PID = srv.PID()
+			wtState.Status = state.StatusRunning
+		} else {
+			wtState.Status = state.StatusStopped
+		}
+
+		wtStates = append(wtStates, wtState)
 	}
 
-	s := &state.ProjectState{
+	s := &state.SpinnerState{
 		Project:   m.cfg.Project.Name,
 		Root:      m.projectRoot,
 		DaemonPID: os.Getpid(),
