@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -252,7 +253,7 @@ func (m *Manager) saveState() {
 			continue
 		}
 		p := port.Assign(wt.Branch, m.cfg.Project.PortRange.Min, m.cfg.Project.PortRange.Max)
-		url := fmt.Sprintf("http://%s.%s:%d", wt.Branch, m.cfg.Project.DomainSuffix, p)
+		url := fmt.Sprintf("http://%s.%s:%d", strings.ReplaceAll(wt.Branch, "/", "-"), m.cfg.Project.DomainSuffix, p)
 
 		// Preserve setup status from existing state.
 		setupStatus := state.SetupStatusNone

@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strings"
 
 	"github.com/bmiller/spinner/internal/config"
 	"github.com/bmiller/spinner/internal/git"
@@ -45,7 +46,7 @@ func runOpen(cmd *cobra.Command, args []string) error {
 	}
 
 	p := port.Assign(branch, cfg.Project.PortRange.Min, cfg.Project.PortRange.Max)
-	url := fmt.Sprintf("http://%s.%s:%d", branch, cfg.Project.DomainSuffix, p)
+	url := fmt.Sprintf("http://%s.%s:%d", strings.ReplaceAll(branch, "/", "-"), cfg.Project.DomainSuffix, p)
 
 	fmt.Printf("Opening %s\n", url)
 	return exec.Command("open", url).Run()

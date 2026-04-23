@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -288,6 +289,48 @@ func TestDaemonStopsServerWhenWorktreeRemoved(t *testing.T) {
 
 	// Server should stop.
 	waitHTTPGone(t, serverURL("to-be-removed"), 15*time.Second)
+}
+
+// TestDaemonSlashedBranchURL verifies that slashes in branch names are replaced
+// with hyphens when building the URL stored in state.
+func TestDaemonSlashedBranchURL(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	repoDir := initTestRepo(t)
+	addWorktree(t, repoDir, "feature/slash")
+
+	cfg := makeProjectConfig("proj-slash")
+	if err := config.SaveProject(repoDir, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	startDaemon(t, repoDir, cfg)
+
+	// Wait for the server to start so state has been written.
+	waitForHTTP(t, serverURL("feature/slash"), 10*time.Second)
+
+	s, err := state.Load("proj-slash")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var found *state.WorktreeState
+	for i := range s.Worktrees {
+		if s.Worktrees[i].Branch == "feature/slash" {
+			found = &s.Worktrees[i]
+			break
+		}
+	}
+	if found == nil {
+		t.Fatal("feature/slash not found in state")
+	}
+	if strings.Contains(found.URL, "feature/slash") {
+		t.Errorf("URL %q contains raw slash — want hyphen-separated subdomain", found.URL)
+	}
+	if !strings.Contains(found.URL, "feature-slash") {
+		t.Errorf("URL %q does not contain expected subdomain feature-slash", found.URL)
+	}
 }
 
 // TestPortAssignmentIsStable verifies the same branch always gets the same port
