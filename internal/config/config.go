@@ -117,11 +117,16 @@ func SaveProject(dir string, cfg *ProjectConfig) error {
 	return toml.NewEncoder(f).Encode(cfg)
 }
 
-// ExpandEnv substitutes {branch} in env values.
+// ExpandEnv substitutes {branch} and {branch-slug} in env values.
+// {branch} is the raw branch name; {branch-slug} has slashes replaced with hyphens
+// so it is safe to use in hostnames and other URL components.
 func ExpandEnv(env map[string]string, branch string) map[string]string {
+	slug := strings.ReplaceAll(branch, "/", "-")
 	result := make(map[string]string, len(env))
 	for k, v := range env {
-		result[k] = strings.ReplaceAll(v, "{branch}", branch)
+		v = strings.ReplaceAll(v, "{branch}", branch)
+		v = strings.ReplaceAll(v, "{branch-slug}", slug)
+		result[k] = v
 	}
 	return result
 }

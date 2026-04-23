@@ -26,6 +26,22 @@ func TestExpandEnv(t *testing.T) {
 	}
 }
 
+func TestExpandEnvBranchSlug(t *testing.T) {
+	env := map[string]string{
+		"PHX_HOST": "{branch-slug}.sheetwork",
+		"RAW":      "{branch}",
+	}
+
+	got := ExpandEnv(env, "feature/my-thing")
+
+	if got["PHX_HOST"] != "feature-my-thing.sheetwork" {
+		t.Errorf("PHX_HOST = %q, want %q", got["PHX_HOST"], "feature-my-thing.sheetwork")
+	}
+	if got["RAW"] != "feature/my-thing" {
+		t.Errorf("RAW = %q, want %q", got["RAW"], "feature/my-thing")
+	}
+}
+
 func TestExpandEnvDoesNotMutateOriginal(t *testing.T) {
 	env := map[string]string{"KEY": "{branch}"}
 	ExpandEnv(env, "mybranch")

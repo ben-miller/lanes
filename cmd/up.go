@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 
 	"github.com/bmiller/spinner/internal/config"
@@ -161,7 +162,7 @@ func printURLTable(cfg *config.ProjectConfig, worktrees []git.Worktree) {
 		p := port.Assign(wt.Branch, cfg.Project.PortRange.Min, cfg.Project.PortRange.Max)
 		var url string
 		if dnsOK {
-			url = fmt.Sprintf("http://%s.%s:%d", wt.Branch, cfg.Project.DomainSuffix, p)
+			url = fmt.Sprintf("http://%s.%s:%d", strings.ReplaceAll(wt.Branch, "/", "-"), cfg.Project.DomainSuffix, p)
 		} else {
 			url = fmt.Sprintf("http://localhost:%d  (.test DNS not configured)", p)
 		}
