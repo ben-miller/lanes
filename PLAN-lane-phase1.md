@@ -3,61 +3,65 @@
 ## Naming
 
 - **Lanes** — the overall project
-- **`lane`** — the CLI command (Go binary)
-- **Lane Driver** — the Phoenix/LiveView application (separate repo)
-- **`lane drive`** — CLI subcommand that starts/manages the Lane Driver server
+- **`lane`** — the CLI command (Rust binary)
+- **Lane Driver** — the daemon component (Rust, axum + tokio)
+- **`lane daemon`** — CLI subcommand that starts the Lane Driver daemon
 
 ## Architecture
 
-Two components:
+Two components, one binary:
 
-**Lane Driver** — Phoenix/LiveView application. The central brain. Runs as a
-local daemon (LaunchAgent). Owns all lane state, handles attention events,
-serves a LiveView dashboard, exposes an HTTP API.
+**Lane Driver** — Rust axum/tokio daemon. The central brain. Runs as a local
+process. Owns all lane state, handles attention events, exposes an HTTP API,
+pushes updates via SSE.
 
-**`lane`** — Go CLI. Thin client. Calls the Lane Driver API for state/decisions,
-then executes local shell operations (Zellij, Firefox) based on the response.
+**`lane`** — Rust CLI. Thin client. Calls the Lane Driver API for state/decisions,
+then executes local shell operations (Zellij, WezTerm) based on the response.
 Hammerspoon calls this; users call this; Claude Code hooks call this.
 
 The CLI does the desktop manipulation. Lane Driver does the thinking.
 
+**Start here: PLAN-poc.md** — before building phase 1, the PoC verifies the
+critical feasibility assumptions (Zellij env vars in Claude Code hooks, remote
+pane focusing). Phase 1 begins after the PoC succeeds.
+
 ## Repo structure
 
-The `lane` CLI binary lives alongside `spinner` in this repo:
-
 ```
-cmd/
-  spinner/
-    main.go         ← current main.go moved here
-  lane/
-    main.go         ← new
-Makefile            ← builds both binaries
+lanes/
+  lane/             ← Rust project (cargo workspace or standalone crate)
+    src/
+      main.rs
+      cli/
+      daemon/
+      registry.rs
+    Cargo.toml
+  spinner/          ← Go project, unchanged
+  PLAN-*.md
 ```
 
-Lane Driver is a separate repo (not yet created). For now, planning only.
+Lane Driver is the daemon component inside the `lane` crate, not a separate repo.
 
-## Lane Driver (Phoenix app)
+## Lane Driver (Rust daemon)
 
 Responsibilities:
-- Lane registry (which lanes exist, their config)
+- Lane registry (which lanes exist, their config — read from `~/.config/lanes/registry.toml`)
 - Active lane state
-- Attention state per lane (which lanes need the user)
+- Attention queue (which lanes need the user, in FIFO order)
 - HTTP API consumed by the `lane` CLI and Claude Code hooks
-- LiveView dashboard
-- PubSub — pushes state changes to connected clients
+- SSE endpoint for real-time push to Hammerspoon overlay
 
 ### Lane state (per lane)
 
-```elixir
-%Lane{
-  id: uuid,
-  name: "sheetwork-feature",
-  path: "/Users/bmiller/src/...",
-  zellij_session: "sheetwork-feature",
-  firefox_container: "sheetwork-feature",
-  urls: ["http://localhost:4000"],
-  attention: false,
-  last_active: ~U[...]
+```rust
+struct Lane {
+    id: Uuid,
+    name: String,
+    zellij_session: String,
+    attention: bool,
+    pane_id: Option<u32>,        // set when Claude Code signals
+    last_signaled_at: Option<DateTime<Utc>>,
+    last_active_at: Option<DateTime<Utc>>,
 }
 ```
 
@@ -77,66 +81,67 @@ PUT  /api/lanes/:id/active   set as active lane
 Each lane is its own GenServer for isolated lifecycle and state. Supervised
 under a DynamicSupervisor. Clean OTP model, extensible to async events per lane.
 
-## Go CLI (`lane`)
+## Rust CLI (`lane`)
 
-Thin client — one HTTP call to Phoenix, then local shell operations.
+Thin client — one HTTP call to daemon, then local shell operations.
 
 ### Commands
 
 ```
+lane daemon                 Start the Lane Driver daemon
 lane init                   Register current dir as a lane (POST /api/lanes)
 lane list                   List all lanes (GET /api/lanes)
-lane status                 Show all lanes with state
+lane status                 Show attention queue and lane states
 lane switch <name>          Activate a specific lane
-lane next                   Activate next lane (GET /api/lanes/next → switch)
-lane prev                   Activate previous lane (GET /api/lanes/prev → switch)
+lane next                   Activate next lane in attention queue
+lane prev                   Activate previous lane
 lane signal                 Mark current lane as needing attention (for hooks)
 lane forget                 Unregister current lane
-lane drive                  Start the Lane Driver server
 ```
 
 ### Activating a lane
 
-`lane switch` (and `lane next`/`lane prev`, which resolve via Phoenix then switch):
+`lane next` (and `lane switch`, `lane prev`):
 
-1. Ask Phoenix: `GET /api/lanes/next` → get lane config (session name, URLs, etc.)
-2. **Zellij**: `zellij attach --create <session>` — attaches if exists, creates if not
-3. **Firefox**: for each URL: `open 'ext+container:name=<container>&url=<url>'`
-4. Tell Phoenix: `PUT /api/lanes/:id/active`
+1. GET `/api/lanes/next` → get `{ session_name, pane_id }`
+2. **WezTerm**: `wezterm cli list` → find tab by title → `wezterm cli activate-tab --tab-id <id>`
+3. **Zellij**: `zellij --session <session_name> action focus-pane <pane_id>`
+4. PUT `/api/lanes/:id/active` → daemon clears attention for that lane
 
 ## Lane config
 
-`lane init` drops a `.lane/lane.toml` in the current directory:
+Registry lives at `~/.config/lanes/registry.toml` (already used by `infra lanes up`):
 
 ```toml
-[lane]
-name = "sheetwork-feature"
+[[lanes]]
+name = "sheetwork"
+zellij_session = "sheetwork"
+position = 0
 
-[zellij]
-session = "sheetwork-feature"   # defaults to lane name
-
-[firefox]
-container = "sheetwork-feature" # defaults to lane name
-urls = ["http://localhost:4000"]
+[[lanes]]
+name = "lanes dev"
+zellij_session = "lanes"
+position = 1
 ```
 
-Presence of a section = that integration is active. No explicit integration list.
+Per-directory `.lane/lane.toml` may be added later for richer config. For now the
+global registry is the source of truth.
 
-## Integration interface (Go CLI side)
+## Integration interface (Rust CLI side)
 
-Each integration implements:
+Each integration implements a trait — defined from the start even though only
+Zellij is implemented in phase 1:
 
-```go
-type Integration interface {
-    Activate(cfg LaneConfig) error
-    Deactivate(cfg LaneConfig) error
-    Status(cfg LaneConfig) (string, error)
+```rust
+trait Integration {
+    fn activate(&self, lane: &Lane) -> Result<()>;
+    fn deactivate(&self, lane: &Lane) -> Result<()>;
+    fn status(&self, lane: &Lane) -> Result<String>;
 }
 ```
 
-`lane switch` iterates registered integrations and calls `Activate`. Adding a
-new integration (WezTerm, Obsidian, etc.) = implement the interface + add a
-config section. No changes to core logic.
+`lane switch` iterates registered integrations and calls `activate`. Adding a new
+integration = implement the trait + wire up in config. No changes to core logic.
 
 ## Claude Code hook (phase 1)
 
@@ -184,8 +189,9 @@ Container is created on first use. No pre-registration needed.
 
 ## What this is NOT (phase 1)
 
-- No multi-server support (Spinner integration deferred)
-- No WezTerm workspace switching (Zellij handles it)
-- No attention-priority carousel logic (just round-robin next/prev for now)
+- No Firefox integration (deferred post-PoC)
+- No Spinner integration
+- No attention-priority ordering (FIFO queue only)
 - No cloud hosting, no multi-device, no identity
-- No Hammerspoon window raising beyond Zellij session switching
+- No Hammerspoon window raising beyond WezTerm tab + Zellij pane switching
+- No per-directory `.lane/lane.toml` (global registry only)

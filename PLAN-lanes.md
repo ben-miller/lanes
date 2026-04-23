@@ -85,18 +85,22 @@ shared library repo in SourceTree).
 ### Spinner stays a pure Go CLI
 
 Spinner remains what it is — a Go process manager for git worktrees and dev
-servers. No Phoenix ambitions there. Lanes is the Phoenix app, completely
-standalone. Spinner becomes one of the plugins Lanes integrates with.
+servers. No Rust ambitions there (for now). Lanes is entirely separate.
+Spinner becomes one of the plugins Lanes integrates with.
 
-### Phoenix/LiveView as the central brain
+### Rust/axum as the central brain
 
-The core logic lives in a Phoenix application. Reasoning:
-- The BEAM is a natural fit for managing many independent stateful contexts
-  receiving async events with real-time push to multiple clients
-- Each lane is its own GenServer
-- All ordering, state, and attention logic lives on the server
-- The Phoenix app is initially `localhost:PORT`, but is deployable to the cloud
-  without rearchitecting — you're just adding a transport layer
+The core logic lives in a Rust daemon (`lane daemon`). Tech stack:
+- **axum + tokio** for the HTTP API and async event handling
+- **SQLite via sqlx** for persistence
+- Per-lane state held in a shared in-memory structure (Arc<RwLock<...>>)
+- Server-Sent Events (SSE) for real-time push to connected clients (dashboard, Hammerspoon)
+- Single binary — `lane` serves as both CLI and daemon
+
+Rust was chosen over Elixir/Phoenix for this use case because:
+- Single-user local daemon — BEAM's distribution/hot-reload/clustering benefits don't apply
+- Strong static typing catches lane state transition errors the compiler doesn't allow
+- No runtime dependency; single binary deploys trivially
 
 ### Hammerspoon as a plugin (not baked-in)
 
@@ -111,11 +115,13 @@ other. The server doesn't know or care how clients act on its instructions.
 
 ### Status UI
 
-A LiveView page showing:
+A Hammerspoon overlay (v1) and/or a terminal `lane status` command showing:
 - All lanes
 - Attention state per lane
 - Which Claude sessions are idle vs running
 - Which lanes are ready for your attention
+
+A web dashboard (served via SSE from the daemon) is planned but deferred.
 
 ## Plugin architecture
 
