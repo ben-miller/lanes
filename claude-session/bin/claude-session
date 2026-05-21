@@ -1,0 +1,72 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
+REGISTRY_DIR="$HOME/.claude/active-sessions"
+
+usage() {
+    echo "Usage: claude-session sessions {list|get <id>|switch <id>}" >&2
+    exit 1
+}
+
+sessions_list() {
+    local files
+    files=("$REGISTRY_DIR"/*.json)
+    if [[ ! -e "${files[0]}" ]]; then
+        echo "[]"
+        return
+    fi
+    jq -s '.' "${files[@]}"
+}
+
+sessions_get() {
+    local id="${1:-}"
+    [[ -n "$id" ]] || usage
+    local file="$REGISTRY_DIR/${id}.json"
+    if [[ ! -f "$file" ]]; then
+        echo "error: session not found: $id" >&2
+        exit 1
+    fi
+    cat "$file"
+}
+
+sessions_switch() {
+    local id="${1:-}"
+    [[ -n "$id" ]] || usage
+    local file="$REGISTRY_DIR/${id}.json"
+    if [[ ! -f "$file" ]]; then
+        echo "error: session not found: $id" >&2
+        exit 1
+    fi
+
+    local session zellij_session wezterm_tab_id zellij_pane_id
+    session=$(cat "$file")
+    zellij_session=$(echo "$session" | jq -r '.zellij_session')
+    wezterm_tab_id=$(echo "$session" | jq -r '.wezterm_tab_id')
+    zellij_pane_id=$(echo "$session" | jq -r '.zellij_pane_id')
+
+    # Find live WezTerm socket
+    local socket
+    socket=$(ls "$HOME/.local/share/wezterm/gui-sock-"* 2>/dev/null | sort -t- -k3 -n | tail -1 || true)
+
+    if [[ -n "${socket:-}" && "$wezterm_tab_id" != "null" ]]; then
+        WEZTERM_UNIX_SOCKET="$socket" wezterm cli activate-tab --tab-id "$wezterm_tab_id"
+    fi
+
+    if [[ "$zellij_session" != "null" && "$zellij_pane_id" != "null" ]]; then
+        zellij --session "$zellij_session" action focus-pane-with-id "$zellij_pane_id"
+    fi
+}
+
+resource="${1:-}"
+operation="${2:-}"
+[[ -n "$resource" && -n "$operation" ]] || usage
+shift 2
+
+case "$resource/$operation" in
+    sessions/list)   sessions_list "$@" ;;
+    sessions/get)    sessions_get "$@" ;;
+    sessions/switch) sessions_switch "$@" ;;
+    *)               usage ;;
+esac
