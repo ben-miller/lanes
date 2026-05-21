@@ -38,5 +38,6 @@ jq -n \
         zellij_pane_id: $zellij_pane_id,
         wezterm_tab_id: $wezterm_tab_id,
         cwd: $cwd,
-        started_at: $started_at
+        started_at: $started_at,
+        state: "idle"
     }' > "$REGISTRY_DIR/$SESSION_ID.json"
