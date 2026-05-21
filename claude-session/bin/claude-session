@@ -5,8 +5,10 @@ export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
 
 REGISTRY_DIR="$HOME/.claude/active-sessions"
 
+CURSOR_FILE="$REGISTRY_DIR/.cursor"
+
 usage() {
-    echo "Usage: claude-session sessions {list|get <id>|switch <id>}" >&2
+    echo "Usage: claude-session sessions {list|get <id>|switch <id>|next|prev}" >&2
     exit 1
 }
 
@@ -51,6 +53,35 @@ sessions_get() {
     cat "$file"
 }
 
+sorted_session_ids() {
+    local files
+    files=("$REGISTRY_DIR"/*.json)
+    if [[ ! -e "${files[0]}" ]]; then return; fi
+    jq -r '.claude_session_name + " " + .session_id' "${files[@]}" | sort | awk '{print $2}'
+}
+
+sessions_cycle() {
+    local direction="$1"
+    local ids=()
+    while IFS= read -r id; do ids+=("$id"); done < <(sorted_session_ids)
+    [[ ${#ids[@]} -eq 0 ]] && return
+
+    local cursor="" current_index=-1
+    [[ -f "$CURSOR_FILE" ]] && cursor=$(cat "$CURSOR_FILE")
+
+    for i in "${!ids[@]}"; do
+        if [[ "${ids[$i]}" == "$cursor" ]]; then
+            current_index=$i
+            break
+        fi
+    done
+
+    local next_index=$(( (current_index + direction + ${#ids[@]}) % ${#ids[@]} ))
+    local target="${ids[$next_index]}"
+    echo "$target" > "$CURSOR_FILE"
+    sessions_switch "$target"
+}
+
 sessions_switch() {
     local id="${1:-}"
     [[ -n "$id" ]] || usage
@@ -59,6 +90,8 @@ sessions_switch() {
         echo "error: session not found: $id" >&2
         exit 1
     fi
+
+    echo "$id" > "$CURSOR_FILE"
 
     local session zellij_session wezterm_tab_id zellij_pane_id
     session=$(cat "$file")
@@ -75,7 +108,7 @@ sessions_switch() {
     fi
 
     if [[ "$zellij_session" != "null" && "$zellij_pane_id" != "null" ]]; then
-        zellij --session "$zellij_session" action focus-pane-with-id "$zellij_pane_id"
+        zellij --session "$zellij_session" action focus-pane-id "$zellij_pane_id" || true
     fi
 }
 
@@ -88,5 +121,7 @@ case "$resource/$operation" in
     sessions/list)   sessions_list "$@" ;;
     sessions/get)    sessions_get "$@" ;;
     sessions/switch) sessions_switch "$@" ;;
+    sessions/next)   sessions_cycle 1 ;;
+    sessions/prev)   sessions_cycle -1 ;;
     *)               usage ;;
 esac
