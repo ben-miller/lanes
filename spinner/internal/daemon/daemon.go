@@ -26,6 +26,7 @@ type Manager struct {
 	mu          sync.Mutex
 	servers     map[string]*process.Server // branch -> server
 	stop        chan struct{}
+	dead        chan string // receives branch name when its server exits unexpectedly
 }
 
 func New(projectRoot string, cfg *config.ProjectConfig) *Manager {
@@ -34,6 +35,7 @@ func New(projectRoot string, cfg *config.ProjectConfig) *Manager {
 		projectRoot: projectRoot,
 		servers:     make(map[string]*process.Server),
 		stop:        make(chan struct{}),
+		dead:        make(chan string, 8),
 	}
 }
 
@@ -85,6 +87,8 @@ func (m *Manager) Run() error {
 			return nil
 		case ev := <-events:
 			m.handleWatchEvent(ev)
+		case branch := <-m.dead:
+			m.handleServerDead(branch)
 		case <-ticker.C:
 			m.saveState()
 		}
@@ -131,6 +135,20 @@ func (m *Manager) startWorktree(wt git.Worktree) error {
 	m.mu.Lock()
 	m.servers[wt.Branch] = srv
 	m.mu.Unlock()
+
+	// Notify the main loop when the process exits.
+	branch := wt.Branch
+	go func() {
+		select {
+		case <-srv.Done():
+		case <-m.stop:
+			return
+		}
+		select {
+		case m.dead <- branch:
+		case <-m.stop:
+		}
+	}()
 
 	return nil
 }
@@ -211,6 +229,39 @@ func (m *Manager) handleWatchEvent(ev watcher.Event) {
 		}
 	}
 	m.saveState()
+}
+
+func (m *Manager) handleServerDead(branch string) {
+	m.mu.Lock()
+	delete(m.servers, branch)
+	m.mu.Unlock()
+	m.saveState()
+
+	log.Printf("spinner: server for %s exited, restarting in 1s...", branch)
+
+	go func() {
+		select {
+		case <-time.After(time.Second):
+		case <-m.stop:
+			return
+		}
+		worktrees, err := git.ListWorktrees(m.projectRoot)
+		if err != nil {
+			log.Printf("spinner: listing worktrees for restart of %s: %v", branch, err)
+			return
+		}
+		for _, wt := range worktrees {
+			if wt.Branch == branch {
+				if err := m.startWorktree(wt); err != nil {
+					log.Printf("spinner: failed to restart %s: %v", branch, err)
+					return
+				}
+				m.saveState()
+				log.Printf("spinner: restarted %s", branch)
+				return
+			}
+		}
+	}()
 }
 
 func (m *Manager) shutdown() {

@@ -78,6 +78,28 @@ func (s *Server) PID() int {
 	return s.cmd.Process.Pid
 }
 
+// Done returns a channel that is closed when the process exits.
+func (s *Server) Done() <-chan struct{} {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.done
+}
+
+// IsAlive reports whether the managed process is currently running.
+func (s *Server) IsAlive() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.done == nil {
+		return false
+	}
+	select {
+	case <-s.done:
+		return false
+	default:
+		return true
+	}
+}
+
 // Stop sends SIGTERM to the process and waits for it to exit.
 func (s *Server) Stop() error {
 	s.mu.Lock()
