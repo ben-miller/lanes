@@ -10,6 +10,16 @@ usage() {
     exit 1
 }
 
+ai_title_for() {
+    local cwd="$1" session_id="$2"
+    local project_dir transcript
+    project_dir=$(echo "$cwd" | tr '/' '-')
+    transcript="$HOME/.claude/projects/${project_dir}/${session_id}.jsonl"
+    if [[ -f "$transcript" ]]; then
+        grep -o '"aiTitle":"[^"]*"' "$transcript" | tail -1 | sed 's/"aiTitle":"//;s/"$//' || true
+    fi
+}
+
 sessions_list() {
     local files
     files=("$REGISTRY_DIR"/*.json)
@@ -17,7 +27,17 @@ sessions_list() {
         echo "[]"
         return
     fi
-    jq -s '.' "${files[@]}"
+    local result="[]"
+    for f in "${files[@]}"; do
+        local session cwd session_id title enriched
+        session=$(cat "$f")
+        cwd=$(echo "$session" | jq -r '.cwd')
+        session_id=$(echo "$session" | jq -r '.session_id')
+        title=$(ai_title_for "$cwd" "$session_id")
+        enriched=$(echo "$session" | jq --arg t "$title" '. + {ai_title: $t}')
+        result=$(echo "$result" | jq --argjson s "$enriched" '. + [$s]')
+    done
+    echo "$result"
 }
 
 sessions_get() {
