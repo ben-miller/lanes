@@ -193,6 +193,8 @@ func usage() {
 }
 
 func main() {
+	os.Setenv("PATH", "/opt/homebrew/bin:/usr/local/bin:"+os.Getenv("PATH"))
+
 	if len(os.Args) < 3 || os.Args[1] != "sessions" {
 		usage()
 	}
