@@ -105,7 +105,8 @@ fn activate_window(path: &str, zone: &str, cfg: &Config, _lane: &Lane) {
            if sc:getUUID()=='{uuid}' then s=sc; break end \
          end; \
          if s then \
-           local a=hs.application.get('{bundle}'); \
+           local apps=hs.application.applicationsForBundleID('{bundle}'); \
+           local a=apps and apps[1]; \
            if a then \
              local w=a:mainWindow(); \
              if w then \
@@ -122,9 +123,12 @@ fn activate_window(path: &str, zone: &str, cfg: &Config, _lane: &Lane) {
         h = rect.h,
     );
 
-    let result = Command::new("hs").args(["-c", &lua]).output();
-    if let Err(e) = result {
-        eprintln!("warning: hs call failed for '{}': {}", bundle_id, e);
+    match Command::new("hs").args(["-c", &lua]).output() {
+        Err(e) => eprintln!("warning: hs call failed for '{}': {}", bundle_id, e),
+        Ok(o) if !o.status.success() => {
+            eprintln!("warning: hs returned error for '{}':\n{}", bundle_id, String::from_utf8_lossy(&o.stderr));
+        }
+        _ => {}
     }
 }
 
