@@ -166,7 +166,7 @@ fn check_lanes_registry() -> Check {
                 .filter(|e| {
                     let name = e.file_name();
                     let s = name.to_string_lossy();
-                    s.ends_with(".toml") && s != "config.toml" && s != "monitors.toml"
+                    s.ends_with(".toml") && s != "config.toml"
                 })
                 .count();
             Check {
