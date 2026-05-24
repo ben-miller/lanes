@@ -11,8 +11,8 @@ fn execute_action(action: lanes::model::SignalAction) -> Result<(), String> {
         lanes::model::SignalAction::FocusRepoPane { session, path } => {
             lanes::navigate_to_repo_pane(&session, &path)
         }
-        lanes::model::SignalAction::SwitchClaudeSession { session_id: _ } => {
-            Err("SwitchClaudeSession not yet implemented".to_string())
+        lanes::model::SignalAction::SwitchClaudeSession { session_id } => {
+            lanes::switch_claude_session(&session_id)
         }
     }
 }

@@ -162,6 +162,45 @@ fn git_signals(path: &str, session: Option<&str>) -> Vec<model::Signal> {
     }
 }
 
+pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = std::path::PathBuf::from(&home)
+        .join(".claude")
+        .join("active-sessions")
+        .join(format!("{}.json", session_id));
+
+    let data = std::fs::read_to_string(&path)
+        .map_err(|_| format!("session not found: {}", session_id))?;
+    let val: serde_json::Value = serde_json::from_str(&data)
+        .map_err(|e| format!("bad session file: {}", e))?;
+
+    let zellij_session = val["zellij_session"].as_str().unwrap_or("").to_string();
+    let zellij_pane_id = val["zellij_pane_id"].as_u64();
+    let wezterm_tab_id = val["wezterm_tab_id"].as_u64();
+
+    if let Some(tab_id) = wezterm_tab_id {
+        std::process::Command::new("open").args(["-a", "WezTerm"]).output().ok();
+        let sock = wezterm_socket();
+        let mut cmd = std::process::Command::new("/opt/homebrew/bin/wezterm");
+        cmd.args(["cli", "activate-tab", "--tab-id", &tab_id.to_string()]);
+        if let Some(ref s) = sock {
+            cmd.env("WEZTERM_UNIX_SOCKET", s);
+        }
+        cmd.output().map_err(|e| format!("wezterm activate-tab: {}", e))?;
+    }
+
+    if !zellij_session.is_empty() {
+        if let Some(pane_id) = zellij_pane_id {
+            std::process::Command::new("/opt/homebrew/bin/zellij")
+                .args(["--session", &zellij_session, "action", "focus-pane-id", &pane_id.to_string()])
+                .output()
+                .map_err(|e| format!("zellij focus-pane-id: {}", e))?;
+        }
+    }
+
+    Ok(())
+}
+
 pub fn navigate_to_repo_pane(session: &str, path: &str) -> Result<(), String> {
     // Look up display name from config for WezTerm tab matching
     let cfg = config::Config::load();
