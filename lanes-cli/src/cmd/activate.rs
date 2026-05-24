@@ -123,7 +123,7 @@ fn activate_window(path: &str, zone: &str, cfg: &Config, _lane: &Lane) {
         h = rect.h,
     );
 
-    match Command::new("hs").args(["-c", &lua]).output() {
+    match Command::new("/opt/homebrew/bin/hs").args(["-c", &lua]).output() {
         Err(e) => eprintln!("warning: hs call failed for '{}': {}", bundle_id, e),
         Ok(o) if !o.status.success() => {
             eprintln!("warning: hs returned error for '{}':\n{}", bundle_id, String::from_utf8_lossy(&o.stderr));
