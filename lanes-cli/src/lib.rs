@@ -26,6 +26,8 @@ pub fn gather() -> Snapshot {
 }
 
 fn correlate(resources: &mut Vec<Observed>, cfg: &config::Config) {
+    let lane_names = cfg.zellij_lane_names();
+
     let zellij_cwds: std::collections::HashMap<String, String> = resources
         .iter()
         .filter_map(|r| {
@@ -56,7 +58,7 @@ fn correlate(resources: &mut Vec<Observed>, cfg: &config::Config) {
                     extra.insert("zellij_cwd_match".to_string(), serde_json::json!(true));
                 }
             }
-            if let Some(lane) = cfg.lane_names.get(&zs) {
+            if let Some(lane) = lane_names.get(&zs) {
                 extra.insert("lane".to_string(), serde_json::json!(lane));
             }
         }
@@ -65,7 +67,7 @@ fn correlate(resources: &mut Vec<Observed>, cfg: &config::Config) {
     for resource in resources.iter_mut() {
         if let model::Selector::Terminal(sel) = &resource.selector {
             if sel.driver == "zellij" {
-                if let Some(lane) = cfg.lane_names.get(&sel.id) {
+                if let Some(lane) = lane_names.get(&sel.id) {
                     if let Some(extra) = resource.extra.as_object_mut() {
                         extra.insert("lane".to_string(), serde_json::json!(lane));
                     }

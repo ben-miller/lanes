@@ -1,21 +1,22 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
+use serde::Deserialize;
+
+use crate::model::{Facet, Lane};
+
 pub struct Config {
     /// Drivers to run. None means all drivers.
     pub drivers: Option<Vec<String>>,
-    /// zellij_session -> lane_name
-    pub lane_names: HashMap<String, String>,
+    /// Discovered lane definitions.
+    pub lanes: Vec<Lane>,
 }
 
 impl Config {
     pub fn load() -> Self {
-        let path = registry_path();
-        let content = match std::fs::read_to_string(&path) {
-            Ok(s) => s,
-            Err(_) => return Self::default(),
-        };
-        parse(&content)
+        let drivers = load_global_config();
+        let lanes = load_lanes();
+        Self { drivers, lanes }
     }
 
     pub fn driver_enabled(&self, name: &str) -> bool {
@@ -24,117 +25,101 @@ impl Config {
             Some(list) => list.iter().any(|d| d == name),
         }
     }
+
+    /// Returns a map of zellij session name -> lane display name,
+    /// derived from Terminal facets across all lanes.
+    pub fn zellij_lane_names(&self) -> HashMap<String, String> {
+        self.lanes
+            .iter()
+            .filter_map(|lane| {
+                lane.terminal_session()
+                    .map(|s| (s.to_string(), lane.display_name().to_string()))
+            })
+            .collect()
+    }
 }
 
 impl Default for Config {
     fn default() -> Self {
         Self {
             drivers: None,
-            lane_names: HashMap::new(),
+            lanes: Vec::new(),
         }
     }
 }
 
-pub fn registry_path() -> PathBuf {
+pub fn config_dir() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home)
-        .join(".config")
-        .join("lanes")
-        .join("registry.toml")
+    PathBuf::from(home).join(".config").join("lanes")
 }
 
-fn parse(content: &str) -> Config {
-    let mut drivers: Option<Vec<String>> = None;
-    let mut lane_names: HashMap<String, String> = HashMap::new();
-    let mut current_name: Option<String> = None;
-    let mut current_zellij: Option<String> = None;
+// --- Deserialization helpers ---
 
-    for line in content.lines() {
-        let line = line.trim();
-
-        if line == "[[lanes]]" {
-            if let (Some(name), Some(zs)) = (current_name.take(), current_zellij.take()) {
-                lane_names.insert(zs, name);
-            }
-            continue;
-        }
-
-        if line.starts_with("drivers = [") {
-            drivers = Some(parse_string_array(line));
-            continue;
-        }
-
-        if let Some(val) = toml_str_value(line, "name") {
-            current_name = Some(val);
-        } else if let Some(val) = toml_str_value(line, "zellij_session") {
-            current_zellij = Some(val);
-        }
-    }
-
-    if let (Some(name), Some(zs)) = (current_name, current_zellij) {
-        lane_names.insert(zs, name);
-    }
-
-    Config {
-        drivers,
-        lane_names,
-    }
+#[derive(Deserialize)]
+struct GlobalConfig {
+    #[serde(default)]
+    drivers: Option<Vec<String>>,
 }
 
-// Parse `drivers = ["a", "b", "c"]` -> vec!["a", "b", "c"]
-fn parse_string_array(line: &str) -> Vec<String> {
-    let start = match line.find('[') {
-        Some(i) => i + 1,
-        None => return vec![],
+#[derive(Deserialize)]
+struct LaneFile {
+    lane: LaneHeader,
+    #[serde(default)]
+    facets: Vec<Facet>,
+}
+
+#[derive(Deserialize)]
+struct LaneHeader {
+    id: String,
+    name: Option<String>,
+}
+
+// --- Loaders ---
+
+fn load_global_config() -> Option<Vec<String>> {
+    let path = config_dir().join("config.toml");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let cfg: GlobalConfig = toml::from_str(&content).ok()?;
+    cfg.drivers
+}
+
+fn load_lanes() -> Vec<Lane> {
+    let dir = config_dir();
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return Vec::new(),
     };
-    let end = match line.find(']') {
-        Some(i) => i,
-        None => return vec![],
-    };
-    line[start..end]
-        .split(',')
-        .filter_map(|s| {
-            let s = s.trim().trim_matches('"');
-            if s.is_empty() {
-                None
-            } else {
-                Some(s.to_string())
-            }
+
+    let mut lanes: Vec<Lane> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| {
+            let name = e.file_name();
+            let s = name.to_string_lossy();
+            s.ends_with(".toml") && s != "config.toml"
         })
-        .collect()
-}
+        .filter_map(|e| {
+            let content = std::fs::read_to_string(e.path()).ok()?;
+            let file: LaneFile = toml::from_str(&content).ok()?;
+            Some(Lane {
+                id: file.lane.id,
+                name: file.lane.name,
+                facets: file.facets,
+            })
+        })
+        .collect();
 
-fn toml_str_value(line: &str, key: &str) -> Option<String> {
-    let prefix = format!("{} = \"", key);
-    if !line.starts_with(&prefix) {
-        return None;
-    }
-    let rest = &line[prefix.len()..];
-    let end = rest.find('"')?;
-    Some(rest[..end].to_string())
+    lanes.sort_by(|a, b| a.id.cmp(&b.id));
+    lanes
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const REGISTRY: &str = r#"
-drivers = ["zellij", "claude"]
-
-[[lanes]]
-name = "sheetwork"
-zellij_session = "sheetwork"
-position = 0
-
-[[lanes]]
-name = "lanes dev"
-zellij_session = "lanes"
-position = 1
-"#;
-
     #[test]
-    fn parses_drivers_list() {
-        let cfg = parse(REGISTRY);
+    fn parses_global_drivers() {
+        let cfg: super::GlobalConfig =
+            toml::from_str(r#"drivers = ["zellij", "claude"]"#).unwrap();
         assert_eq!(
             cfg.drivers,
             Some(vec!["zellij".to_string(), "claude".to_string()])
@@ -142,21 +127,50 @@ position = 1
     }
 
     #[test]
-    fn parses_lane_names() {
-        let cfg = parse(REGISTRY);
-        assert_eq!(
-            cfg.lane_names.get("sheetwork").map(|s| s.as_str()),
-            Some("sheetwork")
-        );
-        assert_eq!(
-            cfg.lane_names.get("lanes").map(|s| s.as_str()),
-            Some("lanes dev")
-        );
+    fn parses_lane_file_terminal_facet() {
+        let content = r#"
+[lane]
+id = "sheetwork"
+
+[[facets]]
+kind = "terminal"
+session = "sheetwork"
+"#;
+        let file: LaneFile = toml::from_str(content).unwrap();
+        assert_eq!(file.lane.id, "sheetwork");
+        assert_eq!(file.facets.len(), 1);
+        assert!(matches!(&file.facets[0], Facet::Terminal { session } if session == "sheetwork"));
+    }
+
+    #[test]
+    fn parses_lane_file_with_name_and_window_facet() {
+        let content = r#"
+[lane]
+id = "lanes-dev"
+name = "lanes dev"
+
+[[facets]]
+kind = "terminal"
+session = "lanes"
+
+[[facets]]
+kind = "window"
+path = "app:com.jetbrains.intellij / window"
+zone = "main:1-2/3"
+"#;
+        let file: LaneFile = toml::from_str(content).unwrap();
+        assert_eq!(file.lane.id, "lanes-dev");
+        assert_eq!(file.lane.name.as_deref(), Some("lanes dev"));
+        assert_eq!(file.facets.len(), 2);
+        assert!(matches!(&file.facets[1], Facet::Window { path, zone } if path.contains("intellij") && zone == "main:1-2/3"));
     }
 
     #[test]
     fn driver_enabled_with_list() {
-        let cfg = parse(REGISTRY);
+        let cfg = Config {
+            drivers: Some(vec!["zellij".to_string(), "claude".to_string()]),
+            lanes: Vec::new(),
+        };
         assert!(cfg.driver_enabled("zellij"));
         assert!(cfg.driver_enabled("claude"));
         assert!(!cfg.driver_enabled("brotab"));
@@ -164,16 +178,35 @@ position = 1
 
     #[test]
     fn driver_enabled_without_list() {
-        let cfg = parse("[[lanes]]\nname = \"foo\"\nzellij_session = \"foo\"\n");
+        let cfg = Config::default();
         assert!(cfg.driver_enabled("zellij"));
         assert!(cfg.driver_enabled("brotab"));
     }
 
     #[test]
-    fn missing_file_gives_default() {
-        let cfg = Config::default();
-        assert!(cfg.drivers.is_none());
-        assert!(cfg.lane_names.is_empty());
-        assert!(cfg.driver_enabled("anything"));
+    fn zellij_lane_names_derived_from_facets() {
+        use crate::model::Facet;
+        let cfg = Config {
+            drivers: None,
+            lanes: vec![
+                Lane {
+                    id: "sheetwork".to_string(),
+                    name: None,
+                    facets: vec![Facet::Terminal {
+                        session: "sheetwork".to_string(),
+                    }],
+                },
+                Lane {
+                    id: "lanes-dev".to_string(),
+                    name: Some("lanes dev".to_string()),
+                    facets: vec![Facet::Terminal {
+                        session: "lanes".to_string(),
+                    }],
+                },
+            ],
+        };
+        let names = cfg.zellij_lane_names();
+        assert_eq!(names.get("sheetwork").map(|s| s.as_str()), Some("sheetwork"));
+        assert_eq!(names.get("lanes").map(|s| s.as_str()), Some("lanes dev"));
     }
 }

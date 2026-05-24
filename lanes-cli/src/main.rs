@@ -21,11 +21,23 @@ enum Command {
         out: Option<String>,
     },
 
+    /// List configured lanes
+    Lanes {
+        #[command(subcommand)]
+        command: LanesCommand,
+    },
+
     /// Manage Claude sessions
     Sessions {
         #[command(subcommand)]
         command: SessionsCommand,
     },
+}
+
+#[derive(Subcommand)]
+enum LanesCommand {
+    /// List all configured lanes and their facets
+    List,
 }
 
 #[derive(Subcommand)]
@@ -42,6 +54,13 @@ fn main() {
 
     match cli.command {
         Command::Doctor => cmd::doctor::run(),
+
+        Command::Lanes { command } => match command {
+            LanesCommand::List => {
+                let cfg = lanes::config::Config::load();
+                cmd::list::run(&cfg.lanes);
+            }
+        },
 
         Command::Snapshot { out } => {
             let snapshot = lanes::gather();

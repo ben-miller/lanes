@@ -1,5 +1,39 @@
 use serde::{Deserialize, Serialize};
 
+// --- Lane config types ---
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Lane {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub facets: Vec<Facet>,
+}
+
+impl Lane {
+    pub fn display_name(&self) -> &str {
+        self.name.as_deref().unwrap_or(&self.id)
+    }
+
+    pub fn terminal_session(&self) -> Option<&str> {
+        self.facets.iter().find_map(|f| {
+            if let Facet::Terminal { session } = f {
+                Some(session.as_str())
+            } else {
+                None
+            }
+        })
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum Facet {
+    Terminal { session: String },
+    Window { path: String, zone: String },
+}
+
 // --- Selectors (durable handles) ---
 
 #[derive(Clone, Serialize, Deserialize)]
