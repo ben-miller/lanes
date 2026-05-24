@@ -77,7 +77,8 @@ struct LaneHeader {
 // --- Loaders ---
 
 fn load_global_config() -> Option<Vec<String>> {
-    let path = config_dir().join("config.toml");
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = PathBuf::from(home).join(".config").join("lanes.toml");
     let content = std::fs::read_to_string(&path).ok()?;
     let cfg: GlobalConfig = toml::from_str(&content).ok()?;
     cfg.drivers
