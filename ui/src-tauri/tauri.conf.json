@@ -13,8 +13,12 @@
     "windows": [
       {
         "title": "Lanes",
-        "width": 800,
-        "height": 600
+        "width": 980,
+        "height": 600,
+        "resizable": false,
+        "titleBarStyle": "Overlay",
+        "theme": "Dark",
+        "acceptFirstMouse": true
       }
     ],
     "security": {

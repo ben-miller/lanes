@@ -64,6 +64,10 @@ fn parse_session_line(line: &str) -> Option<Observed> {
     })
 }
 
+pub fn layout_for_session(session: &str) -> Option<(TerminalShape, Option<String>)> {
+    dump_layout(session)
+}
+
 fn dump_layout(session: &str) -> Option<(TerminalShape, Option<String>)> {
     let output = Command::new("zellij")
         .args(["--session", session, "action", "dump-layout"])
@@ -115,17 +119,16 @@ fn parse_kdl_layout(kdl: &str) -> (TerminalShape, Option<String>) {
             tab_depth = depth;
         }
 
-        // Pane with a command: inside a tab
-        if in_tab && depth > tab_depth {
-            if trimmed.starts_with("pane ") {
-                if let Some(cmd) = kdl_prop(trimmed, "command") {
-                    let focused = trimmed.contains("focus=true");
-                    if let Some(tab) = current_tab.as_mut() {
-                        tab.panes.push(PaneInfo {
-                            command: cmd,
-                            focused,
-                        });
-                    }
+        // Panes inside a tab — skip plugin/borderless UI panes
+        if in_tab && depth > tab_depth && trimmed.starts_with("pane ") {
+            let borderless = trimmed.contains("borderless=true");
+            let is_split = trimmed.contains("split_direction=");
+            if !borderless && !is_split {
+                let cmd = kdl_prop(trimmed, "command");
+                let focused = trimmed.contains("focus=true");
+                let cwd = kdl_prop(trimmed, "cwd");
+                if let Some(tab) = current_tab.as_mut() {
+                    tab.panes.push(PaneInfo { command: cmd, focused, cwd });
                 }
             }
         }
@@ -139,6 +142,19 @@ fn parse_kdl_layout(kdl: &str) -> (TerminalShape, Option<String>) {
                 tabs.push(tab);
             }
             in_tab = false;
+        }
+    }
+
+    // Resolve pane cwds: inherit session cwd if absent, resolve relative paths against it
+    if let Some(ref scwd) = session_cwd {
+        for tab in &mut tabs {
+            for pane in &mut tab.panes {
+                pane.cwd = Some(match &pane.cwd {
+                    None => scwd.clone(),
+                    Some(pcwd) if !pcwd.starts_with('/') => format!("{}/{}", scwd, pcwd),
+                    Some(pcwd) => pcwd.clone(),
+                });
+            }
         }
     }
 
@@ -230,9 +246,41 @@ mod tests {
     #[test]
     fn parses_pane_command() {
         let (shape, _) = parse_kdl_layout(LAYOUT);
-        assert_eq!(shape.tabs[0].panes.len(), 1);
-        assert_eq!(shape.tabs[0].panes[0].command, "claude");
+        assert_eq!(shape.tabs[0].panes.len(), 2);
+        assert_eq!(shape.tabs[0].panes[0].command.as_deref(), Some("claude"));
         assert!(shape.tabs[0].panes[0].focused);
+        assert_eq!(shape.tabs[0].panes[1].command, None);
+    }
+
+    #[test]
+    fn pane_inherits_session_cwd() {
+        let (shape, _) = parse_kdl_layout(LAYOUT);
+        assert_eq!(
+            shape.tabs[0].panes[0].cwd.as_deref(),
+            Some("/Users/bmiller/src/projects/sheetwork")
+        );
+        assert_eq!(
+            shape.tabs[0].panes[1].cwd.as_deref(),
+            Some("/Users/bmiller/src/projects/sheetwork")
+        );
+    }
+
+    #[test]
+    fn pane_resolves_relative_cwd() {
+        let layout = r#"layout {
+    cwd "/Users/bmiller"
+    tab name="Tab #1" focus=true hide_floating_panes=true {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane cwd="src/projects/sheetwork" focus=true
+    }
+}"#;
+        let (shape, _) = parse_kdl_layout(layout);
+        assert_eq!(
+            shape.tabs[0].panes[0].cwd.as_deref(),
+            Some("/Users/bmiller/src/projects/sheetwork")
+        );
     }
 
     #[test]
