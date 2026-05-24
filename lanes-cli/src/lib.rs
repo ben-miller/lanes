@@ -4,6 +4,7 @@ pub mod model;
 pub mod zone;
 
 use model::{Observed, Snapshot};
+use std::collections::HashSet;
 
 pub fn gather() -> Snapshot {
     let cfg = config::Config::load();
@@ -23,6 +24,73 @@ pub fn gather() -> Snapshot {
     Snapshot {
         taken_at: chrono::Utc::now().to_rfc3339(),
         resources,
+    }
+}
+
+pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
+    let running = running_zellij_sessions();
+
+    let lanes = cfg.lanes.iter().map(|lane| {
+        let facets = lane.facets.iter().map(|facet| match facet {
+            model::Facet::Terminal { session } => model::FacetSnapshot::Terminal {
+                session: session.clone(),
+                running: running.contains(session.as_str()),
+            },
+            model::Facet::Window { path, zone } => model::FacetSnapshot::Window {
+                path: path.clone(),
+                zone: zone.clone(),
+            },
+            model::Facet::Repo { path } => {
+                let expanded = expand_tilde(path);
+                let signals = git_signals(&expanded);
+                model::FacetSnapshot::Repo { path: path.clone(), signals }
+            }
+        }).collect();
+
+        model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), facets }
+    }).collect();
+
+    model::LanewiseSnapshot {
+        taken_at: chrono::Utc::now().to_rfc3339(),
+        lanes,
+    }
+}
+
+fn running_zellij_sessions() -> HashSet<String> {
+    let Ok(out) = std::process::Command::new("zellij")
+        .args(["list-sessions", "--short"])
+        .output()
+    else {
+        return HashSet::new();
+    };
+    if !out.status.success() { return HashSet::new(); }
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim().to_string())
+        .filter(|l| !l.is_empty())
+        .collect()
+}
+
+fn git_signals(path: &str) -> Vec<model::Signal> {
+    let Ok(out) = std::process::Command::new("git")
+        .args(["-C", path, "status", "--porcelain"])
+        .output()
+    else {
+        return vec![];
+    };
+    if out.status.success() && !out.stdout.is_empty() {
+        vec![model::Signal { reason: model::SignalReason::PendingCommit }]
+    } else {
+        vec![]
+    }
+}
+
+fn expand_tilde(path: &str) -> String {
+    if let Some(rest) = path.strip_prefix("~/") {
+        let home = std::env::var("HOME").unwrap_or_default();
+        format!("{}/{}", home, rest)
+    } else {
+        path.to_string()
     }
 }
 

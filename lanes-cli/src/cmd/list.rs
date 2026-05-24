@@ -23,6 +23,9 @@ pub fn run(lanes: &[Lane], json: bool) {
                 Facet::Window { path, zone } => {
                     println!("  window    {} -> {}", path, zone);
                 }
+                Facet::Repo { path } => {
+                    println!("  repo      {}", path);
+                }
             }
         }
     }

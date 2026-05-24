@@ -18,6 +18,7 @@ pub fn run(lane_id: &str, cfg: &Config) {
         match facet {
             Facet::Terminal { session } => activate_terminal(session, lane.display_name()),
             Facet::Window { path, zone } => activate_window(path, zone, cfg, lane),
+            Facet::Repo { .. } => {}
         }
     }
 }

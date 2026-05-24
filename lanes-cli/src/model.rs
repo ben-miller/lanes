@@ -32,6 +32,59 @@ impl Lane {
 pub enum Facet {
     Terminal { session: String },
     Window { path: String, zone: String },
+    Repo { path: String },
+}
+
+// --- Signals ---
+
+#[derive(Clone, Serialize, Deserialize)]
+pub struct Signal {
+    pub reason: SignalReason,
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalReason {
+    PendingCommit,
+}
+
+// --- Lane snapshot (runtime state per lane) ---
+
+#[derive(Clone, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum FacetSnapshot {
+    Terminal { session: String, running: bool },
+    Window { path: String, zone: String },
+    Repo { path: String, signals: Vec<Signal> },
+}
+
+impl FacetSnapshot {
+    pub fn signals(&self) -> &[Signal] {
+        match self {
+            FacetSnapshot::Repo { signals, .. } => signals,
+            _ => &[],
+        }
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct LaneSnapshot {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub facets: Vec<FacetSnapshot>,
+}
+
+impl LaneSnapshot {
+    pub fn has_signals(&self) -> bool {
+        self.facets.iter().any(|f| !f.signals().is_empty())
+    }
+}
+
+#[derive(Clone, Serialize)]
+pub struct LanewiseSnapshot {
+    pub taken_at: String,
+    pub lanes: Vec<LaneSnapshot>,
 }
 
 // --- Selectors (durable handles) ---

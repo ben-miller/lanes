@@ -27,12 +27,15 @@ enum Command {
         json: bool,
     },
 
-    /// Dump the current environment snapshot as JSON
+    /// Dump the current lane state as JSON
     Snapshot {
         /// Write output to a file instead of stdout
         #[arg(long)]
         out: Option<String>,
     },
+
+    /// List lanes that have signals requiring attention
+    Signals,
 
     /// Manage Claude sessions
     Sessions {
@@ -67,12 +70,22 @@ fn main() {
         }
 
         Command::Snapshot { out } => {
-            let snapshot = lanes::gather();
+            let cfg = lanes::config::Config::load();
+            let snapshot = lanes::gather_lanes(&cfg);
             let json = serde_json::to_string_pretty(&snapshot).expect("serialization failed");
             match out {
                 Some(path) => std::fs::write(&path, &json).expect("failed to write output file"),
                 None => println!("{}", json),
             }
+        }
+
+        Command::Signals => {
+            let cfg = lanes::config::Config::load();
+            let snapshot = lanes::gather_lanes(&cfg);
+            let signaled: Vec<_> = snapshot.lanes.iter()
+                .filter(|l| l.has_signals())
+                .collect();
+            println!("{}", serde_json::to_string_pretty(&signaled).unwrap());
         }
 
         Command::Sessions { command } => match command {
