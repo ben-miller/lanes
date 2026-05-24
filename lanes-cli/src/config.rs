@@ -5,18 +5,30 @@ use serde::Deserialize;
 
 use crate::model::{Facet, Lane};
 
+#[derive(Clone)]
+pub struct MonitorConfig {
+    pub uuid: Option<String>,
+    pub name: Option<String>,
+}
+
 pub struct Config {
     /// Drivers to run. None means all drivers.
     pub drivers: Option<Vec<String>>,
+    /// Monitor handle -> config, from lanes.toml [monitors.*].
+    pub monitors: HashMap<String, MonitorConfig>,
     /// Discovered lane definitions.
     pub lanes: Vec<Lane>,
 }
 
 impl Config {
     pub fn load() -> Self {
-        let drivers = load_global_config();
+        let (drivers, monitors) = load_global_config();
         let lanes = load_lanes();
-        Self { drivers, lanes }
+        Self { drivers, monitors, lanes }
+    }
+
+    pub fn monitor_uuid(&self, handle: &str) -> Option<&str> {
+        self.monitors.get(handle)?.uuid.as_deref()
     }
 
     pub fn driver_enabled(&self, name: &str) -> bool {
@@ -43,6 +55,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             drivers: None,
+            monitors: HashMap::new(),
             lanes: Vec::new(),
         }
     }
@@ -59,6 +72,14 @@ pub fn config_dir() -> PathBuf {
 struct GlobalConfig {
     #[serde(default)]
     drivers: Option<Vec<String>>,
+    #[serde(default)]
+    monitors: HashMap<String, MonitorConfigRaw>,
+}
+
+#[derive(Deserialize)]
+struct MonitorConfigRaw {
+    uuid: Option<String>,
+    name: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -76,12 +97,21 @@ struct LaneHeader {
 
 // --- Loaders ---
 
-fn load_global_config() -> Option<Vec<String>> {
+fn load_global_config() -> (Option<Vec<String>>, HashMap<String, MonitorConfig>) {
     let home = std::env::var("HOME").unwrap_or_default();
     let path = PathBuf::from(home).join(".config").join("lanes.toml");
-    let content = std::fs::read_to_string(&path).ok()?;
-    let cfg: GlobalConfig = toml::from_str(&content).ok()?;
-    cfg.drivers
+    let content = match std::fs::read_to_string(&path) {
+        Ok(s) => s,
+        Err(_) => return (None, HashMap::new()),
+    };
+    let cfg: GlobalConfig = match toml::from_str(&content) {
+        Ok(c) => c,
+        Err(_) => return (None, HashMap::new()),
+    };
+    let monitors = cfg.monitors.into_iter()
+        .map(|(k, v)| (k, MonitorConfig { uuid: v.uuid, name: v.name }))
+        .collect();
+    (cfg.drivers, monitors)
 }
 
 fn load_lanes() -> Vec<Lane> {
@@ -99,8 +129,23 @@ fn load_lanes() -> Vec<Lane> {
             s.ends_with(".toml") && s != "config.toml"
         })
         .filter_map(|e| {
-            let content = std::fs::read_to_string(e.path()).ok()?;
-            let file: LaneFile = toml::from_str(&content).ok()?;
+            let path = e.path();
+            let content = match std::fs::read_to_string(&path) {
+                Ok(s) => s,
+                Err(err) => { eprintln!("warning: could not read {:?}: {}", path, err); return None; }
+            };
+            let file: LaneFile = match toml::from_str(&content) {
+                Ok(f) => f,
+                Err(err) => { eprintln!("warning: could not parse {:?}: {}", path, err); return None; }
+            };
+            if file.lane.id.contains(char::is_whitespace) {
+                eprintln!(
+                    "warning: skipping lane file {:?} — id {:?} must not contain spaces",
+                    e.file_name(),
+                    file.lane.id
+                );
+                return None;
+            }
             Some(Lane {
                 id: file.lane.id,
                 name: file.lane.name,
@@ -170,6 +215,7 @@ zone = "main:1-2/3"
     fn driver_enabled_with_list() {
         let cfg = Config {
             drivers: Some(vec!["zellij".to_string(), "claude".to_string()]),
+            monitors: HashMap::new(),
             lanes: Vec::new(),
         };
         assert!(cfg.driver_enabled("zellij"));
@@ -189,6 +235,7 @@ zone = "main:1-2/3"
         use crate::model::Facet;
         let cfg = Config {
             drivers: None,
+            monitors: HashMap::new(),
             lanes: vec![
                 Lane {
                     id: "sheetwork".to_string(),

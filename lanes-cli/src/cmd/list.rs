@@ -10,7 +10,11 @@ pub fn run(lanes: &[Lane], json: bool) {
         return;
     }
     for lane in lanes {
-        println!("{}", lane.display_name());
+        if let Some(name) = &lane.name {
+            println!("{} ({})", lane.id, name);
+        } else {
+            println!("{}", lane.id);
+        }
         for facet in &lane.facets {
             match facet {
                 Facet::Terminal { session } => {

@@ -1,6 +1,7 @@
 pub mod config;
 mod drivers;
 pub mod model;
+pub mod zone;
 
 use model::{Observed, Snapshot};
 

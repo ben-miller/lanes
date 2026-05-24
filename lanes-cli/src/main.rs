@@ -11,8 +11,21 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
+    /// Activate a lane: focus terminal and apply window placement
+    Activate {
+        /// Lane ID to activate
+        id: String,
+    },
+
     /// Check environment dependencies and configuration
     Doctor,
+
+    /// List configured lanes and their facets
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 
     /// Dump the current environment snapshot as JSON
     Snapshot {
@@ -21,26 +34,10 @@ enum Command {
         out: Option<String>,
     },
 
-    /// List configured lanes
-    Lanes {
-        #[command(subcommand)]
-        command: LanesCommand,
-    },
-
     /// Manage Claude sessions
     Sessions {
         #[command(subcommand)]
         command: SessionsCommand,
-    },
-}
-
-#[derive(Subcommand)]
-enum LanesCommand {
-    /// List all configured lanes and their facets
-    List {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
     },
 }
 
@@ -57,14 +54,17 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Command::Activate { id } => {
+            let cfg = lanes::config::Config::load();
+            cmd::activate::run(&id, &cfg);
+        }
+
         Command::Doctor => cmd::doctor::run(),
 
-        Command::Lanes { command } => match command {
-            LanesCommand::List { json } => {
-                let cfg = lanes::config::Config::load();
-                cmd::list::run(&cfg.lanes, json);
-            }
-        },
+        Command::List { json } => {
+            let cfg = lanes::config::Config::load();
+            cmd::list::run(&cfg.lanes, json);
+        }
 
         Command::Snapshot { out } => {
             let snapshot = lanes::gather();
