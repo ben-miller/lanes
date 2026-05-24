@@ -1,5 +1,6 @@
 <script>
   import { invoke } from "@tauri-apps/api/core";
+  import { listen } from "@tauri-apps/api/event";
   import { getCurrentWindow } from "@tauri-apps/api/window";
   import { onMount, onDestroy } from "svelte";
 
@@ -11,16 +12,22 @@
   }
 
   let timer;
-  onMount(() => {
+  let unlistenSessions;
+
+  onMount(async () => {
     refresh();
-    timer = setInterval(refresh, 3000);
+    timer = setInterval(refresh, 10000);
+    unlistenSessions = await listen("sessions-changed", () => refresh());
     document.addEventListener("mousedown", (e) => {
       if (!e.target.closest(".signal") && !e.target.closest(".overlay")) {
         getCurrentWindow().startDragging();
       }
     });
   });
-  onDestroy(() => clearInterval(timer));
+  onDestroy(() => {
+    clearInterval(timer);
+    if (unlistenSessions) unlistenSessions();
+  });
 
   function allSignals(lane) {
     return lane.facets.flatMap(f => f.signals ?? []);
@@ -29,7 +36,8 @@
   function signalLabel(signal) {
     if (signal.reason === "pending_commit") return "pending commit";
     if (signal.reason === "claude_session_active") return "claude · running";
-    if (signal.reason === "claude_session_awaiting") return "claude · waiting";
+    if (signal.reason === "claude_session_awaiting") return "claude · idle";
+    if (signal.reason === "claude_session_permission") return "claude · permission";
     return signal.reason;
   }
 

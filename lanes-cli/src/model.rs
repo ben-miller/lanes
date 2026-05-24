@@ -57,6 +57,7 @@ pub enum SignalReason {
     PendingCommit,
     ClaudeSessionActive,
     ClaudeSessionAwaiting,
+    ClaudeSessionPermission,
 }
 
 // --- Pane kinds ---

@@ -69,7 +69,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
 
 struct ClaudeRef {
     session_id: String,
-    awaiting: bool,
+    state: String, // "idle" | "running" | "permission_pending"
 }
 
 fn claude_sessions_by_zellij() -> HashMap<String, Vec<ClaudeRef>> {
@@ -84,8 +84,17 @@ fn claude_sessions_by_zellij() -> HashMap<String, Vec<ClaudeRef>> {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&data) else { continue; };
         let Some(zs) = val["zellij_session"].as_str() else { continue; };
         let session_id = val["session_id"].as_str().unwrap_or("").to_string();
-        let awaiting = val["state"].as_str().unwrap_or("") == "idle";
-        map.entry(zs.to_string()).or_default().push(ClaudeRef { session_id, awaiting });
+        let raw_state = val["state"].as_str().unwrap_or("running");
+        let state = if raw_state == "permission_pending" {
+            let stale = entry.path().metadata()
+                .and_then(|m| m.modified())
+                .ok().and_then(|t| t.elapsed().ok())
+                .map_or(false, |age| age.as_secs() >= 1);
+            if stale { "idle".to_string() } else { raw_state.to_string() }
+        } else {
+            raw_state.to_string()
+        };
+        map.entry(zs.to_string()).or_default().push(ClaudeRef { session_id, state });
     }
     map
 }
@@ -99,12 +108,14 @@ fn build_terminal_state(
     };
 
     let claude_refs = claude.get(session);
-    let any_awaiting = claude_refs.map_or(false, |refs| refs.iter().any(|r| r.awaiting));
+    let needs_attention = claude_refs.map_or(false, |refs| {
+        refs.iter().any(|r| matches!(r.state.as_str(), "idle" | "permission_pending"))
+    });
 
     let panes = shape.tabs.iter().flat_map(|tab| {
         tab.panes.iter().map(|pane| {
             let kind = match pane.command.as_deref() {
-                Some("claude") => model::PaneKind::ClaudeSession { awaiting: any_awaiting },
+                Some("claude") => model::PaneKind::ClaudeSession { awaiting: needs_attention },
                 other => model::PaneKind::from_command(other),
             };
             model::PaneSnapshot { focused: pane.focused, cwd: pane.cwd.clone(), kind }
@@ -114,10 +125,10 @@ fn build_terminal_state(
     let signals = claude_refs.map_or(vec![], |refs| {
         refs.iter()
             .map(|r| model::Signal {
-                reason: if r.awaiting {
-                    model::SignalReason::ClaudeSessionAwaiting
-                } else {
-                    model::SignalReason::ClaudeSessionActive
+                reason: match r.state.as_str() {
+                    "idle" => model::SignalReason::ClaudeSessionAwaiting,
+                    "permission_pending" => model::SignalReason::ClaudeSessionPermission,
+                    _ => model::SignalReason::ClaudeSessionActive,
                 },
                 action: Some(model::SignalAction::SwitchClaudeSession {
                     session_id: r.session_id.clone(),
