@@ -119,12 +119,14 @@ fn parse_kdl_layout(kdl: &str) -> (TerminalShape, Option<String>) {
             tab_depth = depth;
         }
 
-        // Panes inside a tab — skip plugin/borderless UI panes
+        // Panes inside a tab — skip plugin/borderless UI panes and split containers
         if in_tab && depth > tab_depth && trimmed.starts_with("pane ") {
             let borderless = trimmed.contains("borderless=true");
             let is_split = trimmed.contains("split_direction=");
-            if !borderless && !is_split {
-                let cmd = kdl_prop(trimmed, "command");
+            let cmd = kdl_prop(trimmed, "command");
+            // A pane that opens a block but has no command is a split container, not a leaf
+            let is_container = opens > 0 && cmd.is_none();
+            if !borderless && !is_split && !is_container {
                 let focused = trimmed.contains("focus=true");
                 let cwd = kdl_prop(trimmed, "cwd");
                 if let Some(tab) = current_tab.as_mut() {
@@ -286,8 +288,38 @@ mod tests {
     #[test]
     fn new_tab_template_not_included() {
         let (shape, _) = parse_kdl_layout(LAYOUT);
-        // new_tab_template is not a real tab and should not appear
         assert_eq!(shape.tabs.len(), 1);
+    }
+
+    #[test]
+    fn nested_split_container_not_included() {
+        // A pane with a block but no command is a split container — should not appear as a leaf
+        let layout = r#"layout {
+    cwd "/Users/bmiller/src/projects/lanes"
+    tab name="Tab #1" focus=true hide_floating_panes=true {
+        pane size=1 borderless=true {
+            plugin location="zellij:tab-bar"
+        }
+        pane split_direction="vertical" {
+            pane command="claude" focus=true size="50%" {
+                args "--resume" "lanes"
+                start_suspended true
+            }
+            pane size="50%" {
+                pane command="npm" cwd="ui" size="50%" {
+                    args "run" "tauri" "dev"
+                    start_suspended true
+                }
+                pane size="50%"
+            }
+        }
+    }
+}"#;
+        let (shape, _) = parse_kdl_layout(layout);
+        assert_eq!(shape.tabs[0].panes.len(), 3);
+        assert_eq!(shape.tabs[0].panes[0].command.as_deref(), Some("claude"));
+        assert_eq!(shape.tabs[0].panes[1].command.as_deref(), Some("npm"));
+        assert_eq!(shape.tabs[0].panes[2].command, None);
     }
 
     #[test]

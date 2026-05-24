@@ -28,6 +28,7 @@
 
   function signalLabel(signal) {
     if (signal.reason === "pending_commit") return "pending commit";
+    if (signal.reason === "claude_session_active") return "claude · running";
     if (signal.reason === "claude_session_awaiting") return "claude · waiting";
     return signal.reason;
   }

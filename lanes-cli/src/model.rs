@@ -55,6 +55,7 @@ pub struct Signal {
 #[serde(rename_all = "snake_case")]
 pub enum SignalReason {
     PendingCommit,
+    ClaudeSessionActive,
     ClaudeSessionAwaiting,
 }
 

@@ -113,9 +113,12 @@ fn build_terminal_state(
 
     let signals = claude_refs.map_or(vec![], |refs| {
         refs.iter()
-            .filter(|r| r.awaiting)
             .map(|r| model::Signal {
-                reason: model::SignalReason::ClaudeSessionAwaiting,
+                reason: if r.awaiting {
+                    model::SignalReason::ClaudeSessionAwaiting
+                } else {
+                    model::SignalReason::ClaudeSessionActive
+                },
                 action: Some(model::SignalAction::SwitchClaudeSession {
                     session_id: r.session_id.clone(),
                 }),
@@ -174,15 +177,37 @@ pub fn navigate_to_repo_pane(session: &str, path: &str) -> Result<(), String> {
         return Ok(());
     };
 
-    let zellij_tab = shape.tabs.iter().find(|tab| {
+    let target_tab = shape.tabs.iter().find(|tab| {
         tab.panes.iter().any(|p| p.cwd.as_deref() == Some(path))
-    }).map(|t| t.name.clone());
+    });
 
-    if let Some(tab) = zellij_tab {
+    if let Some(tab) = target_tab {
         std::process::Command::new("/opt/homebrew/bin/zellij")
-            .args(["--session", session, "action", "go-to-tab-name", &tab])
+            .args(["--session", session, "action", "go-to-tab-name", &tab.name])
             .output()
             .map_err(|e| e.to_string())?;
+
+        // Focus the shell pane at the target path (prefer shell over claude/editor)
+        let panes = &tab.panes;
+        let target_idx = panes.iter().position(|p| {
+            p.cwd.as_deref() == Some(path) && p.command.is_none()
+        }).or_else(|| {
+            panes.iter().position(|p| p.cwd.as_deref() == Some(path))
+        });
+
+        if let Some(target) = target_idx {
+            let focused = panes.iter().position(|p| p.focused).unwrap_or(0);
+            let n = panes.len();
+            if target != focused && n > 1 {
+                let steps = (target + n - focused) % n;
+                for _ in 0..steps {
+                    std::process::Command::new("/opt/homebrew/bin/zellij")
+                        .args(["--session", session, "action", "focus-next-pane"])
+                        .output()
+                        .map_err(|e| e.to_string())?;
+                }
+            }
+        }
     } else {
         std::process::Command::new("/opt/homebrew/bin/zellij")
             .args(["--session", session, "action", "new-tab", "--cwd", path])
