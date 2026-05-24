@@ -37,7 +37,11 @@ enum Command {
 #[derive(Subcommand)]
 enum LanesCommand {
     /// List all configured lanes and their facets
-    List,
+    List {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -56,9 +60,9 @@ fn main() {
         Command::Doctor => cmd::doctor::run(),
 
         Command::Lanes { command } => match command {
-            LanesCommand::List => {
+            LanesCommand::List { json } => {
                 let cfg = lanes::config::Config::load();
-                cmd::list::run(&cfg.lanes);
+                cmd::list::run(&cfg.lanes, json);
             }
         },
 

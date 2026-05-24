@@ -1,6 +1,10 @@
 use lanes::model::{Facet, Lane};
 
-pub fn run(lanes: &[Lane]) {
+pub fn run(lanes: &[Lane], json: bool) {
+    if json {
+        println!("{}", serde_json::to_string_pretty(lanes).unwrap());
+        return;
+    }
     if lanes.is_empty() {
         eprintln!("No lanes found in ~/.config/lanes/");
         return;
