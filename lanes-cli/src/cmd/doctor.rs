@@ -151,24 +151,28 @@ fn check_brotab() -> Check {
 }
 
 fn check_lanes_registry() -> Check {
-    let path = PathBuf::from(std::env::var("HOME").unwrap_or_default())
-        .join(".config")
-        .join("lanes")
-        .join("registry.toml");
+    let dir = lanes::config::config_dir();
 
-    match std::fs::read_to_string(&path) {
+    match std::fs::read_dir(&dir) {
         Err(_) => Check {
-            label: "lanes registry",
+            label: "lanes config",
             status: Status::Warn,
-            message: format!("not found at {}", path.display()),
-            hint: Some("create ~/.config/lanes/registry.toml to define lanes".to_string()),
+            message: format!("config dir not found at {}", dir.display()),
+            hint: Some("create ~/.config/lanes/ and add lane TOML files".to_string()),
         },
-        Ok(content) => {
-            let count = content.lines().filter(|l| l.trim() == "[[lanes]]").count();
+        Ok(entries) => {
+            let count = entries
+                .filter_map(|e| e.ok())
+                .filter(|e| {
+                    let name = e.file_name();
+                    let s = name.to_string_lossy();
+                    s.ends_with(".toml") && s != "config.toml" && s != "monitors.toml"
+                })
+                .count();
             Check {
-                label: "lanes registry",
+                label: "lanes config",
                 status: Status::Ok,
-                message: format!("{} lane(s) defined", count),
+                message: format!("{} lane(s) defined in {}", count, dir.display()),
                 hint: None,
             }
         }
