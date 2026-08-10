@@ -56,7 +56,7 @@ pub fn run() {
 }
 
 fn check_zellij() -> Check {
-    let version_out = Command::new("zellij").arg("--version").output();
+    let version_out = Command::new("/opt/homebrew/bin/zellij").arg("--version").output();
     match version_out {
         Err(_) => Check {
             label: "zellij",
@@ -66,7 +66,7 @@ fn check_zellij() -> Check {
         },
         Ok(out) => {
             let version = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            let sessions_out = Command::new("zellij")
+            let sessions_out = Command::new("/opt/homebrew/bin/zellij")
                 .args(["list-sessions", "--no-formatting", "--short"])
                 .output();
             let session_summary = match sessions_out {

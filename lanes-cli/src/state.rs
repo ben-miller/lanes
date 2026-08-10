@@ -46,6 +46,30 @@ fn put_current_lane(doc: &mut KdlDocument, id: &str) {
     doc.nodes_mut().push(node);
 }
 
+pub fn read_claude_cursor() -> Option<String> {
+    claude_cursor_from(&load_doc())
+}
+
+fn claude_cursor_from(doc: &KdlDocument) -> Option<String> {
+    doc.get("claude-cursor")
+        .and_then(|n| n.get(0))
+        .and_then(|v| v.as_string())
+        .map(|s| s.to_string())
+}
+
+pub fn set_claude_cursor(session_id: &str) {
+    let mut doc = load_doc();
+    put_claude_cursor(&mut doc, session_id);
+    save_doc(&doc);
+}
+
+fn put_claude_cursor(doc: &mut KdlDocument, session_id: &str) {
+    doc.nodes_mut().retain(|n| n.name().value() != "claude-cursor");
+    let mut node = KdlNode::new("claude-cursor");
+    node.push(session_id);
+    doc.nodes_mut().push(node);
+}
+
 /// Cached WezTerm tab ID for a Zellij session, so navigation doesn't have to
 /// re-derive the tab by matching titles (which aren't guaranteed to relate to
 /// the session name at all - see `lib::activate_wezterm_tab`). Populated once
@@ -145,5 +169,16 @@ mod tests {
         put_current_lane(&mut doc, "infra");
         assert_eq!(wezterm_tab_id_from(&doc, "lanes"), Some(4));
         assert_eq!(wezterm_tab_id_from(&doc, "infra"), Some(3));
+    }
+
+    #[test]
+    fn round_trips_claude_cursor() {
+        let mut doc = KdlDocument::new();
+        assert_eq!(claude_cursor_from(&doc), None);
+        put_claude_cursor(&mut doc, "d16ada72-fb4b-4a01-938c-fb7cb66ab645");
+        assert_eq!(claude_cursor_from(&doc), Some("d16ada72-fb4b-4a01-938c-fb7cb66ab645".to_string()));
+        put_claude_cursor(&mut doc, "d9298ffc-6a55-455e-9d98-a5a6e0d3d790");
+        assert_eq!(claude_cursor_from(&doc), Some("d9298ffc-6a55-455e-9d98-a5a6e0d3d790".to_string()));
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "claude-cursor").count(), 1);
     }
 }

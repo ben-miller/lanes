@@ -5,7 +5,7 @@ use serde_json::json;
 use crate::model::*;
 
 pub fn enumerate() -> Vec<Observed> {
-    let output = match Command::new("zellij")
+    let output = match Command::new("/opt/homebrew/bin/zellij")
         .args(["list-sessions", "--no-formatting"])
         .output()
     {
@@ -69,7 +69,7 @@ pub fn layout_for_session(session: &str) -> Option<(TerminalShape, Option<String
 }
 
 fn dump_layout(session: &str) -> Option<(TerminalShape, Option<String>)> {
-    let output = Command::new("zellij")
+    let output = Command::new("/opt/homebrew/bin/zellij")
         .args(["--session", session, "action", "dump-layout"])
         .output()
         .ok()?;

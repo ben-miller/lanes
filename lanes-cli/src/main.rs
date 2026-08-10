@@ -60,6 +60,15 @@ enum SessionsCommand {
 
     /// Get a single session by ID
     Get { id: String },
+
+    /// Switch to a specific Claude session (raise its WezTerm tab and Zellij pane)
+    Switch { id: String },
+
+    /// Switch to the next Claude session, cycling
+    Next,
+
+    /// Switch to the previous Claude session, cycling
+    Prev,
 }
 
 #[derive(Subcommand)]
@@ -147,6 +156,27 @@ fn main() {
                         eprintln!("error: session not found: {}", id);
                         std::process::exit(1);
                     }
+                }
+            }
+
+            SessionsCommand::Switch { id } => {
+                if let Err(e) = lanes::switch_claude_session(&id) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            SessionsCommand::Next => {
+                if let Err(e) = lanes::cycle_claude_session(1) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            SessionsCommand::Prev => {
+                if let Err(e) = lanes::cycle_claude_session(-1) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
                 }
             }
         },

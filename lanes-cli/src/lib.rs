@@ -188,7 +188,7 @@ fn build_terminal_state(
 }
 
 pub(crate) fn running_zellij_sessions() -> HashSet<String> {
-    let Ok(out) = std::process::Command::new("zellij")
+    let Ok(out) = std::process::Command::new("/opt/homebrew/bin/zellij")
         .args(["list-sessions", "--short"])
         .output()
     else {
@@ -234,20 +234,16 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
 
     let zellij_session = val["zellij_session"].as_str().unwrap_or("").to_string();
     let zellij_pane_id = val["zellij_pane_id"].as_u64();
-    let wezterm_tab_id = val["wezterm_tab_id"].as_u64();
 
-    if let Some(tab_id) = wezterm_tab_id {
-        std::process::Command::new("open").args(["-a", "WezTerm"]).output().ok();
-        let sock = wezterm_socket();
-        let mut cmd = std::process::Command::new("/opt/homebrew/bin/wezterm");
-        cmd.args(["cli", "activate-tab", "--tab-id", &tab_id.to_string()]);
-        if let Some(ref s) = sock {
-            cmd.env("WEZTERM_UNIX_SOCKET", s);
-        }
-        cmd.output().map_err(|e| format!("wezterm activate-tab: {}", e))?;
-    }
+    state::set_claude_cursor(session_id);
 
     if !zellij_session.is_empty() {
+        // Resolve the tab through the same session -> tab-id cache everything
+        // else uses, rather than the wezterm_tab_id recorded in the session
+        // file at hook time (which came from the same unreliable title
+        // matching we removed everywhere else).
+        activate_wezterm_tab(&zellij_session, true)?;
+
         if let Some(pane_id) = zellij_pane_id {
             std::process::Command::new("/opt/homebrew/bin/zellij")
                 .args(["--session", &zellij_session, "action", "focus-pane-id", &pane_id.to_string()])
@@ -257,6 +253,41 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
     }
 
     Ok(())
+}
+
+/// Cycle to the next (direction=1) or previous (direction=-1) live Claude
+/// session, ordered by Zellij session name then session ID - matching the
+/// order the Go `claude-session` tool used, so muscle memory carries over.
+pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
+    let snapshot = gather();
+    let mut sessions: Vec<(String, String)> = snapshot.resources.iter()
+        .filter(|r| matches!(&r.selector, model::Selector::Terminal(sel) if sel.driver == "claude"))
+        .map(|r| {
+            let zellij_session = r.extra.get("zellij_session")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+            (zellij_session, r.locator.clone())
+        })
+        .collect();
+    sessions.sort();
+
+    if sessions.is_empty() {
+        return Ok(());
+    }
+
+    let ids: Vec<String> = sessions.into_iter().map(|(_, id)| id).collect();
+    let cursor = state::read_claude_cursor();
+    let current_index = cursor.as_deref().and_then(|c| ids.iter().position(|id| id == c));
+    let idx = cycle_index(ids.len(), current_index, direction);
+
+    switch_claude_session(&ids[idx])
+}
+
+fn cycle_index(len: usize, current_index: Option<usize>, direction: i32) -> usize {
+    let n = len as i32;
+    let current = current_index.map(|i| i as i32).unwrap_or(-1);
+    (((current + direction) % n + n) % n) as usize
 }
 
 pub fn navigate_to_repo_pane(session: &str, path: &str) -> Result<(), String> {
@@ -514,6 +545,38 @@ mod tests {
             parse_bundle_id("app:com.github.wez.wezterm / window"),
             Some("com.github.wez.wezterm".to_string())
         );
+    }
+
+    #[test]
+    fn cycle_index_advances_and_wraps_forward() {
+        assert_eq!(cycle_index(4, Some(0), 1), 1);
+        assert_eq!(cycle_index(4, Some(3), 1), 0);
+    }
+
+    #[test]
+    fn cycle_index_retreats_and_wraps_backward() {
+        assert_eq!(cycle_index(4, Some(1), -1), 0);
+        assert_eq!(cycle_index(4, Some(0), -1), 3);
+    }
+
+    #[test]
+    fn cycle_index_starts_at_first_when_no_cursor_and_moving_forward() {
+        assert_eq!(cycle_index(4, None, 1), 0);
+    }
+
+    #[test]
+    fn cycle_index_no_cursor_moving_backward_matches_prior_tool_behavior() {
+        // Not index n-1 ("last") - the no-cursor sentinel (-1) combined with
+        // direction -1 lands on n-2 under this modular arithmetic. Pinned
+        // here to match the original Go tool's exact behavior rather than
+        // any "more correct" semantics, so muscle memory carries over.
+        assert_eq!(cycle_index(4, None, -1), 2);
+    }
+
+    #[test]
+    fn cycle_index_single_session_always_stays_put() {
+        assert_eq!(cycle_index(1, Some(0), 1), 0);
+        assert_eq!(cycle_index(1, Some(0), -1), 0);
     }
 
     #[test]
