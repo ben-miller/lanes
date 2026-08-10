@@ -16,6 +16,7 @@ struct ActiveSession {
     cwd: String,
     started_at: Option<String>,
     state: Option<String>,
+    pid: Option<u32>,
 }
 
 pub fn enumerate() -> Vec<Observed> {
@@ -25,16 +26,23 @@ pub fn enumerate() -> Vec<Observed> {
         Err(_) => return vec![],
     };
 
+    let live_zellij_sessions = crate::running_zellij_sessions();
+
     entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().extension().map_or(false, |x| x == "json"))
-        .filter_map(|e| load_session(&e.path()))
+        .filter_map(|e| load_session(&e.path(), &live_zellij_sessions))
         .collect()
 }
 
-fn load_session(path: &Path) -> Option<Observed> {
+fn load_session(path: &Path, live_zellij_sessions: &std::collections::HashSet<String>) -> Option<Observed> {
     let data = fs::read_to_string(path).ok()?;
     let s: ActiveSession = serde_json::from_str(&data).ok()?;
+
+    let zellij_session = s.zellij_session.clone().unwrap_or_default();
+    if !crate::session_is_live(&zellij_session, live_zellij_sessions, s.pid) {
+        return None;
+    }
 
     let activity = s.state.clone().unwrap_or_else(|| "unknown".to_string());
     let status = match activity.as_str() {

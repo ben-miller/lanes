@@ -23,6 +23,12 @@ if [[ -n "${WEZTERM_SOCKET:-}" && -n "${ZELLIJ_SESSION_NAME:-}" ]]; then
     [[ -n "${TAB_ID:-}" ]] && WEZTERM_TAB_ID="$TAB_ID"
 fi
 
+# Claude Code runs hook commands via `sh -c "<command>"`, so $PPID here is that
+# transient sh process (it exits as soon as this script returns) - not useful for
+# a later liveness check. Its parent is the actual `claude` process, so we go up
+# one more hop to get a PID that stays valid for the life of the session.
+CLAUDE_PID=$(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ' || true)
+
 jq -n \
     --arg session_id "$SESSION_ID" \
     --arg claude_session_name "${ZELLIJ_SESSION_NAME:-}" \
@@ -31,6 +37,7 @@ jq -n \
     --argjson wezterm_tab_id "$WEZTERM_TAB_ID" \
     --arg cwd "$CWD" \
     --arg started_at "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+    --argjson pid "${CLAUDE_PID:-null}" \
     '{
         session_id: $session_id,
         claude_session_name: $claude_session_name,
@@ -39,5 +46,6 @@ jq -n \
         wezterm_tab_id: $wezterm_tab_id,
         cwd: $cwd,
         started_at: $started_at,
-        state: "idle"
+        state: "idle",
+        pid: $pid
     }' > "$REGISTRY_DIR/$SESSION_ID.json"

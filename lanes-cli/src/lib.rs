@@ -30,7 +30,7 @@ pub fn gather() -> Snapshot {
 
 pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
     let running = running_zellij_sessions();
-    let claude = claude_sessions_by_zellij();
+    let claude = claude_sessions_by_zellij(&running);
 
     let lanes = cfg.lanes.iter().map(|lane| {
         let facets = lane.facets.iter().map(|facet| match facet {
@@ -74,7 +74,7 @@ struct ClaudeRef {
     state: String, // "idle" | "running" | "permission_pending"
 }
 
-fn claude_sessions_by_zellij() -> HashMap<String, Vec<ClaudeRef>> {
+fn claude_sessions_by_zellij(live_zellij_sessions: &HashSet<String>) -> HashMap<String, Vec<ClaudeRef>> {
     let home = std::env::var("HOME").unwrap_or_default();
     let dir = std::path::PathBuf::from(home).join(".claude").join("active-sessions");
     let mut map: HashMap<String, Vec<ClaudeRef>> = HashMap::new();
@@ -85,6 +85,8 @@ fn claude_sessions_by_zellij() -> HashMap<String, Vec<ClaudeRef>> {
         let Ok(data) = std::fs::read_to_string(entry.path()) else { continue; };
         let Ok(val) = serde_json::from_str::<serde_json::Value>(&data) else { continue; };
         let Some(zs) = val["zellij_session"].as_str() else { continue; };
+        let pid = val["pid"].as_u64().map(|p| p as u32);
+        if !session_is_live(zs, live_zellij_sessions, pid) { continue; }
         let session_id = val["session_id"].as_str().unwrap_or("").to_string();
         let raw_state = val["state"].as_str().unwrap_or("running");
         let state = if raw_state == "permission_pending" {
@@ -99,6 +101,49 @@ fn claude_sessions_by_zellij() -> HashMap<String, Vec<ClaudeRef>> {
         map.entry(zs.to_string()).or_default().push(ClaudeRef { session_id, state });
     }
     map
+}
+
+/// Whether a registry entry for a Claude session still refers to something actually
+/// running, rather than a file orphaned by a session that ended without firing
+/// `SessionEnd` (crash, force-quit, killed pane).
+///
+/// Sessions living in a Zellij pane are verified against currently running Zellij
+/// sessions - reliable, no guessing. Sessions started outside Zellij have no such
+/// anchor, so we fall back to checking that the recorded PID is both alive and is
+/// actually a `claude` process - a bare `kill -0` isn't enough since PIDs get
+/// reused, so a dead session's orphaned PID could later collide with an unrelated
+/// process.
+pub(crate) fn session_is_live(zellij_session: &str, live_zellij_sessions: &HashSet<String>, pid: Option<u32>) -> bool {
+    session_is_live_with(zellij_session, live_zellij_sessions, pid, process_command)
+}
+
+fn session_is_live_with(
+    zellij_session: &str,
+    live_zellij_sessions: &HashSet<String>,
+    pid: Option<u32>,
+    lookup: impl Fn(u32) -> Option<String>,
+) -> bool {
+    if !zellij_session.is_empty() {
+        return live_zellij_sessions.contains(zellij_session);
+    }
+    match pid {
+        Some(p) => lookup(p).map_or(false, |cmd| is_claude_command(&cmd)),
+        None => false,
+    }
+}
+
+fn is_claude_command(cmd: &str) -> bool {
+    cmd.trim().rsplit('/').next().unwrap_or("") == "claude"
+}
+
+fn process_command(pid: u32) -> Option<String> {
+    let out = std::process::Command::new("ps")
+        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .output()
+        .ok()?;
+    if !out.status.success() { return None; }
+    let cmd = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if cmd.is_empty() { None } else { Some(cmd) }
 }
 
 fn build_terminal_state(
@@ -142,7 +187,7 @@ fn build_terminal_state(
     (panes, signals)
 }
 
-fn running_zellij_sessions() -> HashSet<String> {
+pub(crate) fn running_zellij_sessions() -> HashSet<String> {
     let Ok(out) = std::process::Command::new("zellij")
         .args(["list-sessions", "--short"])
         .output()
@@ -215,14 +260,8 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
 }
 
 pub fn navigate_to_repo_pane(session: &str, path: &str) -> Result<(), String> {
-    // Look up display name from config for WezTerm tab matching
-    let cfg = config::Config::load();
-    let display_name = cfg.lanes.iter()
-        .find(|l| l.terminal_session() == Some(session))
-        .map(|l| l.display_name().to_string());
-
     // Activate the WezTerm tab for this session
-    activate_wezterm_tab(session, display_name.as_deref(), true)?;
+    activate_wezterm_tab(session, true)?;
 
     // Navigate within Zellij to the right tab
     let Some((shape, _)) = drivers::zellij::layout_for_session(session) else {
@@ -286,7 +325,11 @@ fn wezterm_socket() -> Option<String> {
     socks.into_iter().next().map(|(_, p)| p.to_string_lossy().into_owned())
 }
 
-fn activate_wezterm_tab(session: &str, display_name: Option<&str>, focus: bool) -> Result<(), String> {
+fn activate_wezterm_tab(session: &str, focus: bool) -> Result<(), String> {
+    let cached = state::get_wezterm_tab_id(session).ok_or_else(|| {
+        format!("no cached WezTerm tab for session '{}' - run `lanes tabs set {} <id>`", session, session)
+    })?;
+
     let sock = wezterm_socket();
 
     let mut cmd = std::process::Command::new("/opt/homebrew/bin/wezterm");
@@ -297,27 +340,23 @@ fn activate_wezterm_tab(session: &str, display_name: Option<&str>, focus: bool) 
     let output = cmd.output().map_err(|e| format!("wezterm cli list: {}", e))?;
     let json: serde_json::Value = serde_json::from_slice(&output.stdout)
         .map_err(|e| format!("wezterm cli list parse: {}", e))?;
+    let live_tab_ids: HashSet<u64> = json.as_array()
+        .map(|panes| panes.iter().filter_map(|p| p["tab_id"].as_u64()).collect())
+        .unwrap_or_default();
 
-    let tab_id = json.as_array()
-        .and_then(|panes| {
-            panes.iter().find(|p| {
-                p["tab_title"].as_str().map_or(false, |t| {
-                    t == session || display_name.map_or(false, |dn| t == dn)
-                })
-            })
-        })
-        .and_then(|p| p["tab_id"].as_u64());
-
-    let Some(id) = tab_id else {
-        return Err(format!("no WezTerm tab found for session '{}'", session));
-    };
+    if !live_tab_ids.contains(&cached) {
+        return Err(format!(
+            "cached WezTerm tab {} for session '{}' no longer exists - run `lanes tabs set {} <id>`",
+            cached, session, session
+        ));
+    }
 
     if focus {
         std::process::Command::new("open").args(["-a", "WezTerm"]).output().ok();
     }
 
     let mut cmd = std::process::Command::new("/opt/homebrew/bin/wezterm");
-    cmd.args(["cli", "activate-tab", "--tab-id", &id.to_string()]);
+    cmd.args(["cli", "activate-tab", "--tab-id", &cached.to_string()]);
     if let Some(ref s) = sock {
         cmd.env("WEZTERM_UNIX_SOCKET", s);
     }
@@ -388,7 +427,7 @@ pub fn activate_lane(lane_id: &str, focus: bool) {
     for facet in &lane.facets {
         match facet {
             model::Facet::Terminal { session } => {
-                if let Err(e) = activate_wezterm_tab(session, lane.name.as_deref(), focus) {
+                if let Err(e) = activate_wezterm_tab(session, focus) {
                     eprintln!("warning: {}", e);
                 }
             }
@@ -478,10 +517,60 @@ mod tests {
     }
 
     #[test]
+    fn zellij_backed_session_live_iff_session_running() {
+        let live: HashSet<String> = ["lanes".to_string()].into_iter().collect();
+        assert!(session_is_live_with("lanes", &live, None, |_| unreachable!("should not need pid lookup")));
+        assert!(!session_is_live_with("job-hunting", &live, None, |_| unreachable!("should not need pid lookup")));
+    }
+
+    #[test]
+    fn zellij_backed_session_ignores_pid_entirely() {
+        // Even a "live" pid shouldn't matter once the Zellij session itself is gone -
+        // the pane is the source of truth for sessions that were ever pane-attached.
+        let live: HashSet<String> = HashSet::new();
+        assert!(!session_is_live_with("lanes", &live, Some(123), |_| Some("claude".to_string())));
+    }
+
+    #[test]
+    fn paneless_session_live_only_if_pid_is_a_claude_process() {
+        let live: HashSet<String> = HashSet::new();
+        assert!(session_is_live_with("", &live, Some(123), |_| Some("claude".to_string())));
+        assert!(session_is_live_with("", &live, Some(123), |_| Some("/opt/homebrew/bin/claude".to_string())));
+    }
+
+    #[test]
+    fn paneless_session_dead_if_pid_reused_by_other_process() {
+        let live: HashSet<String> = HashSet::new();
+        assert!(!session_is_live_with("", &live, Some(123), |_| Some("Slack".to_string())));
+    }
+
+    #[test]
+    fn paneless_session_dead_if_pid_no_longer_exists() {
+        let live: HashSet<String> = HashSet::new();
+        assert!(!session_is_live_with("", &live, Some(123), |_| None));
+    }
+
+    #[test]
+    fn paneless_session_dead_if_no_pid_recorded() {
+        let live: HashSet<String> = HashSet::new();
+        assert!(!session_is_live_with("", &live, None, |_| unreachable!("no pid to look up")));
+    }
+
+    #[test]
+    fn is_claude_command_matches_bare_and_full_path() {
+        assert!(is_claude_command("claude"));
+        assert!(is_claude_command("/opt/homebrew/bin/claude"));
+        assert!(!is_claude_command("claude-code-helper"));
+        assert!(!is_claude_command("bash"));
+        assert!(!is_claude_command(""));
+    }
+
+    #[test]
     fn parses_bundle_id_bare() {
         assert_eq!(
             parse_bundle_id("app:org.mozilla.firefox / window"),
             Some("org.mozilla.firefox".to_string())
         );
     }
+
 }

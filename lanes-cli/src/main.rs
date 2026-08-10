@@ -45,6 +45,12 @@ enum Command {
         #[command(subcommand)]
         command: SessionsCommand,
     },
+
+    /// Manage the Zellij session -> WezTerm tab ID cache
+    Tabs {
+        #[command(subcommand)]
+        command: TabsCommand,
+    },
 }
 
 #[derive(Subcommand)]
@@ -54,6 +60,21 @@ enum SessionsCommand {
 
     /// Get a single session by ID
     Get { id: String },
+}
+
+#[derive(Subcommand)]
+enum TabsCommand {
+    /// List cached session -> WezTerm tab ID mappings
+    List,
+
+    /// Manually associate a Zellij session with a WezTerm tab ID
+    ///
+    /// Tab titles aren't guaranteed to relate to the session name (e.g. tools
+    /// like `infra lanes up` set arbitrary human-readable titles), so
+    /// automatic lookup can't always find the right tab on its own. Find the
+    /// tab ID with `wezterm cli list --format json` and set it here once;
+    /// activation will use the cached ID from then on.
+    Set { session: String, id: u64 },
 }
 
 fn main() {
@@ -127,6 +148,19 @@ fn main() {
                         std::process::exit(1);
                     }
                 }
+            }
+        },
+
+        Command::Tabs { command } => match command {
+            TabsCommand::List => {
+                for (session, id) in lanes::state::all_wezterm_tab_ids() {
+                    println!("{}  tab_id={}", session, id);
+                }
+            }
+
+            TabsCommand::Set { session, id } => {
+                lanes::state::set_wezterm_tab_id(&session, id);
+                println!("{}  tab_id={}", session, id);
             }
         },
     }

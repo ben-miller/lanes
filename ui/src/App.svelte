@@ -63,6 +63,22 @@
     activeSignal = null;
   }
 
+  async function copyErrorReport() {
+    const s = activeSignal;
+    if (!s) return;
+    const report = [
+      `lane: ${s.lane.name ?? s.lane.id}`,
+      `signal: ${signalLabel(s.signal)}`,
+      `action: ${s.signal.action ? JSON.stringify(s.signal.action) : "none"}`,
+      `error: ${s.status ?? "(none)"}`,
+    ].join("\n");
+    try {
+      await navigator.clipboard.writeText(report);
+    } catch (e) {
+      console.error("copy failed", e);
+    }
+  }
+
   function handleKeydown(e) {
     if (e.key === "Escape") dismissOverlay();
   }
@@ -103,7 +119,12 @@
       {#if activeSignal.status}
         <div class="overlay-status" class:ok={activeSignal.status === 'ok'}>{activeSignal.status}</div>
       {/if}
-      <button class="overlay-dismiss" on:click={dismissOverlay}>dismiss</button>
+      <div class="overlay-buttons">
+        {#if activeSignal.status && activeSignal.status !== 'ok'}
+          <button class="overlay-copy" title="copy error" on:click={copyErrorReport}>⧉</button>
+        {/if}
+        <button class="overlay-dismiss" on:click={dismissOverlay}>dismiss</button>
+      </div>
     </div>
   </div>
 {/if}
@@ -210,9 +231,14 @@
   }
   .overlay-status.ok { color: #5a5; }
 
-  .overlay-dismiss {
+  .overlay-buttons {
     margin-top: 0.4rem;
-    align-self: flex-end;
+    display: flex;
+    justify-content: flex-end;
+    gap: 0.4rem;
+  }
+
+  .overlay-dismiss, .overlay-copy {
     font-size: 0.72rem;
     color: #888;
     background: none;
@@ -222,7 +248,12 @@
     cursor: pointer;
     transition: border-color 0.1s, color 0.1s;
   }
-  .overlay-dismiss:hover {
+  .overlay-copy {
+    padding: 3px 8px;
+    font-size: 0.85rem;
+    line-height: 1;
+  }
+  .overlay-dismiss:hover, .overlay-copy:hover {
     border-color: #888;
     color: #e0e0e0;
   }
