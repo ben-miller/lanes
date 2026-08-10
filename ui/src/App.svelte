@@ -41,13 +41,22 @@
     return signal.reason;
   }
 
+  async function handleLaneClick(lane) {
+    snapshot = { ...snapshot, current_lane: lane.id };
+    await invoke("activate_lane", { laneId: lane.id });
+    await refresh();
+  }
+
   async function handleSignalClick(lane, signal) {
+    snapshot = { ...snapshot, current_lane: lane.id };
+    await invoke("set_current_lane", { laneId: lane.id });
     if (signal.action) {
       const err = await invoke("execute_action", { action: signal.action }).then(() => null).catch(e => String(e));
       if (err) activeSignal = { lane, signal, status: err };
     } else {
       activeSignal = { lane, signal, status: null };
     }
+    await refresh();
   }
 
   function dismissOverlay() {
@@ -66,12 +75,13 @@
     <div class="lanes">
       {#each snapshot.lanes as lane}
         {@const signals = allSignals(lane)}
-        <div class="column" class:has-signals={signals.length > 0}>
+        <div class="column" class:has-signals={signals.length > 0} class:current={snapshot.current_lane === lane.id} on:click={() => handleLaneClick(lane)}>
           <span class="name">{lane.name ?? lane.id}</span>
           {#each signals as signal}
             <button
               class="signal"
               on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
+              on:click|stopPropagation
             >{signalLabel(signal)}</button>
           {/each}
         </div>
@@ -99,8 +109,9 @@
 {/if}
 
 <style>
-  :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; }
-  :global(body) { background: #111; color: #e0e0e0; font-family: system-ui, sans-serif; }
+  :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
+  :global(body) { background: #111; color: #e0e0e0; font-family: system-ui, sans-serif; cursor: default; }
+  :global(*) { cursor: inherit; }
 
   .dashboard {
     height: 100vh;
@@ -127,6 +138,8 @@
     gap: 0.4rem;
   }
   .column.has-signals { border-color: #7a5200; }
+  .column.current { border-color: #e0e0e0; border-width: 2px; }
+  .column.current.has-signals { border-color: #ffb347; border-width: 2px; }
 
   .name {
     font-size: 0.78rem;
@@ -145,6 +158,7 @@
     border-radius: 4px;
     border: 1px solid transparent;
     text-align: left;
+    cursor: pointer;
   }
 
   .backdrop {

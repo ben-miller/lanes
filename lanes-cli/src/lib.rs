@@ -1,6 +1,7 @@
 pub mod config;
 mod drivers;
 pub mod model;
+pub mod state;
 pub mod zone;
 
 use model::{Observed, Snapshot};
@@ -64,6 +65,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
     model::LanewiseSnapshot {
         taken_at: chrono::Utc::now().to_rfc3339(),
         lanes,
+        current_lane: state::read_current_lane(),
     }
 }
 
@@ -220,7 +222,7 @@ pub fn navigate_to_repo_pane(session: &str, path: &str) -> Result<(), String> {
         .map(|l| l.display_name().to_string());
 
     // Activate the WezTerm tab for this session
-    activate_wezterm_tab(session, display_name.as_deref())?;
+    activate_wezterm_tab(session, display_name.as_deref(), true)?;
 
     // Navigate within Zellij to the right tab
     let Some((shape, _)) = drivers::zellij::layout_for_session(session) else {
@@ -284,7 +286,7 @@ fn wezterm_socket() -> Option<String> {
     socks.into_iter().next().map(|(_, p)| p.to_string_lossy().into_owned())
 }
 
-fn activate_wezterm_tab(session: &str, display_name: Option<&str>) -> Result<(), String> {
+fn activate_wezterm_tab(session: &str, display_name: Option<&str>, focus: bool) -> Result<(), String> {
     let sock = wezterm_socket();
 
     let mut cmd = std::process::Command::new("/opt/homebrew/bin/wezterm");
@@ -310,7 +312,9 @@ fn activate_wezterm_tab(session: &str, display_name: Option<&str>) -> Result<(),
         return Err(format!("no WezTerm tab found for session '{}'", session));
     };
 
-    std::process::Command::new("open").args(["-a", "WezTerm"]).output().ok();
+    if focus {
+        std::process::Command::new("open").args(["-a", "WezTerm"]).output().ok();
+    }
 
     let mut cmd = std::process::Command::new("/opt/homebrew/bin/wezterm");
     cmd.args(["cli", "activate-tab", "--tab-id", &id.to_string()]);
@@ -320,6 +324,84 @@ fn activate_wezterm_tab(session: &str, display_name: Option<&str>) -> Result<(),
     cmd.output().map_err(|e| format!("wezterm activate-tab: {}", e))?;
 
     Ok(())
+}
+
+fn activate_window_facet(path: &str, zone: &str, cfg: &config::Config) -> Result<(), String> {
+    let bundle_id = parse_bundle_id(path)
+        .ok_or_else(|| format!("could not parse bundle id from path '{}'", path))?;
+
+    let rect = zone::parse(zone)?;
+
+    let uuid = cfg.monitor_uuid(&rect.monitor_handle)
+        .ok_or_else(|| format!("monitor handle '{}' not found in config", rect.monitor_handle))?
+        .to_string();
+
+    let lua = format!(
+        "local s=nil; \
+         for _,sc in ipairs(hs.screen.allScreens()) do \
+           if sc:getUUID()=='{uuid}' then s=sc; break end \
+         end; \
+         if s then \
+           local apps=hs.application.applicationsForBundleID('{bundle}'); \
+           local a=apps and apps[1]; \
+           if a then \
+             local w=a:mainWindow(); \
+             if w then \
+               local f=s:frame(); \
+               w:setFrame({{x=f.x+{x}*f.w, y=f.y+{y}*f.h, w={ww}*f.w, h={h}*f.h}}) \
+             end \
+           end \
+         end",
+        uuid = uuid,
+        bundle = bundle_id,
+        x = rect.x,
+        y = rect.y,
+        ww = rect.w,
+        h = rect.h,
+    );
+
+    match std::process::Command::new("/opt/homebrew/bin/hs").args(["-c", &lua]).output() {
+        Err(e) => Err(format!("hs call failed for '{}': {}", bundle_id, e)),
+        Ok(o) if !o.status.success() => {
+            Err(format!("hs returned error for '{}':\n{}", bundle_id, String::from_utf8_lossy(&o.stderr)))
+        }
+        _ => Ok(())
+    }
+}
+
+fn parse_bundle_id(path: &str) -> Option<String> {
+    let first = path.split(" / ").next()?;
+    let bundle = first.strip_prefix("app:")?;
+    Some(bundle.trim().to_string())
+}
+
+pub fn activate_lane(lane_id: &str, focus: bool) {
+    let cfg = config::Config::load();
+    let lane = match cfg.lanes.iter().find(|l| l.id == lane_id) {
+        Some(l) => l,
+        None => {
+            eprintln!("error: lane not found: {}", lane_id);
+            return;
+        }
+    };
+
+    for facet in &lane.facets {
+        match facet {
+            model::Facet::Terminal { session } => {
+                if let Err(e) = activate_wezterm_tab(session, lane.name.as_deref(), focus) {
+                    eprintln!("warning: {}", e);
+                }
+            }
+            model::Facet::Window { path, zone } => {
+                if let Err(e) = activate_window_facet(path, zone, &cfg) {
+                    eprintln!("warning: {}", e);
+                }
+            }
+            model::Facet::Repo { .. } => {}
+        }
+    }
+
+    state::set_current_lane(lane_id);
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -380,5 +462,26 @@ fn correlate(resources: &mut Vec<Observed>, cfg: &config::Config) {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_bundle_id() {
+        assert_eq!(
+            parse_bundle_id("app:com.github.wez.wezterm / window"),
+            Some("com.github.wez.wezterm".to_string())
+        );
+    }
+
+    #[test]
+    fn parses_bundle_id_bare() {
+        assert_eq!(
+            parse_bundle_id("app:org.mozilla.firefox / window"),
+            Some("org.mozilla.firefox".to_string())
+        );
     }
 }

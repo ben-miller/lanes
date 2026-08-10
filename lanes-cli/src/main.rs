@@ -37,6 +37,9 @@ enum Command {
     /// List lanes that have signals requiring attention
     Signals,
 
+    /// Print the currently active lane ID
+    Current,
+
     /// Manage Claude sessions
     Sessions {
         #[command(subcommand)]
@@ -60,6 +63,16 @@ fn main() {
         Command::Activate { id } => {
             let cfg = lanes::config::Config::load();
             cmd::activate::run(&id, &cfg);
+        }
+
+        Command::Current => {
+            match lanes::state::read_current_lane() {
+                Some(id) => println!("{}", id),
+                None => {
+                    eprintln!("no active lane");
+                    std::process::exit(1);
+                }
+            }
         }
 
         Command::Doctor => cmd::doctor::run(),

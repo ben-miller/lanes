@@ -136,6 +136,8 @@ impl LaneSnapshot {
 pub struct LanewiseSnapshot {
     pub taken_at: String,
     pub lanes: Vec<LaneSnapshot>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_lane: Option<String>,
 }
 
 // --- Selectors (durable handles) ---
