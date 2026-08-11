@@ -278,17 +278,19 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
     let zellij_session = val["zellij_session"].as_str().unwrap_or("").to_string();
     let zellij_pane_id = val["zellij_pane_id"].as_u64();
 
-    state::set_claude_cursor(session_id);
+    // Switching to a session is a deliberate lane change, same as clicking a
+    // lane in the UI or `lanes activate` - update current-lane too if this
+    // session lives in a configured lane, in the same write as the cursor
+    // (see set_claude_cursor_and_lane) so this is one fs-change event, not two.
+    let lane_id = if !zellij_session.is_empty() {
+        let cfg = config::Config::load();
+        cfg.lane_for_session(&zellij_session).map(|lane| lane.id.clone())
+    } else {
+        None
+    };
+    state::set_claude_cursor_and_lane(session_id, lane_id.as_deref());
 
     if !zellij_session.is_empty() {
-        // Switching to a session is a deliberate lane change, same as
-        // clicking a lane in the UI or `lanes activate` - update current-lane
-        // if this session lives in a configured lane.
-        let cfg = config::Config::load();
-        if let Some(lane) = cfg.lane_for_session(&zellij_session) {
-            state::set_current_lane(&lane.id);
-        }
-
         // Resolve the tab through the same session -> tab-id cache everything
         // else uses, rather than the wezterm_tab_id recorded in the session
         // file at hook time (which came from the same unreliable title

@@ -73,6 +73,20 @@ pub fn set_claude_cursor(session_id: &str) {
     save_doc(&doc);
 }
 
+/// Same as calling set_claude_cursor + set_current_lane separately, but as
+/// one load/mutate/save round-trip instead of two. Switching sessions always
+/// touches both fields together - writing them separately meant two
+/// file-system change events (and two Lanes Switch UI refreshes) for what's
+/// really one atomic action.
+pub fn set_claude_cursor_and_lane(session_id: &str, lane_id: Option<&str>) {
+    let mut doc = load_doc();
+    put_scalar(&mut doc, "claude-cursor", session_id);
+    if let Some(lane_id) = lane_id {
+        put_scalar(&mut doc, "current-lane", lane_id);
+    }
+    save_doc(&doc);
+}
+
 pub fn read_switch_pinned() -> bool {
     get_scalar_bool(&load_doc(), "switch-pinned")
 }
