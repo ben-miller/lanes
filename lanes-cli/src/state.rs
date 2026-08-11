@@ -70,6 +70,95 @@ fn put_claude_cursor(doc: &mut KdlDocument, session_id: &str) {
     doc.nodes_mut().push(node);
 }
 
+pub fn read_switch_pinned() -> bool {
+    switch_pinned_from(&load_doc())
+}
+
+fn switch_pinned_from(doc: &KdlDocument) -> bool {
+    doc.get("switch-pinned")
+        .and_then(|n| n.get(0))
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+}
+
+pub fn set_switch_pinned(pinned: bool) {
+    let mut doc = load_doc();
+    put_switch_pinned(&mut doc, pinned);
+    save_doc(&doc);
+}
+
+fn put_switch_pinned(doc: &mut KdlDocument, pinned: bool) {
+    doc.nodes_mut().retain(|n| n.name().value() != "switch-pinned");
+    let mut node = KdlNode::new("switch-pinned");
+    node.push(pinned);
+    doc.nodes_mut().push(node);
+}
+
+/// Monotonic pulse the running Lanes Switch app watches for and reacts to by
+/// showing+focusing its window, without touching the pin/always-on-top state.
+/// Needed because the window is only actually created on-screen via Tauri's
+/// own `show()` call - an external process (Hammerspoon) can't order a
+/// hidden NSWindow back on-screen itself, so J/K request a show this way
+/// instead.
+pub fn request_switch_show() {
+    let mut doc = load_doc();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i128)
+        .unwrap_or(0);
+    put_switch_show_requested(&mut doc, now);
+    save_doc(&doc);
+}
+
+pub fn read_switch_show_requested() -> i128 {
+    switch_show_requested_from(&load_doc())
+}
+
+fn switch_show_requested_from(doc: &KdlDocument) -> i128 {
+    doc.get("switch-show-requested")
+        .and_then(|n| n.get(0))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(0)
+}
+
+fn put_switch_show_requested(doc: &mut KdlDocument, ts: i128) {
+    doc.nodes_mut().retain(|n| n.name().value() != "switch-show-requested");
+    let mut node = KdlNode::new("switch-show-requested");
+    node.push(ts);
+    doc.nodes_mut().push(node);
+}
+
+/// Same pulse pattern as `request_switch_show`, in the other direction: used
+/// when Control-Option is released after a J/K-triggered show, so the
+/// window disappears the way Cmd+Tab's selector does on modifier release.
+pub fn request_switch_hide() {
+    let mut doc = load_doc();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis() as i128)
+        .unwrap_or(0);
+    put_switch_hide_requested(&mut doc, now);
+    save_doc(&doc);
+}
+
+pub fn read_switch_hide_requested() -> i128 {
+    switch_hide_requested_from(&load_doc())
+}
+
+fn switch_hide_requested_from(doc: &KdlDocument) -> i128 {
+    doc.get("switch-hide-requested")
+        .and_then(|n| n.get(0))
+        .and_then(|v| v.as_integer())
+        .unwrap_or(0)
+}
+
+fn put_switch_hide_requested(doc: &mut KdlDocument, ts: i128) {
+    doc.nodes_mut().retain(|n| n.name().value() != "switch-hide-requested");
+    let mut node = KdlNode::new("switch-hide-requested");
+    node.push(ts);
+    doc.nodes_mut().push(node);
+}
+
 /// Cached WezTerm tab ID for a Zellij session, so navigation doesn't have to
 /// re-derive the tab by matching titles (which aren't guaranteed to relate to
 /// the session name at all - see `lib::activate_wezterm_tab`). Populated once
@@ -169,6 +258,54 @@ mod tests {
         put_current_lane(&mut doc, "infra");
         assert_eq!(wezterm_tab_id_from(&doc, "lanes"), Some(4));
         assert_eq!(wezterm_tab_id_from(&doc, "infra"), Some(3));
+    }
+
+    #[test]
+    fn switch_pinned_defaults_false() {
+        let doc = KdlDocument::new();
+        assert_eq!(switch_pinned_from(&doc), false);
+    }
+
+    #[test]
+    fn round_trips_switch_pinned() {
+        let mut doc = KdlDocument::new();
+        put_switch_pinned(&mut doc, true);
+        assert_eq!(switch_pinned_from(&doc), true);
+        put_switch_pinned(&mut doc, false);
+        assert_eq!(switch_pinned_from(&doc), false);
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "switch-pinned").count(), 1);
+    }
+
+    #[test]
+    fn switch_show_requested_defaults_zero() {
+        let doc = KdlDocument::new();
+        assert_eq!(switch_show_requested_from(&doc), 0);
+    }
+
+    #[test]
+    fn round_trips_switch_show_requested() {
+        let mut doc = KdlDocument::new();
+        put_switch_show_requested(&mut doc, 1000);
+        assert_eq!(switch_show_requested_from(&doc), 1000);
+        put_switch_show_requested(&mut doc, 2000);
+        assert_eq!(switch_show_requested_from(&doc), 2000);
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "switch-show-requested").count(), 1);
+    }
+
+    #[test]
+    fn switch_hide_requested_defaults_zero() {
+        let doc = KdlDocument::new();
+        assert_eq!(switch_hide_requested_from(&doc), 0);
+    }
+
+    #[test]
+    fn round_trips_switch_hide_requested() {
+        let mut doc = KdlDocument::new();
+        put_switch_hide_requested(&mut doc, 1000);
+        assert_eq!(switch_hide_requested_from(&doc), 1000);
+        put_switch_hide_requested(&mut doc, 2000);
+        assert_eq!(switch_hide_requested_from(&doc), 2000);
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "switch-hide-requested").count(), 1);
     }
 
     #[test]

@@ -55,6 +55,26 @@ enum Command {
         #[command(subcommand)]
         command: TabsCommand,
     },
+
+    /// Query Lanes Switch's pin-on-top state
+    ///
+    /// state.kdl is the source of truth for pin state; the running Tauri
+    /// app watches it and applies always-on-top/show/hide whenever it
+    /// changes, regardless of who wrote it (Hammerspoon or the app itself).
+    IsPinned,
+
+    /// Flip Lanes Switch's pin-on-top state and print the new value.
+    ///
+    /// See `IsPinned` for how the running app picks this up.
+    TogglePinned,
+
+    /// Ask the running Lanes Switch app to show+focus its window, without
+    /// changing pin state. See `IsPinned` for the state.kdl watch mechanism.
+    ShowSwitch,
+
+    /// Ask the running Lanes Switch app to hide its window, without
+    /// changing pin state. See `IsPinned` for the state.kdl watch mechanism.
+    HideSwitch,
 }
 
 #[derive(Subcommand)]
@@ -207,5 +227,30 @@ fn main() {
                 println!("{}  tab_id={}", session, id);
             }
         },
+
+        Command::IsPinned => {
+            let pinned = lanes::state::read_switch_pinned();
+            println!("{}", pinned);
+            if !pinned {
+                std::process::exit(1);
+            }
+        }
+
+        Command::TogglePinned => {
+            let pinned = !lanes::state::read_switch_pinned();
+            lanes::state::set_switch_pinned(pinned);
+            println!("{}", pinned);
+            if !pinned {
+                std::process::exit(1);
+            }
+        }
+
+        Command::ShowSwitch => {
+            lanes::state::request_switch_show();
+        }
+
+        Command::HideSwitch => {
+            lanes::state::request_switch_hide();
+        }
     }
 }

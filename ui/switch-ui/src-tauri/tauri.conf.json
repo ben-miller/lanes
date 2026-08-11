@@ -21,7 +21,7 @@
         "transparent": true,
         "theme": "Dark",
         "acceptFirstMouse": true,
-        "alwaysOnTop": true
+        "visible": false
       }
     ],
     "security": {

@@ -2,7 +2,9 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tauri::Emitter;
+use tauri::menu::{CheckMenuItem, MenuBuilder};
+use tauri::tray::TrayIconBuilder;
+use tauri::{Emitter, Manager};
 
 #[tauri::command]
 fn get_snapshot() -> serde_json::Value {
@@ -93,7 +95,20 @@ fn is_relevant_change(
     false
 }
 
-fn watch_paths(handle: tauri::AppHandle) {
+fn apply_pin(app: &tauri::AppHandle, pin_item: &CheckMenuItem<tauri::Wry>, pinned: bool) {
+    let _ = pin_item.set_checked(pinned);
+    if let Some(win) = app.get_webview_window("main") {
+        let _ = win.set_always_on_top(pinned);
+        if pinned {
+            let _ = win.show();
+            let _ = win.set_focus();
+        } else {
+            let _ = win.hide();
+        }
+    }
+}
+
+fn watch_paths(handle: tauri::AppHandle, pin_item: CheckMenuItem<tauri::Wry>) {
     let home = std::env::var("HOME").unwrap_or_default();
     let sessions_dir = PathBuf::from(&home).join(".claude").join("active-sessions");
     let state_dir = PathBuf::from(&home).join(".local/state/lanes");
@@ -136,12 +151,39 @@ fn watch_paths(handle: tauri::AppHandle) {
 
         let debounce = Duration::from_millis(100);
         let mut last_emit: Option<Instant> = None;
+        let mut last_pinned = lanes::state::read_switch_pinned();
+        let mut last_show_requested = lanes::state::read_switch_show_requested();
+        let mut last_hide_requested = lanes::state::read_switch_hide_requested();
 
         for res in rx {
             if let Ok(event) = res {
                 use notify::EventKind::*;
                 if !matches!(event.kind, Create(_) | Modify(_) | Remove(_)) {
                     continue;
+                }
+                if event.paths.iter().any(|p| p.starts_with(&state_dir)) {
+                    let pinned = lanes::state::read_switch_pinned();
+                    if pinned != last_pinned {
+                        last_pinned = pinned;
+                        apply_pin(&handle, &pin_item, pinned);
+                    }
+
+                    let show_requested = lanes::state::read_switch_show_requested();
+                    if show_requested != last_show_requested {
+                        last_show_requested = show_requested;
+                        if let Some(win) = handle.get_webview_window("main") {
+                            let _ = win.show();
+                            let _ = win.set_focus();
+                        }
+                    }
+
+                    let hide_requested = lanes::state::read_switch_hide_requested();
+                    if hide_requested != last_hide_requested {
+                        last_hide_requested = hide_requested;
+                        if let Some(win) = handle.get_webview_window("main") {
+                            let _ = win.hide();
+                        }
+                    }
                 }
                 let relevant = event.paths.iter()
                     .any(|p| is_relevant_change(&repo_watches, &sessions_dir, &state_dir, &lanes_config_dir, &global_config_path, p));
@@ -159,9 +201,32 @@ pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
-            watch_paths(app.handle().clone());
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            let pinned_at_startup = lanes::state::read_switch_pinned();
+            let pin_item = CheckMenuItem::with_id(app, "pin", "Pin on Top", true, pinned_at_startup, None::<&str>)?;
+            let menu = MenuBuilder::new(app).item(&pin_item).build()?;
+            let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
+
+            watch_paths(app.handle().clone(), pin_item.clone());
+            apply_pin(app.handle(), &pin_item, pinned_at_startup);
+
+            let pin_item_for_handler = pin_item.clone();
+            TrayIconBuilder::new()
+                .icon(icon)
+                .icon_as_template(true)
+                .menu(&menu)
+                .on_menu_event(move |app, event| {
+                    if event.id.0.as_str() == "pin" {
+                        if let Ok(pinned) = pin_item_for_handler.is_checked() {
+                            lanes::state::set_switch_pinned(pinned);
+                            apply_pin(app, &pin_item_for_handler, pinned);
+                        }
+                    }
+                })
+                .build(app)?;
+
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![get_snapshot, execute_action, set_current_lane, activate_lane])
