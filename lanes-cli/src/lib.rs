@@ -238,6 +238,14 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
     state::set_claude_cursor(session_id);
 
     if !zellij_session.is_empty() {
+        // Switching to a session is a deliberate lane change, same as
+        // clicking a lane in the UI or `lanes activate` - update current-lane
+        // if this session lives in a configured lane.
+        let cfg = config::Config::load();
+        if let Some(lane) = cfg.lane_for_session(&zellij_session) {
+            state::set_current_lane(&lane.id);
+        }
+
         // Resolve the tab through the same session -> tab-id cache everything
         // else uses, rather than the wezterm_tab_id recorded in the session
         // file at hook time (which came from the same unreliable title

@@ -49,6 +49,12 @@ impl Config {
             })
             .collect()
     }
+
+    /// The lane whose Terminal facet session matches the given Zellij session
+    /// name, if any.
+    pub fn lane_for_session(&self, session: &str) -> Option<&Lane> {
+        self.lanes.iter().find(|l| l.terminal_session() == Some(session))
+    }
 }
 
 impl Default for Config {
@@ -256,5 +262,29 @@ zone = "main:1-2/3"
         let names = cfg.zellij_lane_names();
         assert_eq!(names.get("sheetwork").map(|s| s.as_str()), Some("sheetwork"));
         assert_eq!(names.get("lanes").map(|s| s.as_str()), Some("lanes dev"));
+    }
+
+    #[test]
+    fn lane_for_session_finds_lane_by_terminal_facet() {
+        use crate::model::Facet;
+        let cfg = Config {
+            drivers: None,
+            monitors: HashMap::new(),
+            lanes: vec![
+                Lane {
+                    id: "sheetwork1".to_string(),
+                    name: None,
+                    facets: vec![Facet::Terminal { session: "sheetwork1".to_string() }],
+                },
+                Lane {
+                    id: "lanes-dev".to_string(),
+                    name: Some("lanes dev".to_string()),
+                    facets: vec![Facet::Terminal { session: "lanes".to_string() }],
+                },
+            ],
+        };
+        assert_eq!(cfg.lane_for_session("lanes").map(|l| l.id.as_str()), Some("lanes-dev"));
+        assert_eq!(cfg.lane_for_session("sheetwork1").map(|l| l.id.as_str()), Some("sheetwork1"));
+        assert!(cfg.lane_for_session("job-hunting").is_none());
     }
 }
