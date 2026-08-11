@@ -44,11 +44,18 @@
 
   let timer;
   let unlistenSessions;
+  let unlistenLane;
 
   onMount(async () => {
     refresh();
     timer = setInterval(refresh, 10000);
     unlistenSessions = await listen("sessions-changed", () => refresh());
+    // Fires immediately on a lane change (see lib.rs) - update the highlight
+    // right away instead of waiting on the slower full refresh above, same
+    // as the optimistic local update already done for in-UI lane clicks.
+    unlistenLane = await listen("lane-changed", (event) => {
+      if (snapshot) snapshot = { ...snapshot, current_lane: event.payload };
+    });
     document.addEventListener("mousedown", (e) => {
       if (!e.target.closest(".signal") && !e.target.closest(".overlay")) {
         getCurrentWindow().startDragging();
@@ -58,6 +65,7 @@
   onDestroy(() => {
     clearInterval(timer);
     if (unlistenSessions) unlistenSessions();
+    if (unlistenLane) unlistenLane();
   });
 
   function allSignals(lane) {

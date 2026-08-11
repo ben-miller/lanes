@@ -6,6 +6,7 @@ pub mod zone;
 
 use model::{Observed, Snapshot};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 pub fn gather() -> Snapshot {
     let cfg = config::Config::load();
@@ -281,16 +282,35 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
     // Switching to a session is a deliberate lane change, same as clicking a
     // lane in the UI or `lanes activate` - update current-lane too if this
     // session lives in a configured lane, in the same write as the cursor
-    // (see set_claude_cursor_and_lane) so this is one fs-change event, not two.
+    // (see write_claude_cursor_and_lane) so this is one fs-change event, not two.
     let lane_id = if !zellij_session.is_empty() {
         let cfg = config::Config::load();
         cfg.lane_for_session(&zellij_session).map(|lane| lane.id.clone())
     } else {
         None
     };
-    state::set_claude_cursor_and_lane(session_id, lane_id.as_deref());
 
-    if !zellij_session.is_empty() {
+    // Write the new cursor/lane immediately, before the actual WezTerm/Zellij
+    // switch even runs, so the UI updates as close to the keystroke as
+    // possible rather than waiting on IPC round-trips it doesn't need to
+    // wait on. If the switch below turns out to fail partway through, this
+    // optimism is undone in the Err branch so state.kdl (and the UI) never
+    // claims we're somewhere we didn't actually reach.
+    let old_cursor = state::read_claude_cursor();
+    let old_lane = state::read_current_lane();
+    state::write_claude_cursor_and_lane(Some(session_id), lane_id.as_deref());
+    // state.kdl is the persisted record (so a not-yet-running or restarting
+    // UI still picks up the right lane), but if the UI is already running,
+    // notify it directly over a socket instead of waiting on it to notice
+    // the file changed - a filesystem watcher has an inherent floor latency
+    // no amount of reordering removes, since the UI is a different process.
+    notify_switch_socket(&format!("lane:{}\n", lane_id.as_deref().unwrap_or("")));
+
+    let switch_result: Result<(), String> = (|| {
+        if zellij_session.is_empty() {
+            return Ok(());
+        }
+
         // Resolve the tab through the same session -> tab-id cache everything
         // else uses, rather than the wezterm_tab_id recorded in the session
         // file at hook time (which came from the same unreliable title
@@ -298,14 +318,69 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
         activate_wezterm_tab(&zellij_session, true)?;
 
         if let Some(pane_id) = zellij_pane_id {
-            std::process::Command::new("/opt/homebrew/bin/zellij")
+            let output = std::process::Command::new("/opt/homebrew/bin/zellij")
                 .args(["--session", &zellij_session, "action", "focus-pane-id", &pane_id.to_string()])
                 .output()
                 .map_err(|e| format!("zellij focus-pane-id: {}", e))?;
+            if !output.status.success() {
+                let stderr = String::from_utf8_lossy(&output.stderr);
+                if !is_benign_zellij_focus_error(&stderr) {
+                    return Err(format!("zellij focus-pane-id failed: {}", stderr.trim()));
+                }
+            }
         }
+
+        Ok(())
+    })();
+
+    if switch_result.is_err() {
+        // The optimistic write above assumed this switch would succeed - it
+        // didn't, so put both state.kdl and the already-notified UI back the
+        // way they were, not just state.kdl. Without the socket ping here,
+        // an already-running UI would keep showing the lane we failed to
+        // reach until its next unrelated refresh (up to 10s later).
+        state::write_claude_cursor_and_lane(old_cursor.as_deref(), old_lane.as_deref());
+        notify_switch_socket(&format!("lane:{}\n", old_lane.as_deref().unwrap_or("")));
     }
 
-    Ok(())
+    switch_result
+}
+
+/// zellij's own focus-pane-id treats "the target pane is already focused"
+/// as an error (exit 2), even though that's the desired end state, not a
+/// failure - confirmed directly against zellij 0.44.3. Don't roll back a
+/// switch that actually landed correctly just because of this quirk.
+fn is_benign_zellij_focus_error(stderr: &str) -> bool {
+    stderr.contains("already focused")
+}
+
+fn switch_socket_path() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_default();
+    PathBuf::from(home).join(".local/state/lanes/switch.sock")
+}
+
+/// Best-effort direct notification to an already-running Lanes Switch UI
+/// process over a local socket - a filesystem watcher has an inherent floor
+/// latency (write -> OS notices -> watcher wakes up -> app reacts) that no
+/// amount of reordering removes, since the UI is a different process.
+/// Silently does nothing if the UI isn't running or isn't listening yet;
+/// show/hide have no meaning for an app that isn't running to have a window
+/// in the first place, so there's nothing to fall back to for those. Lane
+/// changes are still separately persisted to state.kdl (see
+/// switch_claude_session), which the UI reads fresh on its own next startup.
+fn notify_switch_socket(message: &str) {
+    use std::io::Write;
+    if let Ok(mut stream) = std::os::unix::net::UnixStream::connect(switch_socket_path()) {
+        let _ = stream.write_all(message.as_bytes());
+    }
+}
+
+pub fn notify_switch_show() {
+    notify_switch_socket("show\n");
+}
+
+pub fn notify_switch_hide() {
+    notify_switch_socket("hide\n");
 }
 
 /// Cycle to the next (direction=1) or previous (direction=-1) live Claude
@@ -596,6 +671,17 @@ fn correlate(resources: &mut Vec<Observed>, cfg: &config::Config) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn already_focused_zellij_error_is_benign() {
+        assert!(is_benign_zellij_focus_error("Pane Terminal(0) is already focused\n"));
+    }
+
+    #[test]
+    fn other_zellij_focus_errors_are_not_benign() {
+        assert!(!is_benign_zellij_focus_error("No pane with id Terminal(7) found\n"));
+        assert!(!is_benign_zellij_focus_error(""));
+    }
 
     #[test]
     fn parses_bundle_id() {

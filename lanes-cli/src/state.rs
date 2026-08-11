@@ -22,17 +22,10 @@ fn save_doc(doc: &KdlDocument) {
     std::fs::write(path, doc.to_string()).ok();
 }
 
-fn now_millis() -> i128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis() as i128)
-        .unwrap_or(0)
-}
-
 // state.kdl mostly holds flat scalar nodes (`name value`) - one value per
-// name, last write wins. These three getters plus `put_scalar` are the
-// single implementation of that pattern; every field below is a thin,
-// named wrapper around them.
+// name, last write wins. These getters plus `put_scalar` are the single
+// implementation of that pattern; every field below is a thin, named
+// wrapper around them.
 
 fn get_scalar_str(doc: &KdlDocument, name: &str) -> Option<String> {
     doc.get(name).and_then(|n| n.get(0)).and_then(|v| v.as_string()).map(|s| s.to_string())
@@ -40,10 +33,6 @@ fn get_scalar_str(doc: &KdlDocument, name: &str) -> Option<String> {
 
 fn get_scalar_bool(doc: &KdlDocument, name: &str) -> bool {
     doc.get(name).and_then(|n| n.get(0)).and_then(|v| v.as_bool()).unwrap_or(false)
-}
-
-fn get_scalar_int(doc: &KdlDocument, name: &str) -> i128 {
-    doc.get(name).and_then(|n| n.get(0)).and_then(|v| v.as_integer()).unwrap_or(0)
 }
 
 fn put_scalar(doc: &mut KdlDocument, name: &str, value: impl Into<kdl::KdlEntry>) {
@@ -73,17 +62,27 @@ pub fn set_claude_cursor(session_id: &str) {
     save_doc(&doc);
 }
 
-/// Same as calling set_claude_cursor + set_current_lane separately, but as
-/// one load/mutate/save round-trip instead of two. Switching sessions always
-/// touches both fields together - writing them separately meant two
-/// file-system change events (and two Lanes Switch UI refreshes) for what's
-/// really one atomic action.
-pub fn set_claude_cursor_and_lane(session_id: &str, lane_id: Option<&str>) {
-    let mut doc = load_doc();
-    put_scalar(&mut doc, "claude-cursor", session_id);
-    if let Some(lane_id) = lane_id {
-        put_scalar(&mut doc, "current-lane", lane_id);
+fn write_scalar_opt(doc: &mut KdlDocument, name: &str, value: Option<&str>) {
+    match value {
+        Some(v) => put_scalar(doc, name, v),
+        None => { doc.nodes_mut().retain(|n| n.name().value() != name); }
     }
+}
+
+/// One load/mutate/save round-trip for both fields, instead of the two
+/// separate set_claude_cursor/set_current_lane round-trips this replaced -
+/// switching sessions always touches both together, and writing them
+/// separately meant two file-system change events (and two Lanes Switch UI
+/// refreshes) for what's really one atomic action. `None` removes a field
+/// entirely rather than writing a stale value; used both to record a normal
+/// switch (cursor is always Some there) and, with the previous values, to
+/// undo an optimistic write if the switch it was written ahead of turns out
+/// to have failed partway through (where cursor may legitimately be None -
+/// e.g. the very first switch ever, before state.kdl had one at all).
+pub fn write_claude_cursor_and_lane(cursor: Option<&str>, lane: Option<&str>) {
+    let mut doc = load_doc();
+    write_scalar_opt(&mut doc, "claude-cursor", cursor);
+    write_scalar_opt(&mut doc, "current-lane", lane);
     save_doc(&doc);
 }
 
@@ -95,37 +94,6 @@ pub fn set_switch_pinned(pinned: bool) {
     let mut doc = load_doc();
     put_scalar(&mut doc, "switch-pinned", pinned);
     save_doc(&doc);
-}
-
-fn request_switch_pulse(name: &str) {
-    let mut doc = load_doc();
-    put_scalar(&mut doc, name, now_millis());
-    save_doc(&doc);
-}
-
-/// Monotonic pulse the running Lanes Switch app watches for and reacts to by
-/// showing+focusing its window, without touching the pin/always-on-top state.
-/// Needed because the window is only actually created on-screen via Tauri's
-/// own `show()` call - an external process (Hammerspoon) can't order a
-/// hidden NSWindow back on-screen itself, so J/K request a show this way
-/// instead.
-pub fn request_switch_show() {
-    request_switch_pulse("switch-show-requested");
-}
-
-pub fn read_switch_show_requested() -> i128 {
-    get_scalar_int(&load_doc(), "switch-show-requested")
-}
-
-/// Same pulse pattern as `request_switch_show`, in the other direction: used
-/// when Control-Option is released after a J/K-triggered show, so the
-/// window disappears the way Cmd+Tab's selector does on modifier release.
-pub fn request_switch_hide() {
-    request_switch_pulse("switch-hide-requested");
-}
-
-pub fn read_switch_hide_requested() -> i128 {
-    get_scalar_int(&load_doc(), "switch-hide-requested")
 }
 
 /// Cached WezTerm tab ID for a Zellij session, so navigation doesn't have to
@@ -194,10 +162,9 @@ mod tests {
     }
 
     #[test]
-    fn scalar_bool_and_int_default_when_absent() {
+    fn scalar_bool_defaults_false_when_absent() {
         let doc = KdlDocument::new();
         assert_eq!(get_scalar_bool(&doc, "switch-pinned"), false);
-        assert_eq!(get_scalar_int(&doc, "switch-show-requested"), 0);
     }
 
     #[test]
@@ -211,6 +178,22 @@ mod tests {
         // updating one field later shouldn't touch the other
         put_scalar(&mut doc, "current-lane", "infra");
         assert_eq!(get_scalar_bool(&doc, "switch-pinned"), true);
+    }
+
+    #[test]
+    fn write_scalar_opt_sets_value_when_some() {
+        let mut doc = KdlDocument::new();
+        write_scalar_opt(&mut doc, "current-lane", Some("infra"));
+        assert_eq!(get_scalar_str(&doc, "current-lane"), Some("infra".to_string()));
+    }
+
+    #[test]
+    fn write_scalar_opt_removes_node_when_none() {
+        let mut doc = KdlDocument::new();
+        put_scalar(&mut doc, "current-lane", "infra");
+        write_scalar_opt(&mut doc, "current-lane", None);
+        assert_eq!(get_scalar_str(&doc, "current-lane"), None);
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "current-lane").count(), 0);
     }
 
     #[test]

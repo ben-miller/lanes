@@ -89,10 +89,20 @@ enum SessionsCommand {
     Switch { id: String },
 
     /// Switch to the next Claude session, cycling
-    Next,
+    Next {
+        /// Also request that Lanes Switch show+focus its window, from this
+        /// same CLI invocation rather than a separate one - two concurrent
+        /// processes each doing their own unguarded load/save of state.kdl
+        /// could silently clobber each other's write.
+        #[arg(long)]
+        show: bool,
+    },
 
     /// Switch to the previous Claude session, cycling
-    Prev,
+    Prev {
+        #[arg(long)]
+        show: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -200,17 +210,23 @@ fn main() {
                 }
             }
 
-            SessionsCommand::Next => {
+            SessionsCommand::Next { show } => {
                 if let Err(e) = lanes::cycle_claude_session(1) {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
                 }
+                if show {
+                    lanes::notify_switch_show();
+                }
             }
 
-            SessionsCommand::Prev => {
+            SessionsCommand::Prev { show } => {
                 if let Err(e) = lanes::cycle_claude_session(-1) {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
+                }
+                if show {
+                    lanes::notify_switch_show();
                 }
             }
         },
@@ -246,11 +262,11 @@ fn main() {
         }
 
         Command::ShowSwitch => {
-            lanes::state::request_switch_show();
+            lanes::notify_switch_show();
         }
 
         Command::HideSwitch => {
-            lanes::state::request_switch_hide();
+            lanes::notify_switch_hide();
         }
     }
 }

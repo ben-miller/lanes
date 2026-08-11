@@ -6,6 +6,44 @@ use tauri::menu::{CheckMenuItem, MenuBuilder};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
 
+/// Listens on a local Unix socket for direct notifications from the `lanes`
+/// CLI, so latency-sensitive updates (a switch's new lane, show/hide) don't
+/// have to wait on the state.kdl file watcher's inherent floor latency
+/// (write -> OS notices -> watcher wakes up -> app reacts) - the CLI writes
+/// state.kdl too, so that path remains the fallback for when this app isn't
+/// running yet to receive the message.
+fn start_switch_socket(handle: tauri::AppHandle) {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let sock_path = PathBuf::from(&home).join(".local/state/lanes/switch.sock");
+    let _ = std::fs::remove_file(&sock_path);
+    let listener = match std::os::unix::net::UnixListener::bind(&sock_path) {
+        Ok(l) => l,
+        Err(_) => return,
+    };
+
+    std::thread::spawn(move || {
+        use std::io::BufRead;
+        for stream in listener.incoming().flatten() {
+            let mut lines = std::io::BufReader::new(stream).lines();
+            while let Some(Ok(line)) = lines.next() {
+                if let Some(lane) = line.strip_prefix("lane:") {
+                    let payload = if lane.is_empty() { None } else { Some(lane.to_string()) };
+                    handle.emit("lane-changed", payload).ok();
+                } else if line == "show" {
+                    if let Some(win) = handle.get_webview_window("main") {
+                        let _ = win.show();
+                        let _ = win.set_focus();
+                    }
+                } else if line == "hide" {
+                    if let Some(win) = handle.get_webview_window("main") {
+                        let _ = win.hide();
+                    }
+                }
+            }
+        }
+    });
+}
+
 #[tauri::command]
 fn get_snapshot() -> serde_json::Value {
     let cfg = lanes::config::Config::load();
@@ -152,8 +190,6 @@ fn watch_paths(handle: tauri::AppHandle, pin_item: CheckMenuItem<tauri::Wry>) {
         let debounce = Duration::from_millis(100);
         let mut last_emit: Option<Instant> = None;
         let mut last_pinned = lanes::state::read_switch_pinned();
-        let mut last_show_requested = lanes::state::read_switch_show_requested();
-        let mut last_hide_requested = lanes::state::read_switch_hide_requested();
 
         for res in rx {
             if let Ok(event) = res {
@@ -166,23 +202,6 @@ fn watch_paths(handle: tauri::AppHandle, pin_item: CheckMenuItem<tauri::Wry>) {
                     if pinned != last_pinned {
                         last_pinned = pinned;
                         apply_pin(&handle, &pin_item, pinned);
-                    }
-
-                    let show_requested = lanes::state::read_switch_show_requested();
-                    if show_requested != last_show_requested {
-                        last_show_requested = show_requested;
-                        if let Some(win) = handle.get_webview_window("main") {
-                            let _ = win.show();
-                            let _ = win.set_focus();
-                        }
-                    }
-
-                    let hide_requested = lanes::state::read_switch_hide_requested();
-                    if hide_requested != last_hide_requested {
-                        last_hide_requested = hide_requested;
-                        if let Some(win) = handle.get_webview_window("main") {
-                            let _ = win.hide();
-                        }
                     }
                 }
                 let relevant = event.paths.iter()
@@ -210,6 +229,7 @@ pub fn run() {
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
 
             watch_paths(app.handle().clone(), pin_item.clone());
+            start_switch_socket(app.handle().clone());
             apply_pin(app.handle(), &pin_item, pinned_at_startup);
 
             let pin_item_for_handler = pin_item.clone();
