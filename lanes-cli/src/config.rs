@@ -98,7 +98,7 @@ struct LaneFile {
 #[derive(Deserialize)]
 struct LaneHeader {
     id: String,
-    name: Option<String>,
+    name: String,
 }
 
 // --- Loaders ---
@@ -183,6 +183,7 @@ mod tests {
         let content = r#"
 [lane]
 id = "sheetwork"
+name = "Sheetwork"
 
 [[facets]]
 kind = "terminal"
@@ -190,8 +191,23 @@ session = "sheetwork"
 "#;
         let file: LaneFile = toml::from_str(content).unwrap();
         assert_eq!(file.lane.id, "sheetwork");
+        assert_eq!(file.lane.name, "Sheetwork");
         assert_eq!(file.facets.len(), 1);
         assert!(matches!(&file.facets[0], Facet::Terminal { session } if session == "sheetwork"));
+    }
+
+    #[test]
+    fn lane_file_without_name_fails_to_parse() {
+        let content = r#"
+[lane]
+id = "sheetwork"
+
+[[facets]]
+kind = "terminal"
+session = "sheetwork"
+"#;
+        let result: Result<LaneFile, _> = toml::from_str(content);
+        assert!(result.is_err());
     }
 
     #[test]
@@ -212,7 +228,7 @@ zone = "main:1-2/3"
 "#;
         let file: LaneFile = toml::from_str(content).unwrap();
         assert_eq!(file.lane.id, "lanes-dev");
-        assert_eq!(file.lane.name.as_deref(), Some("lanes dev"));
+        assert_eq!(file.lane.name, "lanes dev");
         assert_eq!(file.facets.len(), 2);
         assert!(matches!(&file.facets[1], Facet::Window { path, zone } if path.contains("intellij") && zone == "main:1-2/3"));
     }
@@ -245,14 +261,14 @@ zone = "main:1-2/3"
             lanes: vec![
                 Lane {
                     id: "sheetwork".to_string(),
-                    name: None,
+                    name: "Sheetwork".to_string(),
                     facets: vec![Facet::Terminal {
                         session: "sheetwork".to_string(),
                     }],
                 },
                 Lane {
                     id: "lanes-dev".to_string(),
-                    name: Some("lanes dev".to_string()),
+                    name: "lanes dev".to_string(),
                     facets: vec![Facet::Terminal {
                         session: "lanes".to_string(),
                     }],
@@ -260,7 +276,7 @@ zone = "main:1-2/3"
             ],
         };
         let names = cfg.zellij_lane_names();
-        assert_eq!(names.get("sheetwork").map(|s| s.as_str()), Some("sheetwork"));
+        assert_eq!(names.get("sheetwork").map(|s| s.as_str()), Some("Sheetwork"));
         assert_eq!(names.get("lanes").map(|s| s.as_str()), Some("lanes dev"));
     }
 
@@ -273,12 +289,12 @@ zone = "main:1-2/3"
             lanes: vec![
                 Lane {
                     id: "sheetwork1".to_string(),
-                    name: None,
+                    name: "Sheetwork 1".to_string(),
                     facets: vec![Facet::Terminal { session: "sheetwork1".to_string() }],
                 },
                 Lane {
                     id: "lanes-dev".to_string(),
-                    name: Some("lanes dev".to_string()),
+                    name: "lanes dev".to_string(),
                     facets: vec![Facet::Terminal { session: "lanes".to_string() }],
                 },
             ],

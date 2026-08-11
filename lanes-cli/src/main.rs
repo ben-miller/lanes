@@ -38,7 +38,11 @@ enum Command {
     Signals,
 
     /// Print the currently active lane ID
-    Current,
+    Current {
+        /// Print the lane's display name instead of its id
+        #[arg(long)]
+        name: bool,
+    },
 
     /// Manage Claude sessions
     Sessions {
@@ -95,8 +99,18 @@ fn main() {
             cmd::activate::run(&id, &cfg);
         }
 
-        Command::Current => {
+        Command::Current { name } => {
             match lanes::state::read_current_lane() {
+                Some(id) if name => {
+                    let cfg = lanes::config::Config::load();
+                    match cfg.lanes.iter().find(|l| l.id == id) {
+                        Some(lane) => println!("{}", lane.name),
+                        None => {
+                            eprintln!("error: current lane '{}' not found in config", id);
+                            std::process::exit(1);
+                        }
+                    }
+                }
                 Some(id) => println!("{}", id),
                 None => {
                     eprintln!("no active lane");

@@ -5,15 +5,14 @@ use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Lane {
     pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub name: String,
     #[serde(default)]
     pub facets: Vec<Facet>,
 }
 
 impl Lane {
     pub fn display_name(&self) -> &str {
-        self.name.as_deref().unwrap_or(&self.id)
+        &self.name
     }
 
     pub fn terminal_session(&self) -> Option<&str> {
@@ -121,8 +120,7 @@ impl FacetSnapshot {
 #[derive(Clone, Serialize)]
 pub struct LaneSnapshot {
     pub id: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
+    pub name: String,
     pub facets: Vec<FacetSnapshot>,
 }
 

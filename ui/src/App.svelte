@@ -67,7 +67,7 @@
     const s = activeSignal;
     if (!s) return;
     const report = [
-      `lane: ${s.lane.name ?? s.lane.id}`,
+      `lane: ${s.lane.name}`,
       `signal: ${signalLabel(s.signal)}`,
       `action: ${s.signal.action ? JSON.stringify(s.signal.action) : "none"}`,
       `error: ${s.status ?? "(none)"}`,
@@ -92,7 +92,7 @@
       {#each snapshot.lanes as lane}
         {@const signals = allSignals(lane)}
         <div class="column" class:has-signals={signals.length > 0} class:current={snapshot.current_lane === lane.id} on:click={() => handleLaneClick(lane)}>
-          <span class="name">{lane.name ?? lane.id}</span>
+          <span class="name">{lane.name}</span>
           {#each signals as signal}
             <button
               class="signal"
@@ -109,7 +109,7 @@
 {#if activeSignal}
   <div class="backdrop" on:mousedown={dismissOverlay} role="presentation">
     <div class="overlay" on:mousedown|stopPropagation role="dialog">
-      <div class="overlay-lane">{activeSignal.lane.name ?? activeSignal.lane.id}</div>
+      <div class="overlay-lane">{activeSignal.lane.name}</div>
       <div class="overlay-reason">{signalLabel(activeSignal.signal)}</div>
       {#if activeSignal.signal.action}
         <div class="overlay-action">{JSON.stringify(activeSignal.signal.action)}</div>
