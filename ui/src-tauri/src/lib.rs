@@ -59,8 +59,19 @@ fn build_repo_watch(root: PathBuf) -> RepoWatch {
     RepoWatch { root, gitignore }
 }
 
-fn is_relevant_change(watches: &[RepoWatch], sessions_dir: &Path, state_dir: &Path, path: &Path) -> bool {
-    if path.starts_with(sessions_dir) || path.starts_with(state_dir) {
+fn is_relevant_change(
+    watches: &[RepoWatch],
+    sessions_dir: &Path,
+    state_dir: &Path,
+    lanes_config_dir: &Path,
+    global_config_path: &Path,
+    path: &Path,
+) -> bool {
+    if path.starts_with(sessions_dir)
+        || path.starts_with(state_dir)
+        || path.starts_with(lanes_config_dir)
+        || path == global_config_path
+    {
         return true;
     }
     for watch in watches {
@@ -86,6 +97,8 @@ fn watch_paths(handle: tauri::AppHandle) {
     let home = std::env::var("HOME").unwrap_or_default();
     let sessions_dir = PathBuf::from(&home).join(".claude").join("active-sessions");
     let state_dir = PathBuf::from(&home).join(".local/state/lanes");
+    let lanes_config_dir = lanes::config::config_dir();
+    let global_config_path = PathBuf::from(&home).join(".config").join("lanes.toml");
 
     let cfg = lanes::config::Config::load();
     let repo_watches: Vec<RepoWatch> = cfg.lanes.iter()
@@ -111,6 +124,12 @@ fn watch_paths(handle: tauri::AppHandle) {
         if state_dir.exists() {
             watcher.watch(&state_dir, RecursiveMode::NonRecursive).ok();
         }
+        if lanes_config_dir.exists() {
+            watcher.watch(&lanes_config_dir, RecursiveMode::NonRecursive).ok();
+        }
+        if global_config_path.exists() {
+            watcher.watch(&global_config_path, RecursiveMode::NonRecursive).ok();
+        }
         for rw in &repo_watches {
             watcher.watch(&rw.root, RecursiveMode::Recursive).ok();
         }
@@ -125,7 +144,7 @@ fn watch_paths(handle: tauri::AppHandle) {
                     continue;
                 }
                 let relevant = event.paths.iter()
-                    .any(|p| is_relevant_change(&repo_watches, &sessions_dir, &state_dir, p));
+                    .any(|p| is_relevant_change(&repo_watches, &sessions_dir, &state_dir, &lanes_config_dir, &global_config_path, p));
                 if relevant && last_emit.map_or(true, |t| t.elapsed() >= debounce) {
                     handle.emit("sessions-changed", ()).ok();
                     last_emit = Some(Instant::now());
