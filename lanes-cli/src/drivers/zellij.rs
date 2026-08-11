@@ -1,53 +1,6 @@
 use std::process::Command;
 
-use serde_json::json;
-
 use crate::model::*;
-
-pub fn enumerate() -> Vec<Observed> {
-    let output = match Command::new("/opt/homebrew/bin/zellij")
-        .args(["list-sessions", "--no-formatting"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => {
-            eprintln!("gather: zellij not found");
-            return vec![];
-        }
-    };
-
-    // Doesn't call dump-layout here - that used to run in parallel across
-    // every session purely to feed the (now-removed) shape/state fields.
-    // The real per-session layout data is still available via
-    // layout_for_session(), used by gather_lanes() for the UI's panes.
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
-        .lines()
-        .filter(|l| !l.trim().is_empty())
-        .filter_map(parse_session_header)
-        .filter(|(_, exited)| !exited)
-        .map(|(name, _)| build_observed(name))
-        .collect()
-}
-
-// Line format: "session-name [Created Xdays Yh ...] (EXITED - ...)" or without (EXITED)
-fn parse_session_header(line: &str) -> Option<(String, bool)> {
-    let name = line.split_whitespace().next()?.to_string();
-    let exited = line.contains("(EXITED");
-    Some((name, exited))
-}
-
-fn build_observed(name: String) -> Observed {
-    Observed {
-        selector: Selector::Terminal(TerminalSel {
-            driver: "zellij".to_string(),
-            id: name.clone(),
-        }),
-        locator: name,
-        cwd: None,
-        extra: json!({}),
-    }
-}
 
 pub fn layout_for_session(session: &str) -> Option<(TerminalShape, Option<String>)> {
     dump_layout(session)

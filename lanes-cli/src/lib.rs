@@ -4,29 +4,8 @@ pub mod model;
 pub mod state;
 pub mod zone;
 
-use model::{Observed, Snapshot};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
-
-pub fn gather() -> Snapshot {
-    let cfg = config::Config::load();
-    let mut resources: Vec<Observed> = Vec::new();
-
-    if cfg.driver_enabled("claude") {
-        resources.extend(drivers::claude::enumerate());
-    }
-    if cfg.driver_enabled("zellij") {
-        resources.extend(drivers::zellij::enumerate());
-    }
-    if cfg.driver_enabled("brotab") {
-        resources.extend(drivers::browser::enumerate());
-    }
-
-    Snapshot {
-        taken_at: chrono::Utc::now().to_rfc3339(),
-        resources,
-    }
-}
 
 pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
     let running = running_zellij_sessions();
@@ -386,25 +365,14 @@ pub fn notify_switch_hide() {
 /// session, ordered by Zellij session name then session ID - matching the
 /// order the Go `claude-session` tool used, so muscle memory carries over.
 pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
-    // Deliberately not gather() - that also runs zellij::enumerate()'s
-    // per-session dump-layout calls to build pane/tab shapes, none of which
-    // this needs (only the zellij_session field, which claude::enumerate()
-    // already embeds itself). That was ~250-300ms of wasted latency on
-    // every single hotkey press.
     let cfg = config::Config::load();
-    let resources = if cfg.driver_enabled("claude") {
+    let live_sessions = if cfg.driver_enabled("claude") {
         drivers::claude::enumerate()
     } else {
         vec![]
     };
-    let mut sessions: Vec<(String, String)> = resources.iter()
-        .map(|r| {
-            let zellij_session = r.extra.get("zellij_session")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            (zellij_session, r.locator.clone())
-        })
+    let mut sessions: Vec<(String, String)> = live_sessions.into_iter()
+        .map(|s| (s.zellij_session.unwrap_or_default(), s.session_id))
         .collect();
     sessions.sort();
 

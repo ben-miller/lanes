@@ -2,20 +2,23 @@ use std::fs;
 use std::path::Path;
 
 use serde::Deserialize;
-use serde_json::json;
-
-use crate::model::*;
 
 #[derive(Deserialize)]
 struct ActiveSession {
     session_id: String,
     zellij_session: Option<String>,
-    zellij_pane_id: Option<i64>,
-    cwd: String,
     pid: Option<u32>,
 }
 
-pub fn enumerate() -> Vec<Observed> {
+/// A live Claude Code session, for ordering/cycling between them -
+/// cycle_claude_session() is the only consumer, and only needs enough to
+/// sort sessions and identify one to switch to.
+pub struct ClaudeSession {
+    pub session_id: String,
+    pub zellij_session: Option<String>,
+}
+
+pub fn enumerate() -> Vec<ClaudeSession> {
     let registry_dir = dirs::active_sessions_dir();
     let entries = match fs::read_dir(&registry_dir) {
         Ok(e) => e,
@@ -31,7 +34,7 @@ pub fn enumerate() -> Vec<Observed> {
         .collect()
 }
 
-fn load_session(path: &Path, live_zellij_sessions: &std::collections::HashSet<String>) -> Option<Observed> {
+fn load_session(path: &Path, live_zellij_sessions: &std::collections::HashSet<String>) -> Option<ClaudeSession> {
     let data = fs::read_to_string(path).ok()?;
     let s: ActiveSession = serde_json::from_str(&data).ok()?;
 
@@ -40,22 +43,9 @@ fn load_session(path: &Path, live_zellij_sessions: &std::collections::HashSet<St
         return None;
     }
 
-    let mut extra = json!({});
-    if let Some(zs) = &s.zellij_session {
-        extra["zellij_session"] = json!(zs);
-    }
-    if let Some(pid) = s.zellij_pane_id {
-        extra["zellij_pane_id"] = json!(pid);
-    }
-
-    Some(Observed {
-        selector: Selector::Terminal(TerminalSel {
-            driver: "claude".to_string(),
-            id: s.session_id.clone(),
-        }),
-        locator: s.session_id.clone(),
-        cwd: Some(s.cwd),
-        extra,
+    Some(ClaudeSession {
+        session_id: s.session_id,
+        zellij_session: s.zellij_session,
     })
 }
 

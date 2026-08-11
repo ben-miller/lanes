@@ -138,31 +138,6 @@ pub struct LanewiseSnapshot {
     pub current_lane: Option<String>,
 }
 
-// --- Selectors (durable handles) ---
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct TerminalSel {
-    pub driver: String, // "zellij" | "claude"
-    pub id: String,     // session name | session UUID
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct BrowserSel {
-    pub url: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub profile: Option<String>,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct EditorSel {
-    pub path: String,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct NotesSel {
-    pub vault_path: String,
-}
-
 // --- Shapes (observed current arrangement) ---
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -186,28 +161,3 @@ pub struct TerminalShape {
     pub tabs: Vec<TabInfo>,
 }
 
-// --- Core types ---
-
-#[derive(Clone, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Selector {
-    Terminal(TerminalSel),
-    Browser(BrowserSel),
-    Editor(EditorSel),
-    Notes(NotesSel),
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Observed {
-    pub selector: Selector,
-    pub locator: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cwd: Option<String>,
-    pub extra: serde_json::Value,
-}
-
-#[derive(Clone, Serialize, Deserialize)]
-pub struct Snapshot {
-    pub taken_at: String, // RFC3339
-    pub resources: Vec<Observed>,
-}

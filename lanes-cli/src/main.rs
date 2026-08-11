@@ -34,16 +34,6 @@ enum Command {
         out: Option<String>,
     },
 
-    /// Dump everything currently observable in one JSON blob - every driver's
-    /// raw resources (gather()) plus the lane-wise signals/panes view
-    /// (gather_lanes()). Instrumentation for eyeballing live state, not part
-    /// of any real control flow.
-    Observe {
-        /// Write output to a file instead of stdout
-        #[arg(long)]
-        out: Option<String>,
-    },
-
     /// List lanes that have signals requiring attention
     Signals,
 
@@ -89,12 +79,6 @@ enum Command {
 
 #[derive(Subcommand)]
 enum SessionsCommand {
-    /// List all active Claude sessions
-    List,
-
-    /// Get a single session by ID
-    Get { id: String },
-
     /// Switch to a specific Claude session (raise its WezTerm tab and Zellij pane)
     Switch { id: String },
 
@@ -176,23 +160,6 @@ fn main() {
             }
         }
 
-        Command::Observe { out } => {
-            let cfg = lanes::config::Config::load();
-            let snapshot = lanes::gather();
-            let lanes_snapshot = lanes::gather_lanes(&cfg);
-            let combined = serde_json::json!({
-                "taken_at": snapshot.taken_at,
-                "resources": snapshot.resources,
-                "lanes": lanes_snapshot.lanes,
-                "current_lane": lanes_snapshot.current_lane,
-            });
-            let json = serde_json::to_string_pretty(&combined).expect("serialization failed");
-            match out {
-                Some(path) => std::fs::write(&path, &json).expect("failed to write output file"),
-                None => println!("{}", json),
-            }
-        }
-
         Command::Signals => {
             let cfg = lanes::config::Config::load();
             let snapshot = lanes::gather_lanes(&cfg);
@@ -203,33 +170,6 @@ fn main() {
         }
 
         Command::Sessions { command } => match command {
-            SessionsCommand::List => {
-                let snapshot = lanes::gather();
-                let sessions: Vec<_> = snapshot
-                    .resources
-                    .iter()
-                    .filter(|r| {
-                        matches!(
-                            &r.selector,
-                            lanes::model::Selector::Terminal(sel) if sel.driver == "claude"
-                        )
-                    })
-                    .collect();
-                println!("{}", serde_json::to_string_pretty(&sessions).unwrap());
-            }
-
-            SessionsCommand::Get { id } => {
-                let snapshot = lanes::gather();
-                let session = snapshot.resources.iter().find(|r| r.locator == id);
-                match session {
-                    Some(s) => println!("{}", serde_json::to_string_pretty(s).unwrap()),
-                    None => {
-                        eprintln!("error: session not found: {}", id);
-                        std::process::exit(1);
-                    }
-                }
-            }
-
             SessionsCommand::Switch { id } => {
                 if let Err(e) = lanes::switch_claude_session(&id) {
                     eprintln!("error: {}", e);
