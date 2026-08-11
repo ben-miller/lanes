@@ -34,6 +34,16 @@ enum Command {
         out: Option<String>,
     },
 
+    /// Dump everything currently observable in one JSON blob - every driver's
+    /// raw resources (gather()) plus the lane-wise signals/panes view
+    /// (gather_lanes()). Instrumentation for eyeballing live state, not part
+    /// of any real control flow.
+    Observe {
+        /// Write output to a file instead of stdout
+        #[arg(long)]
+        out: Option<String>,
+    },
+
     /// List lanes that have signals requiring attention
     Signals,
 
@@ -160,6 +170,23 @@ fn main() {
             let cfg = lanes::config::Config::load();
             let snapshot = lanes::gather_lanes(&cfg);
             let json = serde_json::to_string_pretty(&snapshot).expect("serialization failed");
+            match out {
+                Some(path) => std::fs::write(&path, &json).expect("failed to write output file"),
+                None => println!("{}", json),
+            }
+        }
+
+        Command::Observe { out } => {
+            let cfg = lanes::config::Config::load();
+            let snapshot = lanes::gather();
+            let lanes_snapshot = lanes::gather_lanes(&cfg);
+            let combined = serde_json::json!({
+                "taken_at": snapshot.taken_at,
+                "resources": snapshot.resources,
+                "lanes": lanes_snapshot.lanes,
+                "current_lane": lanes_snapshot.current_lane,
+            });
+            let json = serde_json::to_string_pretty(&combined).expect("serialization failed");
             match out {
                 Some(path) => std::fs::write(&path, &json).expect("failed to write output file"),
                 None => println!("{}", json),
