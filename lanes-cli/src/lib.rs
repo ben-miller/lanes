@@ -1,6 +1,7 @@
 pub mod config;
 mod drivers;
 pub mod model;
+pub mod scope;
 pub mod state;
 pub mod zone;
 
