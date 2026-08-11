@@ -16,35 +16,17 @@ pub fn enumerate() -> Vec<Observed> {
         }
     };
 
+    // Doesn't call dump-layout here - that used to run in parallel across
+    // every session purely to feed the (now-removed) shape/state fields.
+    // The real per-session layout data is still available via
+    // layout_for_session(), used by gather_lanes() for the UI's panes.
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let sessions: Vec<(String, bool)> = stdout
+    stdout
         .lines()
         .filter(|l| !l.trim().is_empty())
         .filter_map(parse_session_header)
-        .collect();
-
-    // dump-layout is a separate subprocess + IPC round-trip to each
-    // session's own server socket (~30-60ms apiece) - independent of every
-    // other session, so run them concurrently rather than paying that
-    // latency once per session in sequence.
-    let layouts: Vec<Option<(TerminalShape, Option<String>)>> = std::thread::scope(|scope| {
-        sessions.iter()
-            .map(|(name, exited)| {
-                if *exited {
-                    None
-                } else {
-                    Some(scope.spawn(move || dump_layout(name)))
-                }
-            })
-            .collect::<Vec<_>>()
-            .into_iter()
-            .map(|handle| handle.and_then(|h| h.join().ok().flatten()))
-            .collect()
-    });
-
-    sessions.into_iter()
-        .zip(layouts)
-        .map(|((name, exited), layout)| build_observed(name, exited, layout))
+        .filter(|(_, exited)| !exited)
+        .map(|(name, _)| build_observed(name))
         .collect()
 }
 
@@ -55,34 +37,14 @@ fn parse_session_header(line: &str) -> Option<(String, bool)> {
     Some((name, exited))
 }
 
-fn build_observed(name: String, exited: bool, layout: Option<(TerminalShape, Option<String>)>) -> Observed {
-    let (shape, cwd) = match layout {
-        Some((s, c)) => (Some(s), c),
-        None => (None, None),
-    };
-
-    let status = if exited { Status::Gone } else { Status::Idle };
-
+fn build_observed(name: String) -> Observed {
     Observed {
         selector: Selector::Terminal(TerminalSel {
             driver: "zellij".to_string(),
             id: name.clone(),
         }),
         locator: name,
-        label: None,
-        shape: shape.map(Shape::Terminal),
-        state: Some(State {
-            status,
-            detail: Some(DriverState::Repl(ReplState {
-                activity: if exited {
-                    "exited".to_string()
-                } else {
-                    "idle".to_string()
-                },
-            })),
-        }),
-        cwd,
-        worktree_path: None,
+        cwd: None,
         extra: json!({}),
     }
 }

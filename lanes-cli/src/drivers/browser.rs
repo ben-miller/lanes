@@ -4,6 +4,15 @@ use serde_json::json;
 
 use crate::model::*;
 
+// Parsing-only intermediate for grouping `bt list` lines into one Observed
+// per browser window - not part of the shared model, nothing outside this
+// file needs it. tab_id/title aren't kept: nothing downstream uses per-tab
+// detail, only which window a tab belongs to and one representative URL.
+pub(crate) struct BrowserTabInfo {
+    pub window_id: String,
+    pub url: String,
+}
+
 pub fn enumerate() -> Vec<Observed> {
     // Check brotab is present and connected before attempting anything
     let check = Command::new("bt").args(["clients"]).output();
@@ -31,33 +40,24 @@ pub fn enumerate() -> Vec<Observed> {
         return vec![];
     }
 
-    // One Observed per browser window, with shape holding all its tabs
-    let mut windows: std::collections::HashMap<String, Vec<BrowserTabInfo>> =
+    // One Observed per browser window, represented by its first tab's URL -
+    // per-tab detail isn't surfaced anywhere downstream today.
+    let mut windows: std::collections::HashMap<String, BrowserTabInfo> =
         std::collections::HashMap::new();
-    for tab in &tabs {
-        windows
-            .entry(tab.window_id.clone())
-            .or_default()
-            .push(tab.clone());
+    for tab in tabs {
+        windows.entry(tab.window_id.clone()).or_insert(tab);
     }
 
     windows
         .into_iter()
-        .map(|(window_id, window_tabs)| {
-            let first = &window_tabs[0];
-            Observed {
-                selector: Selector::Browser(BrowserSel {
-                    url: first.url.clone(),
-                    profile: None,
-                }),
-                locator: window_id.clone(),
-                label: None,
-                shape: Some(Shape::Browser(BrowserShape { tabs: window_tabs })),
-                state: None,
-                cwd: None,
-                worktree_path: None,
-                extra: json!({"window_id": window_id}),
-            }
+        .map(|(window_id, first_tab)| Observed {
+            selector: Selector::Browser(BrowserSel {
+                url: first_tab.url,
+                profile: None,
+            }),
+            locator: window_id.clone(),
+            cwd: None,
+            extra: json!({"window_id": window_id}),
         })
         .collect()
 }
@@ -74,8 +74,6 @@ pub(crate) fn parse_bt_line(line: &str) -> Option<BrowserTabInfo> {
     }
     Some(BrowserTabInfo {
         window_id: id_parts[1].to_string(),
-        tab_id: id_parts[2].to_string(),
-        title: parts[1].to_string(),
         url: parts[2].to_string(),
     })
 }
@@ -89,8 +87,6 @@ mod tests {
         let line = "ff.1.42\tGitHub - balta2ar/brotab\thttps://github.com/balta2ar/brotab";
         let tab = parse_bt_line(line).unwrap();
         assert_eq!(tab.window_id, "1");
-        assert_eq!(tab.tab_id, "42");
-        assert_eq!(tab.title, "GitHub - balta2ar/brotab");
         assert_eq!(tab.url, "https://github.com/balta2ar/brotab");
     }
 
