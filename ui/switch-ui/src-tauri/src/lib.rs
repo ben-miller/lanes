@@ -160,6 +160,8 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             watch_paths(app.handle().clone());
+            #[cfg(target_os = "macos")]
+            app.set_activation_policy(tauri::ActivationPolicy::Accessory);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![get_snapshot, execute_action, set_current_lane, activate_lane])
