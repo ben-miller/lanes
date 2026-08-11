@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::scope::ScopeElement;
+
 // --- Lane config types ---
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -7,7 +9,15 @@ pub struct Lane {
     pub id: String,
     pub name: String,
     #[serde(default)]
-    pub facets: Vec<Facet>,
+    pub scope: Vec<ScopeElement>,
+    // Window placement isn't part of scope - unlike everything else here,
+    // it has no observable state and nothing to navigate to, it's a pure
+    // imperative action ("move this app to this screen zone") triggered on
+    // lane activation. Doesn't fit the scope/observation model, so it stays
+    // its own thing rather than being forced into a ScopeElement kind with
+    // no observations and no real locator identity.
+    #[serde(default)]
+    pub windows: Vec<WindowPlacement>,
 }
 
 impl Lane {
@@ -16,41 +26,33 @@ impl Lane {
     }
 
     pub fn terminal_session(&self) -> Option<&str> {
-        self.facets.iter().find_map(|f| {
-            if let Facet::Terminal { session } = f {
-                Some(session.as_str())
-            } else {
-                None
-            }
-        })
+        self.scope.iter().find_map(ScopeElement::zellij_session_name)
     }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-pub enum Facet {
-    Terminal { session: String },
-    Window { path: String, zone: String },
-    Repo { path: String },
+pub struct WindowPlacement {
+    pub path: String,
+    pub zone: String,
 }
 
 // --- Signals ---
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum SignalAction {
     SwitchClaudeSession { session_id: String },
     FocusRepoPane { session: String, path: String },
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Signal {
     pub reason: SignalReason,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<SignalAction>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalReason {
     PendingCommit,

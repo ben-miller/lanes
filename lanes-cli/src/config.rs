@@ -3,7 +3,8 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::model::{Facet, Lane};
+use crate::model::{Lane, WindowPlacement};
+use crate::scope::ScopeElement;
 
 #[derive(Clone)]
 pub struct MonitorConfig {
@@ -92,13 +93,35 @@ struct MonitorConfigRaw {
 struct LaneFile {
     lane: LaneHeader,
     #[serde(default)]
-    facets: Vec<Facet>,
+    scope: Vec<ScopeElementRaw>,
+    #[serde(default)]
+    windows: Vec<WindowPlacement>,
 }
 
 #[derive(Deserialize)]
 struct LaneHeader {
     id: String,
     name: String,
+}
+
+/// TOML-facing shape for a scope element - human-friendly fields
+/// (`session`, `path`) rather than making config authors hand-write the
+/// real ScopeElement's URI locators. Converted to the real type on load,
+/// same pattern as LaneFile/LaneHeader vs. the real Lane.
+#[derive(Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ScopeElementRaw {
+    ZellijSession { session: String },
+    Repo { path: String },
+}
+
+impl From<ScopeElementRaw> for ScopeElement {
+    fn from(raw: ScopeElementRaw) -> Self {
+        match raw {
+            ScopeElementRaw::ZellijSession { session } => ScopeElement::zellij_session(&session),
+            ScopeElementRaw::Repo { path } => ScopeElement::repo(&path),
+        }
+    }
 }
 
 // --- Loaders ---
@@ -155,7 +178,8 @@ fn load_lanes() -> Vec<Lane> {
             Some(Lane {
                 id: file.lane.id,
                 name: file.lane.name,
-                facets: file.facets,
+                scope: file.scope.into_iter().map(ScopeElement::from).collect(),
+                windows: file.windows,
             })
         })
         .collect();
@@ -179,21 +203,21 @@ mod tests {
     }
 
     #[test]
-    fn parses_lane_file_terminal_facet() {
+    fn parses_lane_file_zellij_session_scope_element() {
         let content = r#"
 [lane]
 id = "sheetwork"
 name = "Sheetwork"
 
-[[facets]]
-kind = "terminal"
+[[scope]]
+kind = "zellij_session"
 session = "sheetwork"
 "#;
         let file: LaneFile = toml::from_str(content).unwrap();
         assert_eq!(file.lane.id, "sheetwork");
         assert_eq!(file.lane.name, "Sheetwork");
-        assert_eq!(file.facets.len(), 1);
-        assert!(matches!(&file.facets[0], Facet::Terminal { session } if session == "sheetwork"));
+        assert_eq!(file.scope.len(), 1);
+        assert!(matches!(&file.scope[0], ScopeElementRaw::ZellijSession { session } if session == "sheetwork"));
     }
 
     #[test]
@@ -202,8 +226,8 @@ session = "sheetwork"
 [lane]
 id = "sheetwork"
 
-[[facets]]
-kind = "terminal"
+[[scope]]
+kind = "zellij_session"
 session = "sheetwork"
 "#;
         let result: Result<LaneFile, _> = toml::from_str(content);
@@ -211,26 +235,36 @@ session = "sheetwork"
     }
 
     #[test]
-    fn parses_lane_file_with_name_and_window_facet() {
+    fn parses_lane_file_with_name_and_window_placement() {
         let content = r#"
 [lane]
 id = "lanes-dev"
 name = "lanes dev"
 
-[[facets]]
-kind = "terminal"
+[[scope]]
+kind = "zellij_session"
 session = "lanes"
 
-[[facets]]
-kind = "window"
+[[windows]]
 path = "app:com.jetbrains.intellij / window"
 zone = "main:1-2/3"
 "#;
         let file: LaneFile = toml::from_str(content).unwrap();
         assert_eq!(file.lane.id, "lanes-dev");
         assert_eq!(file.lane.name, "lanes dev");
-        assert_eq!(file.facets.len(), 2);
-        assert!(matches!(&file.facets[1], Facet::Window { path, zone } if path.contains("intellij") && zone == "main:1-2/3"));
+        assert_eq!(file.scope.len(), 1);
+        assert_eq!(file.windows.len(), 1);
+        assert!(file.windows[0].path.contains("intellij"));
+        assert_eq!(file.windows[0].zone, "main:1-2/3");
+    }
+
+    #[test]
+    fn scope_element_raw_converts_to_real_scope_element() {
+        let el: ScopeElement = ScopeElementRaw::ZellijSession { session: "infra".to_string() }.into();
+        assert_eq!(el.zellij_session_name(), Some("infra"));
+
+        let el: ScopeElement = ScopeElementRaw::Repo { path: "~/src/infra".to_string() }.into();
+        assert_eq!(el.repo_path(), Some("~/src/infra"));
     }
 
     #[test]
@@ -253,8 +287,7 @@ zone = "main:1-2/3"
     }
 
     #[test]
-    fn zellij_lane_names_derived_from_facets() {
-        use crate::model::Facet;
+    fn zellij_lane_names_derived_from_scope() {
         let cfg = Config {
             drivers: None,
             monitors: HashMap::new(),
@@ -262,16 +295,14 @@ zone = "main:1-2/3"
                 Lane {
                     id: "sheetwork".to_string(),
                     name: "Sheetwork".to_string(),
-                    facets: vec![Facet::Terminal {
-                        session: "sheetwork".to_string(),
-                    }],
+                    scope: vec![ScopeElement::zellij_session("sheetwork")],
+                    windows: vec![],
                 },
                 Lane {
                     id: "lanes-dev".to_string(),
                     name: "lanes dev".to_string(),
-                    facets: vec![Facet::Terminal {
-                        session: "lanes".to_string(),
-                    }],
+                    scope: vec![ScopeElement::zellij_session("lanes")],
+                    windows: vec![],
                 },
             ],
         };
@@ -281,8 +312,7 @@ zone = "main:1-2/3"
     }
 
     #[test]
-    fn lane_for_session_finds_lane_by_terminal_facet() {
-        use crate::model::Facet;
+    fn lane_for_session_finds_lane_by_zellij_session_scope_element() {
         let cfg = Config {
             drivers: None,
             monitors: HashMap::new(),
@@ -290,12 +320,14 @@ zone = "main:1-2/3"
                 Lane {
                     id: "sheetwork1".to_string(),
                     name: "Sheetwork 1".to_string(),
-                    facets: vec![Facet::Terminal { session: "sheetwork1".to_string() }],
+                    scope: vec![ScopeElement::zellij_session("sheetwork1")],
+                    windows: vec![],
                 },
                 Lane {
                     id: "lanes-dev".to_string(),
                     name: "lanes dev".to_string(),
-                    facets: vec![Facet::Terminal { session: "lanes".to_string() }],
+                    scope: vec![ScopeElement::zellij_session("lanes")],
+                    windows: vec![],
                 },
             ],
         };

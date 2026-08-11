@@ -8,14 +8,22 @@ struct ActiveSession {
     session_id: String,
     zellij_session: Option<String>,
     pid: Option<u32>,
+    state: Option<String>,
 }
 
-/// A live Claude Code session, for ordering/cycling between them -
-/// cycle_claude_session() is the only consumer, and only needs enough to
-/// sort sessions and identify one to switch to.
+/// A live Claude Code session. `state` is the raw registry value ("idle" |
+/// "busy" | "running" | "permission_pending" | ...), defaulting to "running"
+/// when absent - interpreting it into a signal/reason beyond that is a
+/// policy decision that belongs with whatever's doing the interpreting (see
+/// scope::observe), not the driver. The one correction made here rather
+/// than left to policy: permission_pending gets downgraded to "idle" once
+/// the registry file has sat unmodified for >=1s, since a permission
+/// request that old is more likely a write that never got followed up than
+/// something still genuinely awaiting a response.
 pub struct ClaudeSession {
     pub session_id: String,
     pub zellij_session: Option<String>,
+    pub state: String,
 }
 
 pub fn enumerate() -> Vec<ClaudeSession> {
@@ -43,10 +51,26 @@ fn load_session(path: &Path, live_zellij_sessions: &std::collections::HashSet<St
         return None;
     }
 
+    let raw_state = s.state.as_deref().unwrap_or("running");
+    let state = if raw_state == "permission_pending" && is_stale(path) {
+        "idle".to_string()
+    } else {
+        raw_state.to_string()
+    };
+
     Some(ClaudeSession {
         session_id: s.session_id,
         zellij_session: s.zellij_session,
+        state,
     })
+}
+
+fn is_stale(path: &Path) -> bool {
+    fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.elapsed().ok())
+        .map_or(false, |age| age.as_secs() >= 1)
 }
 
 mod dirs {

@@ -10,22 +10,16 @@ use std::path::PathBuf;
 
 pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
     let running = running_zellij_sessions();
-    let claude = claude_sessions_by_zellij(&running);
+    let claude = claude_sessions_by_zellij();
 
     let running_sessions: Vec<&str> = cfg.lanes.iter()
-        .flat_map(|lane| lane.facets.iter())
-        .filter_map(|facet| match facet {
-            model::Facet::Terminal { session } if running.contains(session.as_str()) => Some(session.as_str()),
-            _ => None,
-        })
+        .flat_map(|lane| lane.scope.iter())
+        .filter_map(|el| el.zellij_session_name().filter(|s| running.contains(*s)))
         .collect();
 
     let repo_paths: Vec<String> = cfg.lanes.iter()
-        .flat_map(|lane| lane.facets.iter())
-        .filter_map(|facet| match facet {
-            model::Facet::Repo { path } => Some(expand_tilde(path)),
-            _ => None,
-        })
+        .flat_map(|lane| lane.scope.iter())
+        .filter_map(|el| el.repo_path().map(expand_tilde))
         .collect();
 
     // dump-layout (per session) and git status (per repo) are each a
@@ -53,41 +47,81 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
     });
 
     let lanes = cfg.lanes.iter().map(|lane| {
-        let facets = lane.facets.iter().map(|facet| match facet {
-            model::Facet::Terminal { session } => {
-                let is_running = running.contains(session.as_str());
+        // This lane's scope elements + already-known observations, built
+        // from the parallel-fetched layouts/git_status and claude map above
+        // rather than through scope::observe() - that would re-run the same
+        // subprocess calls a second time, one lane at a time, undoing the
+        // whole point of prefetching them together.
+        let mut resolved: Vec<(scope::ScopeElement, Vec<scope::Observation>)> = Vec::new();
+        for el in &lane.scope {
+            if let Some(session) = el.zellij_session_name().filter(|s| running.contains(*s)) {
+                resolved.push((el.clone(), vec![]));
+                for c in claude.get(session).into_iter().flatten() {
+                    resolved.push((
+                        scope::ScopeElement::claude_session(&c.session_id),
+                        vec![scope::Observation {
+                            kind: scope::KIND_CLAUDE_SESSION_STATE.to_string(),
+                            data: serde_json::json!({ "state": c.state }),
+                        }],
+                    ));
+                }
+            } else if let Some(path) = el.repo_path() {
+                let dirty = git_status.get(&expand_tilde(path)).copied().unwrap_or(false);
+                let obs = if dirty {
+                    vec![scope::Observation { kind: scope::KIND_GIT_DIRTY.to_string(), data: serde_json::json!({}) }]
+                } else {
+                    vec![]
+                };
+                resolved.push((el.clone(), obs));
+            }
+        }
+        let lane_signals = scope::signals_from(&resolved);
+
+        let mut facets: Vec<model::FacetSnapshot> = lane.scope.iter().map(|el| {
+            if let Some(session) = el.zellij_session_name() {
+                let is_running = running.contains(session);
                 let (panes, signals) = if is_running {
-                    let shape = layouts.get(session.as_str()).cloned().flatten();
-                    build_terminal_state(shape, &claude, session)
+                    let shape = layouts.get(session).cloned().flatten();
+                    let panes = build_terminal_panes(shape, &claude, session);
+                    let session_ids: HashSet<&str> = claude.get(session)
+                        .map(|refs| refs.iter().map(|c| c.session_id.as_str()).collect())
+                        .unwrap_or_default();
+                    let signals = lane_signals.iter()
+                        .filter(|s| matches!(
+                            &s.action,
+                            Some(model::SignalAction::SwitchClaudeSession { session_id })
+                                if session_ids.contains(session_id.as_str())
+                        ))
+                        .cloned()
+                        .collect();
+                    (panes, signals)
                 } else {
                     (vec![], vec![])
                 };
                 model::FacetSnapshot::Terminal {
-                    session: session.clone(),
+                    session: session.to_string(),
                     running: is_running,
                     panes,
                     signals,
                 }
-            }
-            model::Facet::Window { path, zone } => model::FacetSnapshot::Window {
-                path: path.clone(),
-                zone: zone.clone(),
-            },
-            model::Facet::Repo { path } => {
-                let expanded = expand_tilde(path);
-                let has_changes = git_status.get(&expanded).copied().unwrap_or(false);
-                let signals = if has_changes {
-                    let action = lane.terminal_session().map(|s| model::SignalAction::FocusRepoPane {
-                        session: s.to_string(),
-                        path: path.clone(),
-                    });
-                    vec![model::Signal { reason: model::SignalReason::PendingCommit, action }]
-                } else {
-                    vec![]
-                };
-                model::FacetSnapshot::Repo { path: path.clone(), signals }
+            } else {
+                // Repo - the only other kind gather_lanes() puts in scope.
+                let path = el.repo_path().unwrap_or_default();
+                let signals = lane_signals.iter()
+                    .filter(|s| matches!(
+                        &s.action,
+                        Some(model::SignalAction::FocusRepoPane { path: p, .. }) if p == path
+                    ))
+                    .cloned()
+                    .collect();
+                model::FacetSnapshot::Repo { path: path.to_string(), signals }
             }
         }).collect();
+
+        facets.extend(lane.windows.iter().map(|w| model::FacetSnapshot::Window {
+            path: w.path.clone(),
+            zone: w.zone.clone(),
+        }));
 
         model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), facets }
     }).collect();
@@ -99,36 +133,15 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
     }
 }
 
-struct ClaudeRef {
-    session_id: String,
-    state: String, // "idle" | "running" | "permission_pending"
-}
-
-fn claude_sessions_by_zellij(live_zellij_sessions: &HashSet<String>) -> HashMap<String, Vec<ClaudeRef>> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let dir = std::path::PathBuf::from(home).join(".claude").join("active-sessions");
-    let mut map: HashMap<String, Vec<ClaudeRef>> = HashMap::new();
-
-    let Ok(entries) = std::fs::read_dir(&dir) else { return map; };
-    for entry in entries.filter_map(|e| e.ok()) {
-        if entry.path().extension().map_or(true, |e| e != "json") { continue; }
-        let Ok(data) = std::fs::read_to_string(entry.path()) else { continue; };
-        let Ok(val) = serde_json::from_str::<serde_json::Value>(&data) else { continue; };
-        let Some(zs) = val["zellij_session"].as_str() else { continue; };
-        let pid = val["pid"].as_u64().map(|p| p as u32);
-        if !session_is_live(zs, live_zellij_sessions, pid) { continue; }
-        let session_id = val["session_id"].as_str().unwrap_or("").to_string();
-        let raw_state = val["state"].as_str().unwrap_or("running");
-        let state = if raw_state == "permission_pending" {
-            let stale = entry.path().metadata()
-                .and_then(|m| m.modified())
-                .ok().and_then(|t| t.elapsed().ok())
-                .map_or(false, |age| age.as_secs() >= 1);
-            if stale { "idle".to_string() } else { raw_state.to_string() }
-        } else {
-            raw_state.to_string()
-        };
-        map.entry(zs.to_string()).or_default().push(ClaudeRef { session_id, state });
+/// drivers::claude::enumerate() grouped by zellij session, for the lanes
+/// that have several claude panes under one Terminal facet. Staleness
+/// correction for permission_pending lives in the driver itself now (see
+/// drivers::claude::ClaudeSession) - this is just the grouping.
+fn claude_sessions_by_zellij() -> HashMap<String, Vec<drivers::claude::ClaudeSession>> {
+    let mut map: HashMap<String, Vec<drivers::claude::ClaudeSession>> = HashMap::new();
+    for session in drivers::claude::enumerate() {
+        let zs = session.zellij_session.clone().unwrap_or_default();
+        map.entry(zs).or_default().push(session);
     }
     map
 }
@@ -176,21 +189,24 @@ fn process_command(pid: u32) -> Option<String> {
     if cmd.is_empty() { None } else { Some(cmd) }
 }
 
-fn build_terminal_state(
+/// Signals are computed separately now (see gather_lanes(), via
+/// scope::signals_from()) - this only builds the pane list, still needing
+/// the claude map to know which pane (if any) is a Claude session that's
+/// awaiting attention.
+fn build_terminal_panes(
     shape: Option<(model::TerminalShape, Option<String>)>,
-    claude: &HashMap<String, Vec<ClaudeRef>>,
+    claude: &HashMap<String, Vec<drivers::claude::ClaudeSession>>,
     session: &str,
-) -> (Vec<model::PaneSnapshot>, Vec<model::Signal>) {
+) -> Vec<model::PaneSnapshot> {
     let Some((shape, _)) = shape else {
-        return (vec![], vec![]);
+        return vec![];
     };
 
-    let claude_refs = claude.get(session);
-    let needs_attention = claude_refs.map_or(false, |refs| {
+    let needs_attention = claude.get(session).map_or(false, |refs| {
         refs.iter().any(|r| matches!(r.state.as_str(), "idle" | "permission_pending"))
     });
 
-    let panes = shape.tabs.iter().flat_map(|tab| {
+    shape.tabs.iter().flat_map(|tab| {
         tab.panes.iter().map(|pane| {
             let kind = match pane.command.as_deref() {
                 Some("claude") => model::PaneKind::ClaudeSession { awaiting: needs_attention },
@@ -198,24 +214,7 @@ fn build_terminal_state(
             };
             model::PaneSnapshot { focused: pane.focused, cwd: pane.cwd.clone(), kind }
         })
-    }).collect();
-
-    let signals = claude_refs.map_or(vec![], |refs| {
-        refs.iter()
-            .map(|r| model::Signal {
-                reason: match r.state.as_str() {
-                    "idle" => model::SignalReason::ClaudeSessionAwaiting,
-                    "permission_pending" => model::SignalReason::ClaudeSessionPermission,
-                    _ => model::SignalReason::ClaudeSessionActive,
-                },
-                action: Some(model::SignalAction::SwitchClaudeSession {
-                    session_id: r.session_id.clone(),
-                }),
-            })
-            .collect()
-    });
-
-    (panes, signals)
+    }).collect()
 }
 
 pub(crate) fn running_zellij_sessions() -> HashSet<String> {
@@ -233,7 +232,7 @@ pub(crate) fn running_zellij_sessions() -> HashSet<String> {
         .collect()
 }
 
-fn git_has_changes(path: &str) -> bool {
+pub(crate) fn git_has_changes(path: &str) -> bool {
     let Ok(out) = std::process::Command::new("git")
         .args(["-C", path, "status", "--porcelain"])
         .output()
@@ -556,19 +555,16 @@ pub fn activate_lane(lane_id: &str, focus: bool) {
         }
     };
 
-    for facet in &lane.facets {
-        match facet {
-            model::Facet::Terminal { session } => {
-                if let Err(e) = activate_wezterm_tab(session, focus) {
-                    eprintln!("warning: {}", e);
-                }
+    for el in &lane.scope {
+        if let Some(session) = el.zellij_session_name() {
+            if let Err(e) = activate_wezterm_tab(session, focus) {
+                eprintln!("warning: {}", e);
             }
-            model::Facet::Window { path, zone } => {
-                if let Err(e) = activate_window_facet(path, zone, &cfg) {
-                    eprintln!("warning: {}", e);
-                }
-            }
-            model::Facet::Repo { .. } => {}
+        }
+    }
+    for w in &lane.windows {
+        if let Err(e) = activate_window_facet(&w.path, &w.zone, &cfg) {
+            eprintln!("warning: {}", e);
         }
     }
 

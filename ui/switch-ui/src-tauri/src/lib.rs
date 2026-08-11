@@ -155,14 +155,11 @@ fn watch_paths(handle: tauri::AppHandle, pin_item: CheckMenuItem<tauri::Wry>) {
 
     let cfg = lanes::config::Config::load();
     let repo_watches: Vec<RepoWatch> = cfg.lanes.iter()
-        .flat_map(|lane| lane.facets.iter())
-        .filter_map(|facet| {
-            if let lanes::model::Facet::Repo { path } = facet {
-                let p = PathBuf::from(expand_tilde(path));
-                if p.exists() { Some(build_repo_watch(p)) } else { None }
-            } else {
-                None
-            }
+        .flat_map(|lane| lane.scope.iter())
+        .filter_map(|el| {
+            let path = el.repo_path()?;
+            let p = PathBuf::from(expand_tilde(path));
+            if p.exists() { Some(build_repo_watch(p)) } else { None }
         })
         .collect();
 

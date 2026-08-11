@@ -1,4 +1,5 @@
-use lanes::model::{Facet, Lane};
+use lanes::model::Lane;
+use lanes::scope::ScopeElement;
 
 pub fn run(lanes: &[Lane], json: bool) {
     if json {
@@ -11,18 +12,21 @@ pub fn run(lanes: &[Lane], json: bool) {
     }
     for lane in lanes {
         println!("{} ({})", lane.id, lane.name);
-        for facet in &lane.facets {
-            match facet {
-                Facet::Terminal { session } => {
-                    println!("  terminal  session={}", session);
+        for el in &lane.scope {
+            match el {
+                ScopeElement::ZellijSession { .. } => {
+                    println!("  zellij_session  session={}", el.zellij_session_name().unwrap_or(""));
                 }
-                Facet::Window { path, zone } => {
-                    println!("  window    {} -> {}", path, zone);
+                ScopeElement::Repo { .. } => {
+                    println!("  repo            {}", el.repo_path().unwrap_or(""));
                 }
-                Facet::Repo { path } => {
-                    println!("  repo      {}", path);
+                ScopeElement::ClaudeSession { .. } => {
+                    println!("  claude_session  {}", el.claude_session_id().unwrap_or(""));
                 }
             }
+        }
+        for w in &lane.windows {
+            println!("  window          {} -> {}", w.path, w.zone);
         }
     }
 }
