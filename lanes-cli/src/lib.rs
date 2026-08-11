@@ -32,12 +32,53 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
     let running = running_zellij_sessions();
     let claude = claude_sessions_by_zellij(&running);
 
+    let running_sessions: Vec<&str> = cfg.lanes.iter()
+        .flat_map(|lane| lane.facets.iter())
+        .filter_map(|facet| match facet {
+            model::Facet::Terminal { session } if running.contains(session.as_str()) => Some(session.as_str()),
+            _ => None,
+        })
+        .collect();
+
+    let repo_paths: Vec<String> = cfg.lanes.iter()
+        .flat_map(|lane| lane.facets.iter())
+        .filter_map(|facet| match facet {
+            model::Facet::Repo { path } => Some(expand_tilde(path)),
+            _ => None,
+        })
+        .collect();
+
+    // dump-layout (per session) and git status (per repo) are each a
+    // separate subprocess round-trip, independent of every other one - fetch
+    // them all concurrently in one batch rather than once per lane in
+    // sequence (this used to be the dominant cost of every UI refresh).
+    let (layouts, git_status): (
+        HashMap<String, Option<(model::TerminalShape, Option<String>)>>,
+        HashMap<String, bool>,
+    ) = std::thread::scope(|scope| {
+        let layout_handles: Vec<_> = running_sessions.into_iter()
+            .map(|s| (s.to_string(), scope.spawn(move || drivers::zellij::layout_for_session(s))))
+            .collect();
+        let git_handles: Vec<_> = repo_paths.into_iter()
+            .map(|p| (p.clone(), scope.spawn(move || git_has_changes(&p))))
+            .collect();
+
+        let layouts = layout_handles.into_iter()
+            .map(|(s, handle)| (s, handle.join().ok().flatten()))
+            .collect();
+        let git_status = git_handles.into_iter()
+            .map(|(p, handle)| (p, handle.join().unwrap_or(false)))
+            .collect();
+        (layouts, git_status)
+    });
+
     let lanes = cfg.lanes.iter().map(|lane| {
         let facets = lane.facets.iter().map(|facet| match facet {
             model::Facet::Terminal { session } => {
                 let is_running = running.contains(session.as_str());
                 let (panes, signals) = if is_running {
-                    build_terminal_state(session, &claude)
+                    let shape = layouts.get(session.as_str()).cloned().flatten();
+                    build_terminal_state(shape, &claude, session)
                 } else {
                     (vec![], vec![])
                 };
@@ -54,7 +95,16 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             },
             model::Facet::Repo { path } => {
                 let expanded = expand_tilde(path);
-                let signals = git_signals(&expanded, lane.terminal_session());
+                let has_changes = git_status.get(&expanded).copied().unwrap_or(false);
+                let signals = if has_changes {
+                    let action = lane.terminal_session().map(|s| model::SignalAction::FocusRepoPane {
+                        session: s.to_string(),
+                        path: path.clone(),
+                    });
+                    vec![model::Signal { reason: model::SignalReason::PendingCommit, action }]
+                } else {
+                    vec![]
+                };
                 model::FacetSnapshot::Repo { path: path.clone(), signals }
             }
         }).collect();
@@ -147,10 +197,11 @@ fn process_command(pid: u32) -> Option<String> {
 }
 
 fn build_terminal_state(
-    session: &str,
+    shape: Option<(model::TerminalShape, Option<String>)>,
     claude: &HashMap<String, Vec<ClaudeRef>>,
+    session: &str,
 ) -> (Vec<model::PaneSnapshot>, Vec<model::Signal>) {
-    let Some((shape, _)) = drivers::zellij::layout_for_session(session) else {
+    let Some((shape, _)) = shape else {
         return (vec![], vec![]);
     };
 
@@ -202,22 +253,14 @@ pub(crate) fn running_zellij_sessions() -> HashSet<String> {
         .collect()
 }
 
-fn git_signals(path: &str, session: Option<&str>) -> Vec<model::Signal> {
+fn git_has_changes(path: &str) -> bool {
     let Ok(out) = std::process::Command::new("git")
         .args(["-C", path, "status", "--porcelain"])
         .output()
     else {
-        return vec![];
+        return false;
     };
-    if out.status.success() && !out.stdout.is_empty() {
-        let action = session.map(|s| model::SignalAction::FocusRepoPane {
-            session: s.to_string(),
-            path: path.to_string(),
-        });
-        vec![model::Signal { reason: model::SignalReason::PendingCommit, action }]
-    } else {
-        vec![]
-    }
+    out.status.success() && !out.stdout.is_empty()
 }
 
 pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
@@ -267,9 +310,18 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
 /// session, ordered by Zellij session name then session ID - matching the
 /// order the Go `claude-session` tool used, so muscle memory carries over.
 pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
-    let snapshot = gather();
-    let mut sessions: Vec<(String, String)> = snapshot.resources.iter()
-        .filter(|r| matches!(&r.selector, model::Selector::Terminal(sel) if sel.driver == "claude"))
+    // Deliberately not gather() - that also runs zellij::enumerate()'s
+    // per-session dump-layout calls to build pane/tab shapes, none of which
+    // this needs (only the zellij_session field, which claude::enumerate()
+    // already embeds itself). That was ~250-300ms of wasted latency on
+    // every single hotkey press.
+    let cfg = config::Config::load();
+    let resources = if cfg.driver_enabled("claude") {
+        drivers::claude::enumerate()
+    } else {
+        vec![]
+    };
+    let mut sessions: Vec<(String, String)> = resources.iter()
         .map(|r| {
             let zellij_session = r.extra.get("zellij_session")
                 .and_then(|v| v.as_str())
@@ -371,27 +423,16 @@ fn activate_wezterm_tab(session: &str, focus: bool) -> Result<(), String> {
 
     let sock = wezterm_socket();
 
-    let mut cmd = std::process::Command::new("/opt/homebrew/bin/wezterm");
-    cmd.args(["cli", "list", "--format", "json"]);
-    if let Some(ref s) = sock {
-        cmd.env("WEZTERM_UNIX_SOCKET", s);
-    }
-    let output = cmd.output().map_err(|e| format!("wezterm cli list: {}", e))?;
-    let json: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("wezterm cli list parse: {}", e))?;
-    let live_tab_ids: HashSet<u64> = json.as_array()
-        .map(|panes| panes.iter().filter_map(|p| p["tab_id"].as_u64()).collect())
-        .unwrap_or_default();
-
-    if !live_tab_ids.contains(&cached) {
-        return Err(format!(
-            "cached WezTerm tab {} for session '{}' no longer exists - run `lanes tabs set {} <id>`",
-            cached, session, session
-        ));
-    }
-
+    // Deliberately not verifying the cached tab still exists via a `wezterm
+    // cli list` round-trip first - that's a full extra subprocess+socket
+    // connect (~60-100ms) just to sanity-check a cache that's almost always
+    // correct. Trust it and let activate-tab itself fail (with wezterm's own
+    // error surfaced below) on the rare occasion it's stale.
     if focus {
-        std::process::Command::new("open").args(["-a", "WezTerm"]).output().ok();
+        // Fire-and-forget: raising the WezTerm window doesn't need to block
+        // this call, and waiting on `open`'s own ~90ms launchservices
+        // round-trip was pure latency on the hot path.
+        std::process::Command::new("open").args(["-a", "WezTerm"]).spawn().ok();
     }
 
     let mut cmd = std::process::Command::new("/opt/homebrew/bin/wezterm");
@@ -399,7 +440,14 @@ fn activate_wezterm_tab(session: &str, focus: bool) -> Result<(), String> {
     if let Some(ref s) = sock {
         cmd.env("WEZTERM_UNIX_SOCKET", s);
     }
-    cmd.output().map_err(|e| format!("wezterm activate-tab: {}", e))?;
+    let output = cmd.output().map_err(|e| format!("wezterm activate-tab: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!(
+            "wezterm activate-tab failed for cached tab {} (session '{}'), it may no longer exist - run `lanes tabs set {} <id>`: {}",
+            cached, session, session, stderr.trim()
+        ));
+    }
 
     Ok(())
 }

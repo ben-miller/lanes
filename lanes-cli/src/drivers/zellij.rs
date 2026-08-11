@@ -17,35 +17,58 @@ pub fn enumerate() -> Vec<Observed> {
     };
 
     let stdout = String::from_utf8_lossy(&output.stdout);
-    stdout
+    let sessions: Vec<(String, bool)> = stdout
         .lines()
         .filter(|l| !l.trim().is_empty())
-        .filter_map(|line| parse_session_line(line))
+        .filter_map(parse_session_header)
+        .collect();
+
+    // dump-layout is a separate subprocess + IPC round-trip to each
+    // session's own server socket (~30-60ms apiece) - independent of every
+    // other session, so run them concurrently rather than paying that
+    // latency once per session in sequence.
+    let layouts: Vec<Option<(TerminalShape, Option<String>)>> = std::thread::scope(|scope| {
+        sessions.iter()
+            .map(|(name, exited)| {
+                if *exited {
+                    None
+                } else {
+                    Some(scope.spawn(move || dump_layout(name)))
+                }
+            })
+            .collect::<Vec<_>>()
+            .into_iter()
+            .map(|handle| handle.and_then(|h| h.join().ok().flatten()))
+            .collect()
+    });
+
+    sessions.into_iter()
+        .zip(layouts)
+        .map(|((name, exited), layout)| build_observed(name, exited, layout))
         .collect()
 }
 
 // Line format: "session-name [Created Xdays Yh ...] (EXITED - ...)" or without (EXITED)
-fn parse_session_line(line: &str) -> Option<Observed> {
+fn parse_session_header(line: &str) -> Option<(String, bool)> {
     let name = line.split_whitespace().next()?.to_string();
     let exited = line.contains("(EXITED");
+    Some((name, exited))
+}
 
-    let (shape, cwd) = if !exited {
-        match dump_layout(&name) {
-            Some((s, c)) => (Some(s), c),
-            None => (None, None),
-        }
-    } else {
-        (None, None)
+fn build_observed(name: String, exited: bool, layout: Option<(TerminalShape, Option<String>)>) -> Observed {
+    let (shape, cwd) = match layout {
+        Some((s, c)) => (Some(s), c),
+        None => (None, None),
     };
 
     let status = if exited { Status::Gone } else { Status::Idle };
 
-    Some(Observed {
+    Observed {
         selector: Selector::Terminal(TerminalSel {
             driver: "zellij".to_string(),
             id: name.clone(),
         }),
-        locator: name.clone(),
+        locator: name,
         label: None,
         shape: shape.map(Shape::Terminal),
         state: Some(State {
@@ -61,7 +84,7 @@ fn parse_session_line(line: &str) -> Option<Observed> {
         cwd,
         worktree_path: None,
         extra: json!({}),
-    })
+    }
 }
 
 pub fn layout_for_session(session: &str) -> Option<(TerminalShape, Option<String>)> {
