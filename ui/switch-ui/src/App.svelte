@@ -1,14 +1,45 @@
 <script>
   import { invoke } from "@tauri-apps/api/core";
   import { listen } from "@tauri-apps/api/event";
-  import { getCurrentWindow } from "@tauri-apps/api/window";
+  import { getCurrentWindow, LogicalSize, LogicalPosition, primaryMonitor } from "@tauri-apps/api/window";
   import { onMount, onDestroy } from "svelte";
+
+  const MAX_COLS = 6;
+  const COL_WIDTH = 180;
+  const ROW_HEIGHT = 176; // matches .column height (11rem @ 16px root)
+  const GAP = 12; // matches .lanes gap (0.75rem)
+  const PADDING = 16; // matches .dashboard padding (1rem)
 
   let snapshot = null;
   let activeSignal = null;
+  let cols = 1;
 
   async function refresh() {
     snapshot = await invoke("get_snapshot");
+    cols = Math.max(1, Math.min(snapshot.lanes.length, MAX_COLS));
+    await resizeToContent(snapshot.lanes.length);
+  }
+
+  async function resizeToContent(laneCount) {
+    const c = Math.max(1, Math.min(laneCount, MAX_COLS));
+    const rows = Math.max(1, Math.ceil(laneCount / MAX_COLS));
+    const width = c * COL_WIDTH + (c - 1) * GAP + PADDING * 2;
+    const height = rows * ROW_HEIGHT + (rows - 1) * GAP + PADDING * 2;
+
+    const win = getCurrentWindow();
+    await win.setSize(new LogicalSize(width, height));
+
+    const monitor = await primaryMonitor();
+    if (monitor) {
+      const scale = monitor.scaleFactor;
+      const workX = monitor.workArea.position.x / scale;
+      const workY = monitor.workArea.position.y / scale;
+      const workW = monitor.workArea.size.width / scale;
+      const workH = monitor.workArea.size.height / scale;
+      const x = workX + (workW - width) / 2;
+      const y = workY + (workH - height) / 2;
+      await win.setPosition(new LogicalPosition(x, y));
+    }
   }
 
   let timer;
@@ -88,7 +119,7 @@
 
 {#if snapshot}
   <div class="dashboard">
-    <div class="lanes">
+    <div class="lanes" style="--cols: {cols}">
       {#each snapshot.lanes as lane}
         {@const signals = allSignals(lane)}
         <div class="column" class:has-signals={signals.length > 0} class:current={snapshot.current_lane === lane.id} on:click={() => handleLaneClick(lane)}>
@@ -131,19 +162,19 @@
 
 <style>
   :global(*, *::before, *::after) { box-sizing: border-box; margin: 0; padding: 0; user-select: none; }
-  :global(body) { background: #111; color: #e0e0e0; font-family: system-ui, sans-serif; cursor: default; }
+  :global(html, body) { background: transparent; color: #e0e0e0; font-family: system-ui, sans-serif; cursor: default; }
   :global(*) { cursor: inherit; }
 
   .dashboard {
-    height: 100vh;
-    padding: 2rem 1rem 1rem;
+    background: #111;
+    border-radius: 12px;
+    padding: 1rem;
   }
 
   .lanes {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(var(--cols), 180px);
     gap: 0.75rem;
-    align-items: flex-start;
   }
 
   .column {

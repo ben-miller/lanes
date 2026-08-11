@@ -5,6 +5,9 @@
   "permissions": [
     "core:default",
     "core:window:allow-start-dragging",
+    "core:window:allow-set-size",
+    "core:window:allow-set-position",
+    "core:window:allow-current-monitor",
     {
       "identifier": "opener:allow-open-url",
       "allow": [{ "url": "obsidian://**" }]
