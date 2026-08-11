@@ -211,22 +211,28 @@ fn main() {
             }
 
             SessionsCommand::Next { show } => {
+                // Show first, switch second: the switch ends with WezTerm
+                // itself grabbing focus (activate_wezterm_tab), which should
+                // win. Showing afterward would call set_focus() on Lanes
+                // Switch's own window *after* that, stealing focus right
+                // back - and delay the window appearing until after the
+                // switch, possibly past when Control-Option was released.
+                if show {
+                    lanes::notify_switch_show();
+                }
                 if let Err(e) = lanes::cycle_claude_session(1) {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
                 }
-                if show {
-                    lanes::notify_switch_show();
-                }
             }
 
             SessionsCommand::Prev { show } => {
+                if show {
+                    lanes::notify_switch_show();
+                }
                 if let Err(e) = lanes::cycle_claude_session(-1) {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
-                }
-                if show {
-                    lanes::notify_switch_show();
                 }
             }
         },
