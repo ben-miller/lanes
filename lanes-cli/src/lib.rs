@@ -130,6 +130,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         taken_at: chrono::Utc::now().to_rfc3339(),
         lanes,
         current_lane: state::read_current_lane(),
+        current_claude_session: state::read_claude_cursor(),
     }
 }
 
@@ -291,7 +292,10 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
     // notify it directly over a socket instead of waiting on it to notice
     // the file changed - a filesystem watcher has an inherent floor latency
     // no amount of reordering removes, since the UI is a different process.
-    notify_switch_socket(&format!("lane:{}\n", lane_id.as_deref().unwrap_or("")));
+    // Carries the session id alongside the lane so the UI's per-session
+    // highlight can update from this same message instead of waiting on the
+    // next full snapshot refresh.
+    notify_switch_socket(&format!("switch:{}|{}\n", lane_id.as_deref().unwrap_or(""), session_id));
 
     let switch_result: Result<(), String> = (|| {
         if zellij_session.is_empty() {
@@ -327,7 +331,7 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
         // an already-running UI would keep showing the lane we failed to
         // reach until its next unrelated refresh (up to 10s later).
         state::write_claude_cursor_and_lane(old_cursor.as_deref(), old_lane.as_deref());
-        notify_switch_socket(&format!("lane:{}\n", old_lane.as_deref().unwrap_or("")));
+        notify_switch_socket(&format!("switch:{}|{}\n", old_lane.as_deref().unwrap_or(""), old_cursor.as_deref().unwrap_or("")));
     }
 
     switch_result

@@ -26,8 +26,12 @@ fn start_switch_socket(handle: tauri::AppHandle) {
         for stream in listener.incoming().flatten() {
             let mut lines = std::io::BufReader::new(stream).lines();
             while let Some(Ok(line)) = lines.next() {
-                if let Some(lane) = line.strip_prefix("lane:") {
-                    let payload = if lane.is_empty() { None } else { Some(lane.to_string()) };
+                if let Some(rest) = line.strip_prefix("switch:") {
+                    let (lane, session) = rest.split_once('|').unwrap_or((rest, ""));
+                    let payload = serde_json::json!({
+                        "lane": if lane.is_empty() { None } else { Some(lane) },
+                        "session": if session.is_empty() { None } else { Some(session) },
+                    });
                     handle.emit("lane-changed", payload).ok();
                 } else if line == "show" {
                     if let Some(win) = handle.get_webview_window("main") {

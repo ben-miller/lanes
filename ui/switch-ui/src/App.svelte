@@ -50,11 +50,12 @@
     refresh();
     timer = setInterval(refresh, 10000);
     unlistenSessions = await listen("sessions-changed", () => refresh());
-    // Fires immediately on a lane change (see lib.rs) - update the highlight
-    // right away instead of waiting on the slower full refresh above, same
-    // as the optimistic local update already done for in-UI lane clicks.
+    // Fires immediately on a lane/session change (see lib.rs) - update both
+    // highlights right away instead of waiting on the slower full refresh
+    // above, same as the optimistic local update already done for in-UI
+    // signal clicks.
     unlistenLane = await listen("lane-changed", (event) => {
-      if (snapshot) snapshot = { ...snapshot, current_lane: event.payload };
+      if (snapshot) snapshot = { ...snapshot, current_lane: event.payload.lane, current_claude_session: event.payload.session };
     });
     document.addEventListener("mousedown", (e) => {
       if (!e.target.closest(".signal") && !e.target.closest(".overlay")) {
@@ -87,7 +88,8 @@
   }
 
   async function handleSignalClick(lane, signal) {
-    snapshot = { ...snapshot, current_lane: lane.id };
+    const sessionId = signal.action?.kind === "switch_claude_session" ? signal.action.session_id : snapshot.current_claude_session;
+    snapshot = { ...snapshot, current_lane: lane.id, current_claude_session: sessionId };
     await invoke("set_current_lane", { laneId: lane.id });
     if (signal.action) {
       const err = await invoke("execute_action", { action: signal.action }).then(() => null).catch(e => String(e));
@@ -135,6 +137,7 @@
           {#each signals as signal}
             <button
               class="signal"
+              class:current-session={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.current_claude_session}
               on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
               on:click|stopPropagation
             >{signalLabel(signal)}</button>
@@ -219,6 +222,10 @@
     border: 1px solid transparent;
     text-align: left;
     cursor: pointer;
+  }
+  .signal.current-session {
+    border-color: #ffb347;
+    border-width: 2px;
   }
 
   .backdrop {

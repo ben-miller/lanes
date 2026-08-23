@@ -138,6 +138,8 @@ pub struct LanewiseSnapshot {
     pub lanes: Vec<LaneSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub current_lane: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_claude_session: Option<String>,
 }
 
 // --- Shapes (observed current arrangement) ---
