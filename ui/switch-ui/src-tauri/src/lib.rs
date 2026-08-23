@@ -2,7 +2,7 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
-use tauri::menu::{CheckMenuItem, MenuBuilder};
+use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
 
@@ -235,7 +235,13 @@ pub fn run() {
             let pin_item = CheckMenuItem::with_id(app, "pin", "Pin on Top", true, pinned_at_startup, None::<&str>)?;
             let show_inactive_at_startup = lanes::state::read_show_inactive();
             let show_inactive_item = CheckMenuItem::with_id(app, "show-inactive", "Show Inactive", true, show_inactive_at_startup, None::<&str>)?;
-            let menu = MenuBuilder::new(app).item(&pin_item).item(&show_inactive_item).build()?;
+            let quit_item = MenuItem::with_id(app, "quit", "Quit Lanes", true, None::<&str>)?;
+            let menu = MenuBuilder::new(app)
+                .item(&pin_item)
+                .item(&show_inactive_item)
+                .separator()
+                .item(&quit_item)
+                .build()?;
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
 
             watch_paths(app.handle().clone(), pin_item.clone());
@@ -263,6 +269,8 @@ pub fn run() {
                             // next unrelated refresh.
                             app.emit("sessions-changed", ()).ok();
                         }
+                    } else if event.id.0.as_str() == "quit" {
+                        app.exit(0);
                     }
                 })
                 .build(app)?;
