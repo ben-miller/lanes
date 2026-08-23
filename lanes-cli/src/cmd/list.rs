@@ -11,7 +11,8 @@ pub fn run(lanes: &[Lane], json: bool) {
         return;
     }
     for lane in lanes {
-        println!("{} ({})", lane.id, lane.name);
+        let suffix = if lane.active { "" } else { " [inactive]" };
+        println!("{} ({}){}", lane.id, lane.name, suffix);
         for el in &lane.scope {
             match el {
                 ScopeElement::ZellijSession { .. } => {

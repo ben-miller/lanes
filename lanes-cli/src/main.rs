@@ -11,9 +11,9 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Activate a lane: focus terminal and apply window placement
-    Activate {
-        /// Lane ID to activate
+    /// Focus a lane: focus terminal and apply window placement
+    Focus {
+        /// Lane ID to focus
         id: String,
     },
 
@@ -37,7 +37,7 @@ enum Command {
     /// List lanes that have signals requiring attention
     Signals,
 
-    /// Print the currently active lane ID
+    /// Print the currently focused lane ID
     Current {
         /// Print the lane's display name instead of its id
         #[arg(long)]
@@ -118,26 +118,26 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Command::Activate { id } => {
+        Command::Focus { id } => {
             let cfg = lanes::config::Config::load();
-            cmd::activate::run(&id, &cfg);
+            cmd::focus::run(&id, &cfg);
         }
 
         Command::Current { name } => {
-            match lanes::state::read_current_lane() {
+            match lanes::state::read_focused_lane() {
                 Some(id) if name => {
                     let cfg = lanes::config::Config::load();
                     match cfg.lanes.iter().find(|l| l.id == id) {
                         Some(lane) => println!("{}", lane.name),
                         None => {
-                            eprintln!("error: current lane '{}' not found in config", id);
+                            eprintln!("error: focused lane '{}' not found in config", id);
                             std::process::exit(1);
                         }
                     }
                 }
                 Some(id) => println!("{}", id),
                 None => {
-                    eprintln!("no active lane");
+                    eprintln!("no focused lane");
                     std::process::exit(1);
                 }
             }

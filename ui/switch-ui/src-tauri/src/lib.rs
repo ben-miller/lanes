@@ -51,18 +51,25 @@ fn start_switch_socket(handle: tauri::AppHandle) {
 #[tauri::command]
 fn get_snapshot() -> serde_json::Value {
     let cfg = lanes::config::Config::load();
-    let snapshot = lanes::gather_lanes(&cfg);
+    let mut snapshot = lanes::gather_lanes(&cfg);
+    // Inactive-lane filtering is a dashboard display concern, not a
+    // gather_lanes()-level one - the CLI (`lanes list`/`snapshot`/`signals`)
+    // always sees every lane regardless of this toggle; only what Lanes
+    // Switch itself renders is affected.
+    if !lanes::state::read_show_inactive() {
+        snapshot.lanes.retain(|l| l.active);
+    }
     serde_json::to_value(&snapshot).unwrap()
 }
 
 #[tauri::command]
-fn set_current_lane(lane_id: String) {
-    lanes::state::set_current_lane(&lane_id);
+fn set_focused_lane(lane_id: String) {
+    lanes::state::set_focused_lane(&lane_id);
 }
 
 #[tauri::command]
-fn activate_lane(lane_id: String) {
-    lanes::activate_lane(&lane_id, false);
+fn focus_lane(lane_id: String) {
+    lanes::focus_lane(&lane_id, false);
 }
 
 #[tauri::command]
@@ -226,7 +233,9 @@ pub fn run() {
 
             let pinned_at_startup = lanes::state::read_switch_pinned();
             let pin_item = CheckMenuItem::with_id(app, "pin", "Pin on Top", true, pinned_at_startup, None::<&str>)?;
-            let menu = MenuBuilder::new(app).item(&pin_item).build()?;
+            let show_inactive_at_startup = lanes::state::read_show_inactive();
+            let show_inactive_item = CheckMenuItem::with_id(app, "show-inactive", "Show Inactive", true, show_inactive_at_startup, None::<&str>)?;
+            let menu = MenuBuilder::new(app).item(&pin_item).item(&show_inactive_item).build()?;
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
 
             watch_paths(app.handle().clone(), pin_item.clone());
@@ -234,6 +243,7 @@ pub fn run() {
             apply_pin(app.handle(), &pin_item, pinned_at_startup);
 
             let pin_item_for_handler = pin_item.clone();
+            let show_inactive_item_for_handler = show_inactive_item.clone();
             TrayIconBuilder::new()
                 .icon(icon)
                 .icon_as_template(true)
@@ -244,13 +254,22 @@ pub fn run() {
                             lanes::state::set_switch_pinned(pinned);
                             apply_pin(app, &pin_item_for_handler, pinned);
                         }
+                    } else if event.id.0.as_str() == "show-inactive" {
+                        if let Ok(show) = show_inactive_item_for_handler.is_checked() {
+                            lanes::state::set_show_inactive(show);
+                            // Not reflected in gather_lanes() output until the
+                            // next get_snapshot() call - nudge the frontend to
+                            // make that call now instead of waiting on the
+                            // next unrelated refresh.
+                            app.emit("sessions-changed", ()).ok();
+                        }
                     }
                 })
                 .build(app)?;
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_snapshot, execute_action, set_current_lane, activate_lane])
+        .invoke_handler(tauri::generate_handler![get_snapshot, execute_action, set_focused_lane, focus_lane])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

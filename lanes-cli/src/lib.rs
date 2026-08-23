@@ -123,14 +123,14 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             zone: w.zone.clone(),
         }));
 
-        model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), facets }
+        model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), active: lane.active, facets }
     }).collect();
 
     model::LanewiseSnapshot {
         taken_at: chrono::Utc::now().to_rfc3339(),
         lanes,
-        current_lane: state::read_current_lane(),
-        current_claude_session: state::read_claude_cursor(),
+        focused_lane: state::read_focused_lane(),
+        focused_claude_session: state::read_claude_cursor(),
     }
 }
 
@@ -268,7 +268,7 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
     let zellij_pane_id = val["zellij_pane_id"].as_u64();
 
     // Switching to a session is a deliberate lane change, same as clicking a
-    // lane in the UI or `lanes activate` - update current-lane too if this
+    // lane in the UI or `lanes focus` - update focused-lane too if this
     // session lives in a configured lane, in the same write as the cursor
     // (see write_claude_cursor_and_lane) so this is one fs-change event, not two.
     let lane_id = if !zellij_session.is_empty() {
@@ -285,7 +285,7 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
     // optimism is undone in the Err branch so state.kdl (and the UI) never
     // claims we're somewhere we didn't actually reach.
     let old_cursor = state::read_claude_cursor();
-    let old_lane = state::read_current_lane();
+    let old_lane = state::read_focused_lane();
     state::write_claude_cursor_and_lane(Some(session_id), lane_id.as_deref());
     // state.kdl is the persisted record (so a not-yet-running or restarting
     // UI still picks up the right lane), but if the UI is already running,
@@ -384,7 +384,11 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     } else {
         vec![]
     };
+    // Skip sessions that live in an inactive lane - cycling is for jumping
+    // around your current working set, which is exactly what "active" means
+    // (see model::Lane.active).
     let mut sessions: Vec<(String, String)> = live_sessions.into_iter()
+        .filter(|s| session_belongs_to_active_lane(s.zellij_session.as_deref(), &cfg))
         .map(|s| (s.zellij_session.unwrap_or_default(), s.session_id))
         .collect();
     sessions.sort();
@@ -399,6 +403,16 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     let idx = cycle_index(ids.len(), current_index, direction);
 
     switch_claude_session(&ids[idx])
+}
+
+/// Whether a live Claude session should be reachable by cycling, based on
+/// the activity of whatever lane (if any) its Zellij session belongs to. A
+/// session with no matching lane at all (not part of any configured lane)
+/// isn't subject to this - it was never something you could mark inactive
+/// in the first place, so it stays reachable.
+fn session_belongs_to_active_lane(zellij_session: Option<&str>, cfg: &config::Config) -> bool {
+    let zellij_session = zellij_session.unwrap_or("");
+    cfg.lane_for_session(zellij_session).map_or(true, |lane| lane.active)
 }
 
 fn cycle_index(len: usize, current_index: Option<usize>, direction: i32) -> usize {
@@ -558,7 +572,7 @@ fn parse_bundle_id(path: &str) -> Option<String> {
     Some(bundle.trim().to_string())
 }
 
-pub fn activate_lane(lane_id: &str, focus: bool) {
+pub fn focus_lane(lane_id: &str, focus: bool) {
     let cfg = config::Config::load();
     let lane = match cfg.lanes.iter().find(|l| l.id == lane_id) {
         Some(l) => l,
@@ -581,7 +595,7 @@ pub fn activate_lane(lane_id: &str, focus: bool) {
         }
     }
 
-    state::set_current_lane(lane_id);
+    state::set_focused_lane(lane_id);
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -646,6 +660,47 @@ mod tests {
     fn cycle_index_single_session_always_stays_put() {
         assert_eq!(cycle_index(1, Some(0), 1), 0);
         assert_eq!(cycle_index(1, Some(0), -1), 0);
+    }
+
+    fn test_config(lanes: Vec<model::Lane>) -> config::Config {
+        config::Config { drivers: None, monitors: std::collections::HashMap::new(), lanes }
+    }
+
+    #[test]
+    fn session_in_inactive_lane_is_excluded_from_cycling() {
+        let cfg = test_config(vec![model::Lane {
+            id: "infra".to_string(),
+            name: "Infra".to_string(),
+            active: false,
+            scope: vec![scope::ScopeElement::zellij_session("infra")],
+            windows: vec![],
+        }]);
+        assert!(!session_belongs_to_active_lane(Some("infra"), &cfg));
+    }
+
+    #[test]
+    fn session_in_active_lane_is_included_in_cycling() {
+        let cfg = test_config(vec![model::Lane {
+            id: "lanes-dev".to_string(),
+            name: "Lanes Dev".to_string(),
+            active: true,
+            scope: vec![scope::ScopeElement::zellij_session("lanes")],
+            windows: vec![],
+        }]);
+        assert!(session_belongs_to_active_lane(Some("lanes"), &cfg));
+    }
+
+    #[test]
+    fn session_with_no_matching_lane_is_always_included() {
+        let cfg = test_config(vec![model::Lane {
+            id: "infra".to_string(),
+            name: "Infra".to_string(),
+            active: false,
+            scope: vec![scope::ScopeElement::zellij_session("infra")],
+            windows: vec![],
+        }]);
+        assert!(session_belongs_to_active_lane(Some("some-other-session"), &cfg));
+        assert!(session_belongs_to_active_lane(None, &cfg));
     }
 
     #[test]

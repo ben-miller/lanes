@@ -55,7 +55,7 @@
     // above, same as the optimistic local update already done for in-UI
     // signal clicks.
     unlistenLane = await listen("lane-changed", (event) => {
-      if (snapshot) snapshot = { ...snapshot, current_lane: event.payload.lane, current_claude_session: event.payload.session };
+      if (snapshot) snapshot = { ...snapshot, focused_lane: event.payload.lane, focused_claude_session: event.payload.session };
     });
     document.addEventListener("mousedown", (e) => {
       if (!e.target.closest(".signal") && !e.target.closest(".overlay")) {
@@ -82,15 +82,15 @@
   }
 
   async function handleLaneClick(lane) {
-    snapshot = { ...snapshot, current_lane: lane.id };
-    await invoke("activate_lane", { laneId: lane.id });
+    snapshot = { ...snapshot, focused_lane: lane.id };
+    await invoke("focus_lane", { laneId: lane.id });
     await refresh();
   }
 
   async function handleSignalClick(lane, signal) {
-    const sessionId = signal.action?.kind === "switch_claude_session" ? signal.action.session_id : snapshot.current_claude_session;
-    snapshot = { ...snapshot, current_lane: lane.id, current_claude_session: sessionId };
-    await invoke("set_current_lane", { laneId: lane.id });
+    const sessionId = signal.action?.kind === "switch_claude_session" ? signal.action.session_id : snapshot.focused_claude_session;
+    snapshot = { ...snapshot, focused_lane: lane.id, focused_claude_session: sessionId };
+    await invoke("set_focused_lane", { laneId: lane.id });
     if (signal.action) {
       const err = await invoke("execute_action", { action: signal.action }).then(() => null).catch(e => String(e));
       if (err) activeSignal = { lane, signal, status: err };
@@ -132,12 +132,12 @@
     <div class="lanes" style="--cols: {cols}">
       {#each snapshot.lanes as lane}
         {@const signals = allSignals(lane)}
-        <div class="column" class:has-signals={signals.length > 0} class:current={snapshot.current_lane === lane.id} on:click={() => handleLaneClick(lane)}>
+        <div class="column" class:has-signals={signals.length > 0} class:focused={snapshot.focused_lane === lane.id} on:click={() => handleLaneClick(lane)}>
           <span class="name">{lane.name}</span>
           {#each signals as signal}
             <button
               class="signal urgency-{signal.urgency}"
-              class:current-session={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.current_claude_session}
+              class:focused-session={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.focused_claude_session}
               on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
               on:click|stopPropagation
             >{signalLabel(signal)}</button>
@@ -201,8 +201,8 @@
     gap: 0.4rem;
   }
   .column.has-signals { border-color: #7a5200; }
-  .column.current { border-color: #e0e0e0; border-width: 2px; }
-  .column.current.has-signals { border-color: #ffb347; border-width: 2px; }
+  .column.focused { border-color: #e0e0e0; border-width: 2px; }
+  .column.focused.has-signals { border-color: #ffb347; border-width: 2px; }
 
   .name {
     font-size: 0.78rem;
@@ -226,7 +226,7 @@
   .signal.urgency-info { color: #7ec8ff; background: #1f3a52; }
   .signal.urgency-attention { color: #ffb347; background: #7a5200; }
   .signal.urgency-blocking { color: #ff6b6b; background: #7a1f1f; }
-  .signal.current-session {
+  .signal.focused-session {
     border-color: #ffb347;
     border-width: 2px;
   }

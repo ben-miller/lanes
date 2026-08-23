@@ -42,13 +42,13 @@ fn put_scalar(doc: &mut KdlDocument, name: &str, value: impl Into<kdl::KdlEntry>
     doc.nodes_mut().push(node);
 }
 
-pub fn read_current_lane() -> Option<String> {
-    get_scalar_str(&load_doc(), "current-lane")
+pub fn read_focused_lane() -> Option<String> {
+    get_scalar_str(&load_doc(), "focused-lane")
 }
 
-pub fn set_current_lane(id: &str) {
+pub fn set_focused_lane(id: &str) {
     let mut doc = load_doc();
-    put_scalar(&mut doc, "current-lane", id);
+    put_scalar(&mut doc, "focused-lane", id);
     save_doc(&doc);
 }
 
@@ -70,7 +70,7 @@ fn write_scalar_opt(doc: &mut KdlDocument, name: &str, value: Option<&str>) {
 }
 
 /// One load/mutate/save round-trip for both fields, instead of the two
-/// separate set_claude_cursor/set_current_lane round-trips this replaced -
+/// separate set_claude_cursor/set_focused_lane round-trips this replaced -
 /// switching sessions always touches both together, and writing them
 /// separately meant two file-system change events (and two Lanes Switch UI
 /// refreshes) for what's really one atomic action. `None` removes a field
@@ -82,7 +82,7 @@ fn write_scalar_opt(doc: &mut KdlDocument, name: &str, value: Option<&str>) {
 pub fn write_claude_cursor_and_lane(cursor: Option<&str>, lane: Option<&str>) {
     let mut doc = load_doc();
     write_scalar_opt(&mut doc, "claude-cursor", cursor);
-    write_scalar_opt(&mut doc, "current-lane", lane);
+    write_scalar_opt(&mut doc, "focused-lane", lane);
     save_doc(&doc);
 }
 
@@ -93,6 +93,20 @@ pub fn read_switch_pinned() -> bool {
 pub fn set_switch_pinned(pinned: bool) {
     let mut doc = load_doc();
     put_scalar(&mut doc, "switch-pinned", pinned);
+    save_doc(&doc);
+}
+
+/// Whether Lanes Switch's dashboard should include inactive lanes (see
+/// model::Lane.active) alongside the active ones. Same persisted-toggle
+/// pattern as switch-pinned - Lanes Switch's tray menu just flips this,
+/// defaulting to false so inactive lanes stay out of the way by default.
+pub fn read_show_inactive() -> bool {
+    get_scalar_bool(&load_doc(), "show-inactive")
+}
+
+pub fn set_show_inactive(show: bool) {
+    let mut doc = load_doc();
+    put_scalar(&mut doc, "show-inactive", show);
     save_doc(&doc);
 }
 
@@ -152,13 +166,13 @@ mod tests {
     #[test]
     fn scalar_round_trips_and_overwrites_without_duplicating() {
         let mut doc = KdlDocument::new();
-        assert_eq!(get_scalar_str(&doc, "current-lane"), None);
-        put_scalar(&mut doc, "current-lane", "sheetwork1");
-        assert_eq!(get_scalar_str(&doc, "current-lane"), Some("sheetwork1".to_string()));
-        put_scalar(&mut doc, "current-lane", "infra");
-        assert_eq!(get_scalar_str(&doc, "current-lane"), Some("infra".to_string()));
+        assert_eq!(get_scalar_str(&doc, "focused-lane"), None);
+        put_scalar(&mut doc, "focused-lane", "sheetwork1");
+        assert_eq!(get_scalar_str(&doc, "focused-lane"), Some("sheetwork1".to_string()));
+        put_scalar(&mut doc, "focused-lane", "infra");
+        assert_eq!(get_scalar_str(&doc, "focused-lane"), Some("infra".to_string()));
         // overwriting shouldn't leave a duplicate node behind
-        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "current-lane").count(), 1);
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "focused-lane").count(), 1);
     }
 
     #[test]
@@ -170,30 +184,30 @@ mod tests {
     #[test]
     fn different_scalar_fields_coexist_without_clobbering_each_other() {
         let mut doc = KdlDocument::new();
-        put_scalar(&mut doc, "current-lane", "lanes-dev");
+        put_scalar(&mut doc, "focused-lane", "lanes-dev");
         put_scalar(&mut doc, "switch-pinned", true);
-        assert_eq!(get_scalar_str(&doc, "current-lane"), Some("lanes-dev".to_string()));
+        assert_eq!(get_scalar_str(&doc, "focused-lane"), Some("lanes-dev".to_string()));
         assert_eq!(get_scalar_bool(&doc, "switch-pinned"), true);
 
         // updating one field later shouldn't touch the other
-        put_scalar(&mut doc, "current-lane", "infra");
+        put_scalar(&mut doc, "focused-lane", "infra");
         assert_eq!(get_scalar_bool(&doc, "switch-pinned"), true);
     }
 
     #[test]
     fn write_scalar_opt_sets_value_when_some() {
         let mut doc = KdlDocument::new();
-        write_scalar_opt(&mut doc, "current-lane", Some("infra"));
-        assert_eq!(get_scalar_str(&doc, "current-lane"), Some("infra".to_string()));
+        write_scalar_opt(&mut doc, "focused-lane", Some("infra"));
+        assert_eq!(get_scalar_str(&doc, "focused-lane"), Some("infra".to_string()));
     }
 
     #[test]
     fn write_scalar_opt_removes_node_when_none() {
         let mut doc = KdlDocument::new();
-        put_scalar(&mut doc, "current-lane", "infra");
-        write_scalar_opt(&mut doc, "current-lane", None);
-        assert_eq!(get_scalar_str(&doc, "current-lane"), None);
-        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "current-lane").count(), 0);
+        put_scalar(&mut doc, "focused-lane", "infra");
+        write_scalar_opt(&mut doc, "focused-lane", None);
+        assert_eq!(get_scalar_str(&doc, "focused-lane"), None);
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "focused-lane").count(), 0);
     }
 
     #[test]
@@ -220,15 +234,15 @@ mod tests {
     #[test]
     fn tab_ids_coexist_with_scalar_fields_without_clobbering_each_other() {
         let mut doc = KdlDocument::new();
-        put_scalar(&mut doc, "current-lane", "lanes-dev");
+        put_scalar(&mut doc, "focused-lane", "lanes-dev");
         put_wezterm_tab_id(&mut doc, "lanes", 4);
         put_wezterm_tab_id(&mut doc, "infra", 3);
-        assert_eq!(get_scalar_str(&doc, "current-lane"), Some("lanes-dev".to_string()));
+        assert_eq!(get_scalar_str(&doc, "focused-lane"), Some("lanes-dev".to_string()));
         assert_eq!(wezterm_tab_id_from(&doc, "lanes"), Some(4));
         assert_eq!(wezterm_tab_id_from(&doc, "infra"), Some(3));
 
-        // updating current-lane later shouldn't touch the tab-id mappings
-        put_scalar(&mut doc, "current-lane", "infra");
+        // updating focused-lane later shouldn't touch the tab-id mappings
+        put_scalar(&mut doc, "focused-lane", "infra");
         assert_eq!(wezterm_tab_id_from(&doc, "lanes"), Some(4));
         assert_eq!(wezterm_tab_id_from(&doc, "infra"), Some(3));
     }

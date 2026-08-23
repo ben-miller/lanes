@@ -102,6 +102,12 @@ struct LaneFile {
 struct LaneHeader {
     id: String,
     name: String,
+    #[serde(default = "default_true")]
+    active: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// TOML-facing shape for a scope element - human-friendly fields
@@ -178,6 +184,7 @@ fn load_lanes() -> Vec<Lane> {
             Some(Lane {
                 id: file.lane.id,
                 name: file.lane.name,
+                active: file.lane.active,
                 scope: file.scope.into_iter().map(ScopeElement::from).collect(),
                 windows: file.windows,
             })
@@ -218,6 +225,29 @@ session = "sheetwork"
         assert_eq!(file.lane.name, "Sheetwork");
         assert_eq!(file.scope.len(), 1);
         assert!(matches!(&file.scope[0], ScopeElementRaw::ZellijSession { session } if session == "sheetwork"));
+    }
+
+    #[test]
+    fn lane_active_defaults_true_when_absent() {
+        let content = r#"
+[lane]
+id = "sheetwork"
+name = "Sheetwork"
+"#;
+        let file: LaneFile = toml::from_str(content).unwrap();
+        assert!(file.lane.active);
+    }
+
+    #[test]
+    fn lane_active_false_is_parsed() {
+        let content = r#"
+[lane]
+id = "sheetwork"
+name = "Sheetwork"
+active = false
+"#;
+        let file: LaneFile = toml::from_str(content).unwrap();
+        assert!(!file.lane.active);
     }
 
     #[test]
@@ -295,12 +325,14 @@ zone = "main:1-2/3"
                 Lane {
                     id: "sheetwork".to_string(),
                     name: "Sheetwork".to_string(),
+                    active: true,
                     scope: vec![ScopeElement::zellij_session("sheetwork")],
                     windows: vec![],
                 },
                 Lane {
                     id: "lanes-dev".to_string(),
                     name: "lanes dev".to_string(),
+                    active: true,
                     scope: vec![ScopeElement::zellij_session("lanes")],
                     windows: vec![],
                 },
@@ -320,12 +352,14 @@ zone = "main:1-2/3"
                 Lane {
                     id: "sheetwork1".to_string(),
                     name: "Sheetwork 1".to_string(),
+                    active: true,
                     scope: vec![ScopeElement::zellij_session("sheetwork1")],
                     windows: vec![],
                 },
                 Lane {
                     id: "lanes-dev".to_string(),
                     name: "lanes dev".to_string(),
+                    active: true,
                     scope: vec![ScopeElement::zellij_session("lanes")],
                     windows: vec![],
                 },

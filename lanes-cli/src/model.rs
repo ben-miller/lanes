@@ -8,16 +8,28 @@ use crate::scope::ScopeElement;
 pub struct Lane {
     pub id: String,
     pub name: String,
+    // Whether this lane is part of the current working set at all, distinct
+    // from `focused_lane` (which one you're looking at right now) - a lane
+    // can be inactive while still being the one recorded as focused, since
+    // nothing forces a jump away from it on deactivation (see
+    // gather_lanes/state::read_focused_lane). Defaults to true so existing
+    // lane files without this field keep behaving exactly as before.
+    #[serde(default = "default_true")]
+    pub active: bool,
     #[serde(default)]
     pub scope: Vec<ScopeElement>,
     // Window placement isn't part of scope - unlike everything else here,
     // it has no observable state and nothing to navigate to, it's a pure
     // imperative action ("move this app to this screen zone") triggered on
-    // lane activation. Doesn't fit the scope/observation model, so it stays
-    // its own thing rather than being forced into a ScopeElement kind with
-    // no observations and no real locator identity.
+    // lane focus. Doesn't fit the scope/observation model, so it stays its
+    // own thing rather than being forced into a ScopeElement kind with no
+    // observations and no real locator identity.
     #[serde(default)]
     pub windows: Vec<WindowPlacement>,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Lane {
@@ -152,6 +164,7 @@ impl FacetSnapshot {
 pub struct LaneSnapshot {
     pub id: String,
     pub name: String,
+    pub active: bool,
     pub facets: Vec<FacetSnapshot>,
 }
 
@@ -166,9 +179,9 @@ pub struct LanewiseSnapshot {
     pub taken_at: String,
     pub lanes: Vec<LaneSnapshot>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_lane: Option<String>,
+    pub focused_lane: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub current_claude_session: Option<String>,
+    pub focused_claude_session: Option<String>,
 }
 
 // --- Shapes (observed current arrangement) ---
