@@ -1,5 +1,6 @@
 pub mod config;
 mod drivers;
+pub mod logging;
 pub mod model;
 pub mod scope;
 pub mod state;
@@ -588,30 +589,44 @@ pub fn resolve_lane_id(explicit: Option<String>, cfg: &config::Config) -> Result
         .ok_or_else(|| format!("No lane found with zellij session {session:?}"))
 }
 
-pub fn focus_lane(lane_id: &str, focus: bool) {
+/// Best-effort: attempts every scope element and window placement even if
+/// an earlier one failed (one broken WezTerm tab shouldn't block the rest of
+/// the lane from focusing), collecting anything that went wrong along the
+/// way. Each warning is still eprintln!'d immediately as before - so running
+/// this from a terminal sees them right away - and also returned so a
+/// caller with no attached terminal (Lanes Switch, calling this in-process)
+/// has something to actually log instead of the warnings vanishing into a
+/// GUI process's unreachable stderr.
+pub fn focus_lane(lane_id: &str, focus: bool) -> Result<(), String> {
     let cfg = config::Config::load();
     let lane = match cfg.lanes.iter().find(|l| l.id == lane_id) {
         Some(l) => l,
-        None => {
-            eprintln!("error: lane not found: {}", lane_id);
-            return;
-        }
+        None => return Err(format!("lane not found: {}", lane_id)),
     };
 
+    let mut warnings = Vec::new();
     for el in &lane.scope {
         if let Some(session) = el.zellij_session_name() {
             if let Err(e) = activate_wezterm_tab(session, focus) {
                 eprintln!("warning: {}", e);
+                warnings.push(e);
             }
         }
     }
     for w in &lane.windows {
         if let Err(e) = activate_window_facet(&w.path, &w.zone, &cfg) {
             eprintln!("warning: {}", e);
+            warnings.push(e);
         }
     }
 
     state::set_focused_lane(lane_id);
+
+    if warnings.is_empty() {
+        Ok(())
+    } else {
+        Err(warnings.join("; "))
+    }
 }
 
 fn expand_tilde(path: &str) -> String {

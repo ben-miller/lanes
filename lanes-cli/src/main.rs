@@ -30,6 +30,11 @@ enum Command {
         id: Option<String>,
     },
 
+    /// Ensure baseline Lanes state exists (currently: the switch-ui/hammerspoon
+    /// log files) - idempotent, safe to call from either component's own
+    /// startup regardless of which one runs first.
+    Init,
+
     /// Check environment dependencies and configuration
     Doctor,
 
@@ -88,6 +93,30 @@ enum Command {
     /// Ask the running Lanes Switch app to hide its window, without
     /// changing pin state. See `IsPinned` for the state.kdl watch mechanism.
     HideSwitch,
+
+    /// Manage the Lanes Switch app
+    SwitchUi {
+        #[command(subcommand)]
+        command: ComponentCommand,
+    },
+
+    /// Manage the Hammerspoon integration
+    Hammerspoon {
+        #[command(subcommand)]
+        command: ComponentCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum ComponentCommand {
+    /// Tail this component's log file (~/.local/state/lanes/<name>.log) -
+    /// sugar over `tail`/`tail -f` on the right path, same as `docker logs
+    /// -f` wraps tailing a container's own log file.
+    Logs {
+        /// Follow the file for new lines, like `tail -f`
+        #[arg(short, long)]
+        follow: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -165,6 +194,8 @@ fn main() {
                 }
             }
         }
+
+        Command::Init => lanes::logging::init_state(),
 
         Command::Doctor => cmd::doctor::run(),
 
@@ -263,6 +294,14 @@ fn main() {
 
         Command::HideSwitch => {
             lanes::notify_switch_hide();
+        }
+
+        Command::SwitchUi { command: ComponentCommand::Logs { follow } } => {
+            cmd::logs::run("switch-ui.log", follow);
+        }
+
+        Command::Hammerspoon { command: ComponentCommand::Logs { follow } } => {
+            cmd::logs::run("hammerspoon.log", follow);
         }
     }
 }

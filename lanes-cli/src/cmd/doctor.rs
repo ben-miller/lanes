@@ -27,7 +27,7 @@ impl Status {
 pub fn run() {
     let cfg = lanes::config::Config::load();
 
-    let mut checks = vec![check_lanes_registry()];
+    let mut checks = vec![check_lanes_registry(), check_logs()];
 
     if cfg.driver_enabled("zellij") {
         checks.push(check_zellij());
@@ -146,6 +146,30 @@ fn check_brotab() -> Check {
                 message: format!("{} connected browser(s)", clients),
                 hint: None,
             }
+        }
+    }
+}
+
+fn check_logs() -> Check {
+    let dir = lanes::logging::state_dir();
+    let missing: Vec<&str> = ["switch-ui.log", "hammerspoon.log"]
+        .into_iter()
+        .filter(|f| !dir.join(f).exists())
+        .collect();
+
+    if missing.is_empty() {
+        Check {
+            label: "logs",
+            status: Status::Ok,
+            message: format!("switch-ui.log and hammerspoon.log present in {}", dir.display()),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "logs",
+            status: Status::Warn,
+            message: format!("missing: {}", missing.join(", ")),
+            hint: Some("run `lanes init`".to_string()),
         }
     }
 }

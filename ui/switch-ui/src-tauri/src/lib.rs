@@ -69,19 +69,25 @@ fn set_focused_lane(lane_id: String) {
 
 #[tauri::command]
 fn focus_lane(lane_id: String) {
-    lanes::focus_lane(&lane_id, false);
+    if let Err(e) = lanes::focus_lane(&lane_id, false) {
+        lanes::logging::append_line("switch-ui.log", "warn", &format!("focus_lane({lane_id}): {e}"));
+    }
 }
 
 #[tauri::command]
 fn execute_action(action: lanes::model::SignalAction) -> Result<(), String> {
-    match action {
+    let result = match action {
         lanes::model::SignalAction::FocusRepoPane { session, path } => {
             lanes::navigate_to_repo_pane(&session, &path)
         }
         lanes::model::SignalAction::SwitchClaudeSession { session_id } => {
             lanes::switch_claude_session(&session_id)
         }
+    };
+    if let Err(ref e) = result {
+        lanes::logging::append_line("switch-ui.log", "error", &format!("execute_action: {e}"));
     }
+    result
 }
 
 fn expand_tilde(path: &str) -> String {
@@ -230,6 +236,8 @@ pub fn run() {
         .setup(|app| {
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
+
+            lanes::logging::init_state();
 
             let pinned_at_startup = lanes::state::read_switch_pinned();
             let pin_item = CheckMenuItem::with_id(app, "pin", "Pin on Top", true, pinned_at_startup, None::<&str>)?;
