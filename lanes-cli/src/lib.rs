@@ -6,11 +6,17 @@ pub mod scope;
 pub mod state;
 pub mod zone;
 
+pub use drivers::claude::RenamedCandidate;
+
+pub fn possibly_renamed_claude_sessions() -> Vec<RenamedCandidate> {
+    drivers::claude::possibly_renamed_sessions()
+}
+
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
-    let running = running_zellij_sessions();
+    let running = drivers::zellij::running_sessions();
     let claude = claude_sessions_by_zellij();
 
     let running_sessions: Vec<&str> = cfg.lanes.iter()
@@ -124,7 +130,9 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             zone: w.zone.clone(),
         }));
 
-        model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), active: lane.active, facets }
+        let session_missing = lane_session_missing(lane.active, &facets);
+
+        model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), active: lane.active, session_missing, facets }
     }).collect();
 
     model::LanewiseSnapshot {
@@ -133,6 +141,35 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         focused_lane: state::read_focused_lane(),
         focused_claude_session: state::read_claude_cursor(),
     }
+}
+
+/// A lane you're treating as active, but that isn't actually reachable
+/// right now - distinct from an inactive lane (a deliberate choice, nothing
+/// "wrong" about it) and from a lane with no terminal facet at all (nothing
+/// to be missing). Only meaningful for lanes that declare a terminal.
+///
+/// "Reachable" means state.kdl has a cached wezterm-tab-id for this
+/// session - not whether the Zellij session itself is alive, and not a
+/// live WezTerm query. Whichever tool actually owns the WezTerm tab's
+/// lifecycle (e.g. `infra zellij`) is responsible for keeping this cache
+/// current: pushing the fresh id via `lanes tabs set` whenever it spawns a
+/// tab, and clearing it via `lanes tabs clear` the moment it kills one.
+/// `lanes` itself trusts the cache rather than re-deriving liveness by
+/// polling WezTerm - the tool that owns the tab already knows the truth
+/// the instant it changes, so there's nothing to rediscover.
+fn lane_session_missing(active: bool, facets: &[model::FacetSnapshot]) -> bool {
+    let Some(session) = facets.iter().find_map(|f| match f {
+        model::FacetSnapshot::Terminal { session, .. } => Some(session.as_str()),
+        _ => None,
+    }) else {
+        return false;
+    };
+    let reachable = state::get_wezterm_tab_id(session).is_some();
+    lane_session_missing_decision(active, reachable)
+}
+
+fn lane_session_missing_decision(active: bool, reachable: bool) -> bool {
+    active && !reachable
 }
 
 /// drivers::claude::enumerate() grouped by zellij session, for the lanes
@@ -226,21 +263,6 @@ fn build_terminal_panes(
             model::PaneSnapshot { focused: pane.focused, cwd: pane.cwd.clone(), kind }
         })
     }).collect()
-}
-
-pub(crate) fn running_zellij_sessions() -> HashSet<String> {
-    let Ok(out) = std::process::Command::new("/opt/homebrew/bin/zellij")
-        .args(["list-sessions", "--short"])
-        .output()
-    else {
-        return HashSet::new();
-    };
-    if !out.status.success() { return HashSet::new(); }
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| l.trim().to_string())
-        .filter(|l| !l.is_empty())
-        .collect()
 }
 
 pub(crate) fn git_has_changes(path: &str) -> bool {
@@ -385,11 +407,12 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     } else {
         vec![]
     };
-    // Skip sessions that live in an inactive lane - cycling is for jumping
-    // around your current working set, which is exactly what "active" means
-    // (see model::Lane.active).
+    // Skip sessions that live in an inactive lane, or one with no cached
+    // WezTerm tab-id (see lane_session_missing) - that's exactly what
+    // caused the "wezterm activate-tab failed" cycling errors, since
+    // there's nothing for a switch to actually land on.
     let mut sessions: Vec<(String, String)> = live_sessions.into_iter()
-        .filter(|s| session_belongs_to_active_lane(s.zellij_session.as_deref(), &cfg))
+        .filter(|s| session_belongs_to_reachable_lane(s.zellij_session.as_deref(), &cfg))
         .map(|s| (s.zellij_session.unwrap_or_default(), s.session_id))
         .collect();
     sessions.sort();
@@ -411,9 +434,19 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
 /// session with no matching lane at all (not part of any configured lane)
 /// isn't subject to this - it was never something you could mark inactive
 /// in the first place, so it stays reachable.
-fn session_belongs_to_active_lane(zellij_session: Option<&str>, cfg: &config::Config) -> bool {
+fn session_belongs_to_reachable_lane(zellij_session: Option<&str>, cfg: &config::Config) -> bool {
     let zellij_session = zellij_session.unwrap_or("");
-    cfg.lane_for_session(zellij_session).map_or(true, |lane| lane.active)
+    match cfg.lane_for_session(zellij_session) {
+        Some(lane) => {
+            let has_cached_tab_id = state::get_wezterm_tab_id(zellij_session).is_some();
+            reachable_lane_decision(lane.active, has_cached_tab_id)
+        }
+        None => true,
+    }
+}
+
+fn reachable_lane_decision(active: bool, has_cached_tab_id: bool) -> bool {
+    active && has_cached_tab_id
 }
 
 fn cycle_index(len: usize, current_index: Option<usize>, direction: i32) -> usize {
@@ -472,7 +505,7 @@ pub fn navigate_to_repo_pane(session: &str, path: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn wezterm_socket() -> Option<String> {
+pub fn wezterm_socket() -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let dir = std::path::PathBuf::from(home).join(".local/share/wezterm");
     let mut socks: Vec<_> = std::fs::read_dir(&dir).ok()?
@@ -698,7 +731,29 @@ mod tests {
     }
 
     #[test]
-    fn session_in_inactive_lane_is_excluded_from_cycling() {
+    fn inactive_lane_is_never_reachable_regardless_of_cached_tab_id() {
+        assert!(!reachable_lane_decision(false, false));
+        assert!(!reachable_lane_decision(false, true));
+    }
+
+    #[test]
+    fn active_lane_with_cached_tab_id_is_reachable() {
+        assert!(reachable_lane_decision(true, true));
+    }
+
+    #[test]
+    fn active_lane_with_no_cached_tab_id_is_not_reachable() {
+        // This is the actual spinner/sheetwork-sandbox case: the lane's own
+        // active flag says yes, but nothing has ever pushed (or something
+        // cleared) a cached WezTerm tab-id for it - exactly what caused the
+        // "wezterm activate-tab failed" cycling errors.
+        assert!(!reachable_lane_decision(true, false));
+    }
+
+    #[test]
+    fn session_with_no_matching_lane_is_always_included_in_cycling() {
+        // No I/O involved here - cfg.lane_for_session returns None before
+        // session_belongs_to_reachable_lane ever reaches for state.kdl.
         let cfg = test_config(vec![model::Lane {
             id: "infra".to_string(),
             name: "Infra".to_string(),
@@ -706,32 +761,40 @@ mod tests {
             scope: vec![scope::ScopeElement::zellij_session("infra")],
             windows: vec![],
         }]);
-        assert!(!session_belongs_to_active_lane(Some("infra"), &cfg));
+        assert!(session_belongs_to_reachable_lane(Some("some-other-session"), &cfg));
+        assert!(session_belongs_to_reachable_lane(None, &cfg));
     }
 
     #[test]
-    fn session_in_active_lane_is_included_in_cycling() {
-        let cfg = test_config(vec![model::Lane {
-            id: "lanes-dev".to_string(),
-            name: "Lanes Dev".to_string(),
-            active: true,
-            scope: vec![scope::ScopeElement::zellij_session("lanes")],
-            windows: vec![],
-        }]);
-        assert!(session_belongs_to_active_lane(Some("lanes"), &cfg));
+    fn active_lane_with_no_terminal_facet_is_not_session_missing() {
+        // A repo-only lane has no session to be missing in the first place -
+        // this goes through the real lane_session_missing() (not the pure
+        // decision fn below) specifically to confirm it never even reaches
+        // for state.kdl when there's no terminal facet at all.
+        assert!(!lane_session_missing(true, &[model::FacetSnapshot::Repo { path: "/a/b".to_string(), signals: vec![] }]));
+    }
+
+    // The rest go through the pure decision fn directly, not lane_session_missing()
+    // itself - that one does real I/O (state::get_wezterm_tab_id reads state.kdl),
+    // which would make these tests depend on whatever happens to be in that file
+    // on the machine running them.
+
+    #[test]
+    fn inactive_lane_is_never_session_missing_regardless_of_reachability() {
+        // Deliberately inactive isn't the same problem as "should be
+        // reachable and isn't" - nothing to flag here.
+        assert!(!lane_session_missing_decision(false, false));
+        assert!(!lane_session_missing_decision(false, true));
     }
 
     #[test]
-    fn session_with_no_matching_lane_is_always_included() {
-        let cfg = test_config(vec![model::Lane {
-            id: "infra".to_string(),
-            name: "Infra".to_string(),
-            active: false,
-            scope: vec![scope::ScopeElement::zellij_session("infra")],
-            windows: vec![],
-        }]);
-        assert!(session_belongs_to_active_lane(Some("some-other-session"), &cfg));
-        assert!(session_belongs_to_active_lane(None, &cfg));
+    fn active_and_reachable_is_not_session_missing() {
+        assert!(!lane_session_missing_decision(true, true));
+    }
+
+    #[test]
+    fn active_and_unreachable_is_session_missing() {
+        assert!(lane_session_missing_decision(true, false));
     }
 
     #[test]

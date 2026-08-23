@@ -137,6 +137,23 @@ pub fn set_wezterm_tab_id(session: &str, id: u64) {
     save_doc(&doc);
 }
 
+/// Removes the cached tab-id for a session entirely, rather than leaving a
+/// stale one behind - called by `infra zellij deactivate` the moment it
+/// kills a pane, so a deactivated lane has no cached id at all instead of
+/// one that (mis)leadingly still looks like it points somewhere.
+pub fn clear_wezterm_tab_id(session: &str) {
+    let mut doc = load_doc();
+    clear_wezterm_tab_id_from(&mut doc, session);
+    save_doc(&doc);
+}
+
+fn clear_wezterm_tab_id_from(doc: &mut KdlDocument, session: &str) {
+    doc.nodes_mut().retain(|n| {
+        !(n.name().value() == "wezterm-tab-id"
+            && n.get("session").and_then(|v| v.as_string()) == Some(session))
+    });
+}
+
 fn put_wezterm_tab_id(doc: &mut KdlDocument, session: &str, id: u64) {
     doc.nodes_mut().retain(|n| {
         !(n.name().value() == "wezterm-tab-id"
@@ -219,6 +236,24 @@ mod tests {
         put_wezterm_tab_id(&mut doc, "infra", 7);
         assert_eq!(wezterm_tab_id_from(&doc, "infra"), Some(7));
         assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "wezterm-tab-id").count(), 1);
+    }
+
+    #[test]
+    fn clear_wezterm_tab_id_removes_only_the_matching_session() {
+        let mut doc = KdlDocument::new();
+        put_wezterm_tab_id(&mut doc, "infra", 3);
+        put_wezterm_tab_id(&mut doc, "lanes", 4);
+        clear_wezterm_tab_id_from(&mut doc, "infra");
+        assert_eq!(wezterm_tab_id_from(&doc, "infra"), None);
+        assert_eq!(wezterm_tab_id_from(&doc, "lanes"), Some(4));
+    }
+
+    #[test]
+    fn clear_wezterm_tab_id_is_a_no_op_when_nothing_matches() {
+        let mut doc = KdlDocument::new();
+        put_wezterm_tab_id(&mut doc, "lanes", 4);
+        clear_wezterm_tab_id_from(&mut doc, "infra");
+        assert_eq!(wezterm_tab_id_from(&doc, "lanes"), Some(4));
     }
 
     #[test]

@@ -1,9 +1,37 @@
+use std::collections::HashSet;
 use std::process::Command;
 
 use crate::model::*;
 
 pub fn layout_for_session(session: &str) -> Option<(TerminalShape, Option<String>)> {
     dump_layout(session)
+}
+
+/// `--short` lists a session name regardless of whether it's actually
+/// attachable - a session whose pane died without the session itself being
+/// killed shows up there identically to a genuinely running one, just
+/// marked "(EXITED - attach to resurrect)" in the fuller listing. Using
+/// `--no-formatting` instead (plain text, no ANSI color codes, but keeps
+/// the EXITED annotation `--short` throws away) so exited-but-not-dead
+/// sessions can actually be told apart from live ones.
+pub fn running_sessions() -> HashSet<String> {
+    let Ok(out) = Command::new("/opt/homebrew/bin/zellij")
+        .args(["list-sessions", "--no-formatting"])
+        .output()
+    else {
+        return HashSet::new();
+    };
+    if !out.status.success() { return HashSet::new(); }
+    parse_running_sessions(&String::from_utf8_lossy(&out.stdout))
+}
+
+fn parse_running_sessions(text: &str) -> HashSet<String> {
+    text.lines()
+        .filter(|l| !l.contains("(EXITED"))
+        .filter_map(|l| l.split(" [Created").next())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect()
 }
 
 fn dump_layout(session: &str) -> Option<(TerminalShape, Option<String>)> {
@@ -281,4 +309,23 @@ mod tests {
         );
         assert_eq!(kdl_arg(r#"tab name="foo""#, "cwd"), None);
     }
+
+    #[test]
+    fn parse_running_sessions_excludes_exited() {
+        let text = "infra [Created 4days ago] \n\
+                     spinner [Created 4h ago] (EXITED - attach to resurrect)\n\
+                     lanes [Created 4days ago] (current)\n";
+        let running = parse_running_sessions(text);
+        assert!(running.contains("infra"));
+        assert!(running.contains("lanes"));
+        assert!(!running.contains("spinner"));
+    }
+
+    #[test]
+    fn parse_running_sessions_handles_names_with_spaces() {
+        let text = "sheetwork planner [Created 4days ago] \n";
+        let running = parse_running_sessions(text);
+        assert!(running.contains("sheetwork planner"));
+    }
+
 }

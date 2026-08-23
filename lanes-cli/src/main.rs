@@ -154,6 +154,14 @@ enum TabsCommand {
     /// tab ID with `wezterm cli list --format json` and set it here once;
     /// activation will use the cached ID from then on.
     Set { session: String, id: u64 },
+
+    /// Remove a session's cached WezTerm tab ID entirely
+    ///
+    /// Meant to be called by whatever tool actually closes a session's
+    /// WezTerm tab (e.g. `infra zellij deactivate`) at the moment it does
+    /// so, so the cache never sits there pointing at a tab that's already
+    /// gone.
+    Clear { session: String },
 }
 
 fn main() {
@@ -268,6 +276,11 @@ fn main() {
             TabsCommand::Set { session, id } => {
                 lanes::state::set_wezterm_tab_id(&session, id);
                 println!("{}  tab_id={}", session, id);
+            }
+
+            TabsCommand::Clear { session } => {
+                lanes::state::clear_wezterm_tab_id(&session);
+                println!("{}  cleared", session);
             }
         },
 

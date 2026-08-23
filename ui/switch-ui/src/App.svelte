@@ -78,10 +78,24 @@
     if (signal.reason === "claude_session_active") return "claude · running";
     if (signal.reason === "claude_session_awaiting") return "claude · idle";
     if (signal.reason === "claude_session_permission") return "claude · permission";
+    if (signal.reason === "session_missing") return "session missing";
     return signal.reason;
   }
 
   async function handleLaneClick(lane) {
+    if (lane.session_missing) {
+      // Don't bother actually attempting the focus - it would just fail
+      // via activate_wezterm_tab's own error, which is roundabout and
+      // depends on wezterm's specific wording. We already know why it'd
+      // fail, so say so directly instead.
+      const session = lane.facets.find(f => f.kind === "terminal")?.session;
+      activeSignal = {
+        lane,
+        signal: { reason: "session_missing", action: null },
+        status: `No WezTerm tab is currently reachable for Zellij session "${session ?? "?"}".`,
+      };
+      return;
+    }
     snapshot = { ...snapshot, focused_lane: lane.id };
     await invoke("focus_lane", { laneId: lane.id });
     await refresh();
@@ -132,7 +146,13 @@
     <div class="lanes" style="--cols: {cols}">
       {#each snapshot.lanes as lane}
         {@const signals = allSignals(lane)}
-        <div class="column" class:has-signals={signals.length > 0} class:focused={snapshot.focused_lane === lane.id} on:click={() => handleLaneClick(lane)}>
+        <div
+          class="column"
+          class:has-signals={signals.length > 0}
+          class:focused={snapshot.focused_lane === lane.id}
+          class:session-missing={lane.session_missing}
+          on:click={() => handleLaneClick(lane)}
+        >
           <span class="name">{lane.name}</span>
           {#each signals as signal}
             <button
@@ -203,6 +223,13 @@
   .column.has-signals { border-color: #7a5200; }
   .column.focused { border-color: #e0e0e0; border-width: 2px; }
   .column.focused.has-signals { border-color: #ffb347; border-width: 2px; }
+  /* A lane you're treating as active whose Zellij session doesn't actually
+     exist - a muted red distinct from the brighter blocking-urgency red, so
+     the two don't read as the same kind of problem. Wins over has-signals
+     (a structurally broken lane matters more than a pending commit), and
+     brightens the same way focused.has-signals does when also focused. */
+  .column.session-missing { border-color: #a34a4a; }
+  .column.focused.session-missing { border-color: #c85c5c; border-width: 2px; }
 
   .name {
     font-size: 0.78rem;

@@ -165,6 +165,13 @@ pub struct LaneSnapshot {
     pub id: String,
     pub name: String,
     pub active: bool,
+    // True when this lane is active but its Zellij session isn't actually
+    // running - a lane you think is part of your working set but whose
+    // terminal doesn't really exist. Distinct from `active` (a config
+    // choice) and from a Terminal facet's own `running` (which the UI would
+    // otherwise have to reach into facets to check) - computed once here so
+    // the frontend just reads one bool per lane.
+    pub session_missing: bool,
     pub facets: Vec<FacetSnapshot>,
 }
 

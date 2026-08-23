@@ -114,7 +114,7 @@ pub const KIND_TRELLO_CARD: &str = "trello.card";
 
 /// Resolve one scope element to what's currently true about it - dispatches
 /// on kind to the driver that actually knows how to check. Reuses the real
-/// driver logic (git_has_changes, claude::enumerate, running_zellij_sessions)
+/// driver logic (git_has_changes, claude::enumerate, zellij::running_sessions)
 /// rather than re-implementing it here.
 pub fn observe(element: &ScopeElement) -> Vec<Observation> {
     match element {
@@ -149,7 +149,7 @@ fn observe_claude_session(element: &ScopeElement) -> Vec<Observation> {
 
 fn observe_zellij_session(element: &ScopeElement) -> Vec<Observation> {
     let Some(name) = element.zellij_session_name() else { return vec![] };
-    let running = crate::running_zellij_sessions().contains(name);
+    let running = crate::drivers::zellij::running_sessions().contains(name);
     vec![Observation {
         kind: KIND_ZELLIJ_SESSION_RUNNING.to_string(),
         data: serde_json::json!({ "running": running }),
