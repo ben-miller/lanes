@@ -23,11 +23,12 @@ if [[ -n "${WEZTERM_SOCKET:-}" && -n "${ZELLIJ_SESSION_NAME:-}" ]]; then
     [[ -n "${TAB_ID:-}" ]] && WEZTERM_TAB_ID="$TAB_ID"
 fi
 
-# Claude Code runs hook commands via `sh -c "<command>"`, so $PPID here is that
-# transient sh process (it exits as soon as this script returns) - not useful for
-# a later liveness check. Its parent is the actual `claude` process, so we go up
-# one more hop to get a PID that stays valid for the life of the session.
-CLAUDE_PID=$(ps -o ppid= -p "$PPID" 2>/dev/null | tr -d ' ' || true)
+# Claude Code runs hook commands via `sh -c "<command>"`, and that shell execs
+# the command in place rather than forking a child, so $PPID here already IS
+# the `claude` process's pid - no extra hop needed. (Verified against live
+# sessions: the extra hop was landing one level too high, on claude's own
+# parent - the terminal shell or zellij server - not on claude itself.)
+CLAUDE_PID="$PPID"
 
 jq -n \
     --arg session_id "$SESSION_ID" \

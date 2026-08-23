@@ -150,12 +150,15 @@ fn claude_sessions_by_zellij() -> HashMap<String, Vec<drivers::claude::ClaudeSes
 /// running, rather than a file orphaned by a session that ended without firing
 /// `SessionEnd` (crash, force-quit, killed pane).
 ///
-/// Sessions living in a Zellij pane are verified against currently running Zellij
-/// sessions - reliable, no guessing. Sessions started outside Zellij have no such
-/// anchor, so we fall back to checking that the recorded PID is both alive and is
-/// actually a `claude` process - a bare `kill -0` isn't enough since PIDs get
-/// reused, so a dead session's orphaned PID could later collide with an unrelated
-/// process.
+/// Sessions living in a Zellij pane are first checked against currently running
+/// Zellij sessions - reliable, no guessing. But the Zellij session outliving the
+/// pane's original occupant is exactly how stale entries accumulate (a resumed or
+/// restarted `claude` process leaves the old registry file behind), so when a PID
+/// is also recorded we additionally verify it's still alive and is actually a
+/// `claude` process - a bare `kill -0` isn't enough since PIDs get reused, so a
+/// dead session's orphaned PID could later collide with an unrelated process.
+/// Sessions started outside Zellij have no session-name anchor at all, so they
+/// rely on the PID check alone.
 pub(crate) fn session_is_live(zellij_session: &str, live_zellij_sessions: &HashSet<String>, pid: Option<u32>) -> bool {
     session_is_live_with(zellij_session, live_zellij_sessions, pid, process_command)
 }
@@ -167,7 +170,13 @@ fn session_is_live_with(
     lookup: impl Fn(u32) -> Option<String>,
 ) -> bool {
     if !zellij_session.is_empty() {
-        return live_zellij_sessions.contains(zellij_session);
+        if !live_zellij_sessions.contains(zellij_session) {
+            return false;
+        }
+        return match pid {
+            Some(p) => lookup(p).map_or(false, |cmd| is_claude_command(&cmd)),
+            None => true,
+        };
     }
     match pid {
         Some(p) => lookup(p).map_or(false, |cmd| is_claude_command(&cmd)),
@@ -643,11 +652,28 @@ mod tests {
     }
 
     #[test]
-    fn zellij_backed_session_ignores_pid_entirely() {
+    fn zellij_backed_session_dead_if_session_itself_is_gone_regardless_of_pid() {
         // Even a "live" pid shouldn't matter once the Zellij session itself is gone -
-        // the pane is the source of truth for sessions that were ever pane-attached.
+        // the session is checked first and short-circuits to dead.
         let live: HashSet<String> = HashSet::new();
         assert!(!session_is_live_with("lanes", &live, Some(123), |_| Some("claude".to_string())));
+    }
+
+    #[test]
+    fn zellij_backed_session_dead_if_pid_no_longer_a_claude_process() {
+        // Regression test: a Zellij session can outlive the Claude process that
+        // originally occupied its pane (resume, restart, pid reused by the shell).
+        // The session name alone isn't enough - the recorded pid must still resolve
+        // to `claude`, or the registry entry is a stale leftover.
+        let live: HashSet<String> = ["infra".to_string()].into_iter().collect();
+        assert!(!session_is_live_with("infra", &live, Some(8547), |_| Some("fish".to_string())));
+        assert!(!session_is_live_with("infra", &live, Some(4393), |_| None));
+    }
+
+    #[test]
+    fn zellij_backed_session_live_if_pid_still_a_claude_process() {
+        let live: HashSet<String> = ["infra".to_string()].into_iter().collect();
+        assert!(session_is_live_with("infra", &live, Some(89568), |_| Some("claude".to_string())));
     }
 
     #[test]
