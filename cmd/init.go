@@ -60,7 +60,7 @@ func runInit(cmd *cobra.Command, args []string) error {
 
 	// Port range
 	portMin := promptInt(r, "Port range min [4100]: ", 4100)
-	portMax := promptInt(r, "Port range max [4199]: ", 4199)
+	portMax := promptInt(r, "Port range max [4119]: ", 4119)
 
 	// Dev server command
 	serverCmd := prompt(r, "Dev server command: ")

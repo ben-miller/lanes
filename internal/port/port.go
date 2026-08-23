@@ -16,12 +16,24 @@ func Assign(branch string, min, max int) int {
 }
 
 // IsFree reports whether a TCP port is currently free to bind on localhost.
+// Dev servers bind to specific addresses (typically 127.0.0.1, sometimes the
+// IPv6 or IPv4 wildcard) rather than always using the wildcard, and on macOS
+// a wildcard bind does not conflict with an already-bound specific address
+// (or vice versa) — so every address a server might realistically use has to
+// be checked individually.
 func IsFree(p int) bool {
-	l, err := net.Listen("tcp", fmt.Sprintf(":%d", p))
-	if err != nil {
-		return false
+	addrs := []string{
+		fmt.Sprintf("127.0.0.1:%d", p),
+		fmt.Sprintf("0.0.0.0:%d", p),
+		fmt.Sprintf(":%d", p), // IPv6 wildcard
 	}
-	l.Close()
+	for _, addr := range addrs {
+		l, err := net.Listen("tcp", addr)
+		if err != nil {
+			return false
+		}
+		l.Close()
+	}
 	return true
 }
 

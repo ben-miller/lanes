@@ -54,7 +54,7 @@ spinner init
 This will prompt you for:
 - **Project name** (default: directory name)
 - **Domain suffix** (default: `projectname.test`)
-- **Port range** (default: 4100–4199)
+- **Port range** (default: 4100–4119)
 - **Dev server command** (e.g. `mix phx.server`, `npm run dev`, `rails server`)
 
 It creates `spinner.toml`, registers the project globally, and configures dnsmasq (requires one `sudo` prompt). After the first project, `spinner.test` is also set up for the dashboard.
@@ -123,7 +123,7 @@ Placed in the main worktree root, committed to the repo.
 [project]
 name = "sheetwork"
 domain_suffix = "sheetwork.test"
-port_range = { min = 4100, max = 4199 }
+port_range = { min = 4100, max = 4119 }
 
 [server]
 command = "mix phx.server"
@@ -199,7 +199,9 @@ Each worktree connects to its own database (`myapp_main_dev`, `myapp_feature-foo
 
 ## Port assignment
 
-Ports are assigned by hashing the branch name into the configured port range using FNV-32a. The hash is stable — the same branch name always gets the same port regardless of what other worktrees exist. There are no port conflict checks; if two branches hash to the same port, the second server will fail to start and log an error.
+Ports are assigned by hashing the branch name into the configured port range using FNV-32a, then checking whether that port is actually free on localhost. If it's taken (by another branch, another project, or anything else), spinner scans forward through the range (wrapping) until it finds one that's free, and uses that instead. Same branch, same port on almost every run — it only shifts when the hash-assigned port collides with something already bound.
+
+`spinner status`, the dashboard, and `spinner open` all reflect the actual bound port for a running (or last-run) worktree, not just the raw hash — read it from there rather than recomputing the formula by hand.
 
 To see what port a branch will get without starting anything:
 
