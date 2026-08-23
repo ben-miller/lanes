@@ -27,7 +27,12 @@ impl Status {
 pub fn run() {
     let cfg = lanes::config::Config::load();
 
-    let mut checks = vec![check_lanes_registry(), check_logs(), check_wezterm_tab_cache(&cfg)];
+    let mut checks = vec![
+        check_lanes_registry(),
+        check_logs(),
+        check_wezterm_tab_cache(&cfg),
+        check_session_naming(&cfg),
+    ];
 
     if cfg.driver_enabled("zellij") {
         checks.push(check_zellij());
@@ -311,6 +316,49 @@ fn live_wezterm_tab_ids() -> std::collections::HashSet<u64> {
     panes.iter().filter_map(|p| p.get("tab_id").and_then(|v| v.as_u64())).collect()
 }
 
+/// A Zellij session name containing anything but lowercase letters,
+/// digits, and single hyphens between segments - the same convention
+/// `infra_zellij.py` now validates on its own side. A non-kebab-case name
+/// (a space, in the one real instance so far) is exactly what let a
+/// rename slip past unnoticed and orphan an already-running Claude
+/// session's registry entry (see the "renamed Zellij session" check
+/// above) - env vars and registry files don't get updated when a session
+/// is renamed, so a name that's easy to typo or rename inconsistently is
+/// a real hazard, not just a style nitpick.
+fn is_kebab_case(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    s.split('-').all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+}
+
+fn check_session_naming(cfg: &lanes::config::Config) -> Check {
+    let bad: Vec<&str> = cfg.lanes.iter()
+        .filter_map(|l| l.terminal_session())
+        .filter(|s| !is_kebab_case(s))
+        .collect();
+
+    if bad.is_empty() {
+        Check {
+            label: "session naming",
+            status: Status::Ok,
+            message: "all Zellij session names are kebab-case".to_string(),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "session naming",
+            status: Status::Warn,
+            message: format!("not kebab-case: {}", bad.join(", ")),
+            hint: Some(
+                "not auto-renamed - renaming a live Zellij session can orphan anything \
+                 already running in it (see the check above). Fix the lane's config for new \
+                 sessions, or rename the existing session by hand with care.".to_string()
+            ),
+        }
+    }
+}
+
 fn check_lanes_registry() -> Check {
     let dir = lanes::config::config_dir();
 
@@ -400,5 +448,46 @@ mod tests {
         let (orphaned, stale) = classify_tab_cache(&cached, &cfg, &HashSet::new());
         assert!(orphaned.is_empty());
         assert!(stale.is_empty());
+    }
+
+    #[test]
+    fn kebab_case_accepts_plain_hyphenated_name() {
+        assert!(is_kebab_case("sheetwork-planner"));
+    }
+
+    #[test]
+    fn kebab_case_accepts_single_word() {
+        assert!(is_kebab_case("infra"));
+    }
+
+    #[test]
+    fn kebab_case_rejects_spaces() {
+        assert!(!is_kebab_case("sheetwork planner"));
+    }
+
+    #[test]
+    fn kebab_case_rejects_uppercase() {
+        assert!(!is_kebab_case("Sheetwork-Planner"));
+    }
+
+    #[test]
+    fn kebab_case_rejects_underscores() {
+        assert!(!is_kebab_case("sheetwork_planner"));
+    }
+
+    #[test]
+    fn kebab_case_rejects_leading_or_trailing_hyphen() {
+        assert!(!is_kebab_case("-sheetwork"));
+        assert!(!is_kebab_case("sheetwork-"));
+    }
+
+    #[test]
+    fn kebab_case_rejects_consecutive_hyphens() {
+        assert!(!is_kebab_case("sheetwork--planner"));
+    }
+
+    #[test]
+    fn kebab_case_rejects_empty_string() {
+        assert!(!is_kebab_case(""));
     }
 }
