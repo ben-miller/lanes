@@ -25,6 +25,7 @@ type Manager struct {
 	projectRoot string
 	mu          sync.Mutex
 	servers     map[string]*process.Server // branch -> server
+	ports       map[string]int             // branch -> actually-bound port
 	stop        chan struct{}
 	dead        chan string // receives branch name when its server exits unexpectedly
 }
@@ -34,6 +35,7 @@ func New(projectRoot string, cfg *config.ProjectConfig) *Manager {
 		cfg:         cfg,
 		projectRoot: projectRoot,
 		servers:     make(map[string]*process.Server),
+		ports:       make(map[string]int),
 		stop:        make(chan struct{}),
 		dead:        make(chan string, 8),
 	}
@@ -114,7 +116,10 @@ func (m *Manager) startWorktree(wt git.Worktree) error {
 		}
 	}
 
-	p := port.Assign(wt.Branch, m.cfg.Project.PortRange.Min, m.cfg.Project.PortRange.Max)
+	p, err := port.FindAvailable(wt.Branch, m.cfg.Project.PortRange.Min, m.cfg.Project.PortRange.Max)
+	if err != nil {
+		return fmt.Errorf("assigning port for %s: %w", wt.Branch, err)
+	}
 	env := config.ExpandEnv(m.cfg.Server.Env, wt.Branch)
 	env["PORT"] = fmt.Sprintf("%d", p)
 
@@ -134,6 +139,7 @@ func (m *Manager) startWorktree(wt git.Worktree) error {
 
 	m.mu.Lock()
 	m.servers[wt.Branch] = srv
+	m.ports[wt.Branch] = p
 	m.mu.Unlock()
 
 	// Notify the main loop when the process exits.
@@ -158,6 +164,7 @@ func (m *Manager) stopWorktree(branch string) {
 	srv, ok := m.servers[branch]
 	if ok {
 		delete(m.servers, branch)
+		delete(m.ports, branch)
 	}
 	m.mu.Unlock()
 
@@ -234,6 +241,7 @@ func (m *Manager) handleWatchEvent(ev watcher.Event) {
 func (m *Manager) handleServerDead(branch string) {
 	m.mu.Lock()
 	delete(m.servers, branch)
+	delete(m.ports, branch)
 	m.mu.Unlock()
 	m.saveState()
 
@@ -303,7 +311,13 @@ func (m *Manager) saveState() {
 		if wt.Branch == "" {
 			continue
 		}
-		p := port.Assign(wt.Branch, m.cfg.Project.PortRange.Min, m.cfg.Project.PortRange.Max)
+		// Use the port actually bound at start time when we have one (running,
+		// or last known before an unexpected exit); otherwise fall back to the
+		// deterministic hash as a preview — it may shift once actually started.
+		p, ok := m.ports[wt.Branch]
+		if !ok {
+			p = port.Assign(wt.Branch, m.cfg.Project.PortRange.Min, m.cfg.Project.PortRange.Max)
+		}
 		url := fmt.Sprintf("http://%s.%s:%d", strings.ReplaceAll(wt.Branch, "/", "-"), m.cfg.Project.DomainSuffix, p)
 
 		// Preserve setup status from existing state.
