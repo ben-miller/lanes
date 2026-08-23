@@ -1,6 +1,10 @@
 package port
 
-import "testing"
+import (
+	"net"
+	"strconv"
+	"testing"
+)
 
 func TestAssignDeterministic(t *testing.T) {
 	p1 := Assign("main", 4100, 4199)
@@ -39,5 +43,76 @@ func TestAssignSinglePort(t *testing.T) {
 	p := Assign("any-branch", 5000, 5000)
 	if p != 5000 {
 		t.Errorf("expected 5000 for single-port range, got %d", p)
+	}
+}
+
+func TestIsFree(t *testing.T) {
+	l, err := net.Listen("tcp", ":0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer l.Close()
+	taken := l.Addr().(*net.TCPAddr).Port
+
+	if IsFree(taken) {
+		t.Errorf("IsFree(%d) = true, want false (port is bound)", taken)
+	}
+}
+
+func TestFindAvailableReturnsHashedPortWhenFree(t *testing.T) {
+	branch := "totally-unique-branch-name-for-testing"
+	min, max := 40000, 40099
+	want := Assign(branch, min, max)
+
+	got, err := FindAvailable(branch, min, max)
+	if err != nil {
+		t.Fatalf("FindAvailable: %v", err)
+	}
+	if got != want {
+		t.Errorf("FindAvailable(%q) = %d, want hash-assigned %d (should be free)", branch, got, want)
+	}
+}
+
+func TestFindAvailableSkipsOccupiedPort(t *testing.T) {
+	branch := "main"
+	min, max := 41000, 41099
+	hashed := Assign(branch, min, max)
+
+	l, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(hashed)))
+	if err != nil {
+		t.Skipf("could not bind hashed port %d to set up test: %v", hashed, err)
+	}
+	defer l.Close()
+
+	got, err := FindAvailable(branch, min, max)
+	if err != nil {
+		t.Fatalf("FindAvailable: %v", err)
+	}
+	if got == hashed {
+		t.Errorf("FindAvailable(%q) = %d, expected it to skip the occupied hashed port", branch, got)
+	}
+	if got < min || got > max {
+		t.Errorf("FindAvailable(%q) = %d, out of range [%d, %d]", branch, got, min, max)
+	}
+}
+
+func TestFindAvailableErrorsWhenRangeFull(t *testing.T) {
+	branch := "main"
+	min, max := 42000, 42001
+
+	l1, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(min)))
+	if err != nil {
+		t.Skipf("could not bind %d to set up test: %v", min, err)
+	}
+	defer l1.Close()
+
+	l2, err := net.Listen("tcp", net.JoinHostPort("", strconv.Itoa(max)))
+	if err != nil {
+		t.Skipf("could not bind %d to set up test: %v", max, err)
+	}
+	defer l2.Close()
+
+	if _, err := FindAvailable(branch, min, max); err == nil {
+		t.Error("FindAvailable with a fully occupied range should return an error")
 	}
 }

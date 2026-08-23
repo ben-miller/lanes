@@ -9,6 +9,7 @@ import (
 	"github.com/bmiller/spinner/internal/config"
 	"github.com/bmiller/spinner/internal/git"
 	"github.com/bmiller/spinner/internal/port"
+	"github.com/bmiller/spinner/internal/state"
 	"github.com/spf13/cobra"
 )
 
@@ -45,7 +46,18 @@ func runOpen(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Prefer the port actually bound by a running (or last-run) server; it can
+	// differ from the deterministic hash if that port collided with something
+	// else at start time. Fall back to the hash as a preview if never started.
 	p := port.Assign(branch, cfg.Project.PortRange.Min, cfg.Project.PortRange.Max)
+	if st, err := state.Load(cfg.Project.Name); err == nil {
+		for _, wt := range st.Worktrees {
+			if wt.Branch == branch && wt.Port != 0 {
+				p = wt.Port
+				break
+			}
+		}
+	}
 	url := fmt.Sprintf("http://%s.%s:%d", strings.ReplaceAll(branch, "/", "-"), cfg.Project.DomainSuffix, p)
 
 	fmt.Printf("Opening %s\n", url)
