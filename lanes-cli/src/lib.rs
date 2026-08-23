@@ -727,7 +727,7 @@ mod tests {
     }
 
     fn test_config(lanes: Vec<model::Lane>) -> config::Config {
-        config::Config { drivers: None, monitors: std::collections::HashMap::new(), lanes }
+        config::Config { drivers: None, monitors: std::collections::HashMap::new(), order: None, lanes }
     }
 
     #[test]

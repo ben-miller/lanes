@@ -17,15 +17,21 @@ pub struct Config {
     pub drivers: Option<Vec<String>>,
     /// Monitor handle -> config, from lanes.toml [monitors.*].
     pub monitors: HashMap<String, MonitorConfig>,
+    /// Lane display order, from lanes.toml `order` (list of lane ids). Lanes
+    /// not listed fall back to alphabetical-by-id, after any listed ones.
+    pub order: Option<Vec<String>>,
     /// Discovered lane definitions.
     pub lanes: Vec<Lane>,
 }
 
 impl Config {
     pub fn load() -> Self {
-        let (drivers, monitors) = load_global_config();
-        let lanes = load_lanes();
-        Self { drivers, monitors, lanes }
+        let (drivers, monitors, order) = load_global_config();
+        let mut lanes = load_lanes();
+        if let Some(order) = &order {
+            sort_by_order(&mut lanes, order);
+        }
+        Self { drivers, monitors, order, lanes }
     }
 
     pub fn monitor_uuid(&self, handle: &str) -> Option<&str> {
@@ -77,9 +83,19 @@ impl Default for Config {
         Self {
             drivers: None,
             monitors: HashMap::new(),
+            order: None,
             lanes: Vec::new(),
         }
     }
+}
+
+/// Reorders `lanes` in place: lanes whose id appears in `order` come first,
+/// in `order`'s sequence; any lanes not listed keep their existing
+/// (alphabetical-by-id) relative order and are appended after.
+fn sort_by_order(lanes: &mut [Lane], order: &[String]) {
+    lanes.sort_by_key(|lane| {
+        order.iter().position(|id| id == &lane.id).unwrap_or(order.len())
+    });
 }
 
 pub fn config_dir() -> PathBuf {
@@ -95,6 +111,8 @@ struct GlobalConfig {
     drivers: Option<Vec<String>>,
     #[serde(default)]
     monitors: HashMap<String, MonitorConfigRaw>,
+    #[serde(default)]
+    order: Option<Vec<String>>,
 }
 
 #[derive(Deserialize)]
@@ -146,21 +164,21 @@ impl From<ScopeElementRaw> for ScopeElement {
 
 // --- Loaders ---
 
-fn load_global_config() -> (Option<Vec<String>>, HashMap<String, MonitorConfig>) {
+fn load_global_config() -> (Option<Vec<String>>, HashMap<String, MonitorConfig>, Option<Vec<String>>) {
     let home = std::env::var("HOME").unwrap_or_default();
     let path = PathBuf::from(home).join(".config").join("lanes.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return (None, HashMap::new()),
+        Err(_) => return (None, HashMap::new(), None),
     };
     let cfg: GlobalConfig = match toml::from_str(&content) {
         Ok(c) => c,
-        Err(_) => return (None, HashMap::new()),
+        Err(_) => return (None, HashMap::new(), None),
     };
     let monitors = cfg.monitors.into_iter()
         .map(|(k, v)| (k, MonitorConfig { uuid: v.uuid, name: v.name }))
         .collect();
-    (cfg.drivers, monitors)
+    (cfg.drivers, monitors, cfg.order)
 }
 
 fn load_lanes() -> Vec<Lane> {
@@ -212,6 +230,43 @@ fn load_lanes() -> Vec<Lane> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lane(id: &str) -> Lane {
+        Lane {
+            id: id.to_string(),
+            name: id.to_string(),
+            active: true,
+            scope: Vec::new(),
+            windows: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn parses_global_order() {
+        let cfg: super::GlobalConfig =
+            toml::from_str(r#"order = ["b", "a"]"#).unwrap();
+        assert_eq!(cfg.order, Some(vec!["b".to_string(), "a".to_string()]));
+    }
+
+    #[test]
+    fn sort_by_order_places_listed_lanes_first_in_order() {
+        let mut lanes = vec![lane("a"), lane("b"), lane("c")];
+        sort_by_order(&mut lanes, &["c".to_string(), "a".to_string()]);
+        assert_eq!(
+            lanes.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "a", "b"]
+        );
+    }
+
+    #[test]
+    fn sort_by_order_appends_unlisted_lanes_keeping_relative_order() {
+        let mut lanes = vec![lane("a"), lane("b"), lane("c"), lane("d")];
+        sort_by_order(&mut lanes, &["c".to_string()]);
+        assert_eq!(
+            lanes.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(),
+            vec!["c", "a", "b", "d"]
+        );
+    }
 
     #[test]
     fn parses_global_drivers() {
@@ -316,6 +371,7 @@ zone = "main:1-2/3"
         let cfg = Config {
             drivers: Some(vec!["zellij".to_string(), "claude".to_string()]),
             monitors: HashMap::new(),
+            order: None,
             lanes: Vec::new(),
         };
         assert!(cfg.driver_enabled("zellij"));
@@ -335,6 +391,7 @@ zone = "main:1-2/3"
         let cfg = Config {
             drivers: None,
             monitors: HashMap::new(),
+            order: None,
             lanes: vec![
                 Lane {
                     id: "sheetwork".to_string(),
@@ -362,6 +419,7 @@ zone = "main:1-2/3"
         let cfg = Config {
             drivers: None,
             monitors: HashMap::new(),
+            order: None,
             lanes: vec![
                 Lane {
                     id: "sheetwork1".to_string(),

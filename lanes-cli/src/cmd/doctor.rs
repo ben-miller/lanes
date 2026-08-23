@@ -32,6 +32,8 @@ pub fn run() {
         check_logs(),
         check_wezterm_tab_cache(&cfg),
         check_session_naming(&cfg),
+        check_lane_order(&cfg),
+        check_lane_order_vs_ztabs(&cfg),
     ];
 
     if cfg.driver_enabled("zellij") {
@@ -359,6 +361,126 @@ fn check_session_naming(cfg: &lanes::config::Config) -> Check {
     }
 }
 
+fn check_lane_order(cfg: &lanes::config::Config) -> Check {
+    let order = match &cfg.order {
+        None => {
+            return Check {
+                label: "lane order",
+                status: Status::Ok,
+                message: "no `order` configured in lanes.toml (falling back to alphabetical)".to_string(),
+                hint: None,
+            };
+        }
+        Some(order) => order,
+    };
+
+    let unknown: Vec<&str> = order.iter()
+        .map(|id| id.as_str())
+        .filter(|id| !cfg.lanes.iter().any(|l| &l.id == id))
+        .collect();
+    let missing: Vec<&str> = cfg.lanes.iter()
+        .map(|l| l.id.as_str())
+        .filter(|id| !order.iter().any(|o| o == id))
+        .collect();
+
+    if unknown.is_empty() && missing.is_empty() {
+        Check {
+            label: "lane order",
+            status: Status::Ok,
+            message: "lanes.toml `order` covers exactly the configured lanes".to_string(),
+            hint: None,
+        }
+    } else {
+        let mut parts = Vec::new();
+        if !unknown.is_empty() {
+            parts.push(format!("order lists unknown lane id(s): {}", unknown.join(", ")));
+        }
+        if !missing.is_empty() {
+            parts.push(format!("lane(s) missing from order (sorted alphabetically last): {}", missing.join(", ")));
+        }
+        Check {
+            label: "lane order",
+            status: Status::Warn,
+            message: parts.join("; "),
+            hint: Some(
+                "not auto-fixed - edit `order` in ~/.config/lanes.toml by hand to match \
+                 the current set of lane ids.".to_string()
+            ),
+        }
+    }
+}
+
+/// `ztabs`' own session order, straight from its config file - not a live
+/// query of anything. This is the other tool's core state, same class of
+/// thing as lanes.toml's `order`, just owned by a different tool.
+fn ztabs_session_order() -> Option<Vec<String>> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = PathBuf::from(home).join(".config/infra/zellij-tabs.toml");
+    let content = std::fs::read_to_string(path).ok()?;
+    let doc: toml::Value = toml::from_str(&content).ok()?;
+    let tabs = doc.get("tabs")?.as_array()?;
+    Some(
+        tabs.iter()
+            .filter_map(|t| t.get("session").and_then(|v| v.as_str()).map(String::from))
+            .collect(),
+    )
+}
+
+/// `order`, restricted to whichever entries also appear in `other`, keeping
+/// `order`'s own relative sequence. Used to compare two orderings that may
+/// not cover exactly the same set of sessions (e.g. lanes.toml has a lane
+/// ztabs doesn't manage) without that difference in *membership* being
+/// mistaken for a difference in *order*.
+fn restrict_to_common(order: &[String], other: &[String]) -> Vec<String> {
+    let other_set: std::collections::HashSet<&String> = other.iter().collect();
+    order.iter().filter(|s| other_set.contains(s)).cloned().collect()
+}
+
+fn check_lane_order_vs_ztabs(cfg: &lanes::config::Config) -> Check {
+    let Some(ztabs_order) = ztabs_session_order() else {
+        return Check {
+            label: "lane order vs ztabs",
+            status: Status::Ok,
+            message: "no ztabs config found, skipping".to_string(),
+            hint: None,
+        };
+    };
+
+    let lane_session_order: Vec<String> = cfg
+        .lanes
+        .iter()
+        .filter_map(|l| l.terminal_session())
+        .map(String::from)
+        .collect();
+
+    let lanes_side = restrict_to_common(&lane_session_order, &ztabs_order);
+    let ztabs_side = restrict_to_common(&ztabs_order, &lane_session_order);
+
+    if lanes_side == ztabs_side {
+        Check {
+            label: "lane order vs ztabs",
+            status: Status::Ok,
+            message: "lanes.toml `order` agrees with zellij-tabs.toml's session order".to_string(),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "lane order vs ztabs",
+            status: Status::Warn,
+            message: format!(
+                "lanes.toml order gives {}, but zellij-tabs.toml gives {}",
+                lanes_side.join(", "),
+                ztabs_side.join(", ")
+            ),
+            hint: Some(
+                "not auto-fixed - edit `order` in ~/.config/lanes.toml or the tab order in \
+                 ~/.config/infra/zellij-tabs.toml so the two agree."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
 fn check_lanes_registry() -> Check {
     let dir = lanes::config::config_dir();
 
@@ -397,7 +519,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     fn test_config(lanes: Vec<Lane>) -> Config {
-        Config { drivers: None, monitors: HashMap::new(), lanes }
+        Config { drivers: None, monitors: HashMap::new(), order: None, lanes }
     }
 
     fn lane(id: &str, name: &str, active: bool, session: &str) -> Lane {
@@ -489,5 +611,82 @@ mod tests {
     #[test]
     fn kebab_case_rejects_empty_string() {
         assert!(!is_kebab_case(""));
+    }
+
+    fn test_config_with_order(lanes: Vec<Lane>, order: Vec<&str>) -> Config {
+        Config {
+            drivers: None,
+            monitors: HashMap::new(),
+            order: Some(order.into_iter().map(String::from).collect()),
+            lanes,
+        }
+    }
+
+    #[test]
+    fn lane_order_ok_when_none_configured() {
+        let cfg = test_config(vec![lane("infra", "Infra", true, "infra")]);
+        let check = check_lane_order(&cfg);
+        assert!(matches!(check.status, Status::Ok));
+    }
+
+    #[test]
+    fn lane_order_ok_when_it_covers_exactly_the_lanes() {
+        let cfg = test_config_with_order(
+            vec![lane("infra", "Infra", true, "infra"), lane("lanes-dev", "Lanes Dev", true, "lanes")],
+            vec!["infra", "lanes-dev"],
+        );
+        let check = check_lane_order(&cfg);
+        assert!(matches!(check.status, Status::Ok));
+    }
+
+    #[test]
+    fn lane_order_warns_on_unknown_id() {
+        let cfg = test_config_with_order(
+            vec![lane("infra", "Infra", true, "infra")],
+            vec!["infra", "ghost"],
+        );
+        let check = check_lane_order(&cfg);
+        assert!(matches!(check.status, Status::Warn));
+        assert!(check.message.contains("ghost"));
+    }
+
+    #[test]
+    fn restrict_to_common_keeps_first_list_order_dropping_entries_absent_from_second() {
+        let order = vec!["a".to_string(), "b".to_string(), "c".to_string()];
+        let other = vec!["c".to_string(), "a".to_string()];
+        assert_eq!(restrict_to_common(&order, &other), vec!["a".to_string(), "c".to_string()]);
+    }
+
+    #[test]
+    fn restrict_to_common_detects_a_real_order_disagreement() {
+        // lanes.toml says sheetwork-planner, infra; zellij-tabs.toml says infra, sheetwork-planner.
+        let lane_order = vec!["sheetwork-planner".to_string(), "infra".to_string()];
+        let ztabs_order = vec!["infra".to_string(), "sheetwork-planner".to_string()];
+        assert_ne!(
+            restrict_to_common(&lane_order, &ztabs_order),
+            restrict_to_common(&ztabs_order, &lane_order)
+        );
+    }
+
+    #[test]
+    fn restrict_to_common_agrees_when_orders_match_modulo_extra_entries() {
+        // lanes.toml has an extra lane (spinner) ztabs doesn't manage at all.
+        let lane_order = vec!["sheetwork-planner".to_string(), "infra".to_string(), "spinner".to_string()];
+        let ztabs_order = vec!["sheetwork-planner".to_string(), "infra".to_string()];
+        assert_eq!(
+            restrict_to_common(&lane_order, &ztabs_order),
+            restrict_to_common(&ztabs_order, &lane_order)
+        );
+    }
+
+    #[test]
+    fn lane_order_warns_on_missing_lane() {
+        let cfg = test_config_with_order(
+            vec![lane("infra", "Infra", true, "infra"), lane("lanes-dev", "Lanes Dev", true, "lanes")],
+            vec!["infra"],
+        );
+        let check = check_lane_order(&cfg);
+        assert!(matches!(check.status, Status::Warn));
+        assert!(check.message.contains("lanes-dev"));
     }
 }
