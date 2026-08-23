@@ -26,6 +26,12 @@ pub enum ScopeElement {
     // declare as part of a lane's scope, the same reason a specific pane
     // never gets its own kind either.
     ZellijSession { locator: String },
+    // A Trello board or a specific list within one - two depths of the same
+    // kind, same locator-encodes-depth pattern as everywhere else. No
+    // finer-grained "specific card" depth (yet): a card is closer to a
+    // Zellij pane than a Zellij session here - too volatile/numerous to
+    // declare individually, better fetched as data under the board/list.
+    Trello { locator: String },
 }
 
 impl ScopeElement {
@@ -39,6 +45,14 @@ impl ScopeElement {
 
     pub fn zellij_session(session_name: &str) -> Self {
         ScopeElement::ZellijSession { locator: format!("zellij://session/{}", session_name) }
+    }
+
+    pub fn trello_board(board_id: &str) -> Self {
+        ScopeElement::Trello { locator: format!("trello://board/{}", board_id) }
+    }
+
+    pub fn trello_list(list_id: &str) -> Self {
+        ScopeElement::Trello { locator: format!("trello://list/{}", list_id) }
     }
 
     /// The raw repo path, if this is a Repo element - the inverse of
@@ -65,6 +79,20 @@ impl ScopeElement {
             _ => None,
         }
     }
+
+    pub fn trello_board_id(&self) -> Option<&str> {
+        match self {
+            ScopeElement::Trello { locator } => locator.strip_prefix("trello://board/"),
+            _ => None,
+        }
+    }
+
+    pub fn trello_list_id(&self) -> Option<&str> {
+        match self {
+            ScopeElement::Trello { locator } => locator.strip_prefix("trello://list/"),
+            _ => None,
+        }
+    }
 }
 
 /// A fact currently observed about what a scope element points to - the
@@ -82,6 +110,7 @@ pub struct Observation {
 pub const KIND_GIT_DIRTY: &str = "git.dirty";
 pub const KIND_CLAUDE_SESSION_STATE: &str = "claude.session.state";
 pub const KIND_ZELLIJ_SESSION_RUNNING: &str = "zellij.session.running";
+pub const KIND_TRELLO_CARD: &str = "trello.card";
 
 /// Resolve one scope element to what's currently true about it - dispatches
 /// on kind to the driver that actually knows how to check. Reuses the real
@@ -92,6 +121,7 @@ pub fn observe(element: &ScopeElement) -> Vec<Observation> {
         ScopeElement::Repo { .. } => observe_repo(element),
         ScopeElement::ClaudeSession { .. } => observe_claude_session(element),
         ScopeElement::ZellijSession { .. } => observe_zellij_session(element),
+        ScopeElement::Trello { .. } => observe_trello(element),
     }
 }
 
@@ -124,6 +154,53 @@ fn observe_zellij_session(element: &ScopeElement) -> Vec<Observation> {
         kind: KIND_ZELLIJ_SESSION_RUNNING.to_string(),
         data: serde_json::json!({ "running": running }),
     }]
+}
+
+/// Unlike the local kinds, this needs real credentials and a network call -
+/// shells out to curl rather than adding an HTTP client dependency, same
+/// "shell out to a CLI" approach used for git/zellij/wezterm elsewhere in
+/// this codebase. Quietly returns nothing if TRELLO_API_KEY/TRELLO_API_TOKEN
+/// aren't set, same "not configured -> empty" pattern as the old brotab
+/// driver had for a missing `bt` binary.
+fn observe_trello(element: &ScopeElement) -> Vec<Observation> {
+    let (resource, id) = if let Some(board_id) = element.trello_board_id() {
+        ("boards", board_id)
+    } else if let Some(list_id) = element.trello_list_id() {
+        ("lists", list_id)
+    } else {
+        return vec![];
+    };
+
+    let Ok(key) = std::env::var("TRELLO_API_KEY") else { return vec![] };
+    let Ok(token) = std::env::var("TRELLO_API_TOKEN") else { return vec![] };
+
+    let url = format!(
+        "https://api.trello.com/1/{resource}/{id}/cards?key={key}&token={token}&filter=open&fields=name,shortUrl,due"
+    );
+    let Ok(output) = std::process::Command::new("curl").args(["-s", &url]).output() else {
+        return vec![];
+    };
+    let Ok(body) = String::from_utf8(output.stdout) else { return vec![] };
+    let Ok(cards) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else { return vec![] };
+
+    trello_cards_to_observations(&cards)
+}
+
+/// Split from observe_trello() so the actual parsing logic - the part that
+/// matters and can go wrong - is unit-testable against a real response
+/// shape without needing live credentials or a network call.
+fn trello_cards_to_observations(cards: &[serde_json::Value]) -> Vec<Observation> {
+    cards.iter()
+        .filter_map(|c| {
+            let name = c.get("name")?.as_str()?.to_string();
+            let url = c.get("shortUrl").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let due = c.get("due").cloned().unwrap_or(serde_json::Value::Null);
+            Some(Observation {
+                kind: KIND_TRELLO_CARD.to_string(),
+                data: serde_json::json!({ "name": name, "url": url, "due": due }),
+            })
+        })
+        .collect()
 }
 
 /// Resolve a whole scope (e.g. one lane's), pairing each element with its
@@ -220,10 +297,69 @@ mod tests {
     }
 
     #[test]
+    fn trello_board_locator_is_identity_based() {
+        let el = ScopeElement::trello_board("abc123");
+        assert_eq!(el, ScopeElement::Trello { locator: "trello://board/abc123".to_string() });
+    }
+
+    #[test]
+    fn trello_list_locator_is_identity_based() {
+        let el = ScopeElement::trello_list("xyz789");
+        assert_eq!(el, ScopeElement::Trello { locator: "trello://list/xyz789".to_string() });
+    }
+
+    #[test]
     fn accessors_round_trip_the_constructors() {
         assert_eq!(ScopeElement::repo("/a/b").repo_path(), Some("/a/b"));
         assert_eq!(ScopeElement::claude_session("abc").claude_session_id(), Some("abc"));
         assert_eq!(ScopeElement::zellij_session("infra").zellij_session_name(), Some("infra"));
+        assert_eq!(ScopeElement::trello_board("abc123").trello_board_id(), Some("abc123"));
+        assert_eq!(ScopeElement::trello_list("xyz789").trello_list_id(), Some("xyz789"));
+    }
+
+    #[test]
+    fn trello_board_and_list_locators_dont_cross_match() {
+        let board = ScopeElement::trello_board("abc123");
+        assert_eq!(board.trello_list_id(), None);
+        let list = ScopeElement::trello_list("xyz789");
+        assert_eq!(list.trello_board_id(), None);
+    }
+
+    #[test]
+    fn parses_trello_cards_into_observations() {
+        // Real response shape per Trello's REST API docs: an array of card
+        // objects, each with at least the fields we requested via `fields=`.
+        let cards: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {
+                "id": "111",
+                "name": "Ship the thing",
+                "shortUrl": "https://trello.com/c/abc111",
+                "due": "2026-08-20T00:00:00.000Z"
+            },
+            {
+                "id": "222",
+                "name": "Write the doc",
+                "shortUrl": "https://trello.com/c/abc222",
+                "due": null
+            }
+        ]"#).unwrap();
+
+        let observations = trello_cards_to_observations(&cards);
+        assert_eq!(observations.len(), 2);
+        assert_eq!(observations[0].kind, KIND_TRELLO_CARD);
+        assert_eq!(observations[0].data["name"], "Ship the thing");
+        assert_eq!(observations[0].data["url"], "https://trello.com/c/abc111");
+        assert_eq!(observations[0].data["due"], "2026-08-20T00:00:00.000Z");
+        assert_eq!(observations[1].data["name"], "Write the doc");
+        assert!(observations[1].data["due"].is_null());
+    }
+
+    #[test]
+    fn skips_cards_missing_a_name() {
+        let cards: Vec<serde_json::Value> = serde_json::from_str(r#"[
+            {"id": "111", "shortUrl": "https://trello.com/c/abc111"}
+        ]"#).unwrap();
+        assert!(trello_cards_to_observations(&cards).is_empty());
     }
 
     #[test]
@@ -310,11 +446,13 @@ mod tests {
             ScopeElement::repo("/Users/bmiller/src/infra"),
             ScopeElement::claude_session("d58b14eb-99bb-4b5d-8f0e-09ac662a8be9"),
             ScopeElement::zellij_session("infra"),
+            ScopeElement::trello_board("abc123"),
         ];
         let json = serde_json::to_string_pretty(&scope).unwrap();
         println!("{}", json);
         assert!(json.contains("\"kind\": \"repo\""));
         assert!(json.contains("\"kind\": \"claude_session\""));
         assert!(json.contains("\"kind\": \"zellij_session\""));
+        assert!(json.contains("\"kind\": \"trello\""));
     }
 }

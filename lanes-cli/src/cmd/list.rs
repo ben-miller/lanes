@@ -23,6 +23,13 @@ pub fn run(lanes: &[Lane], json: bool) {
                 ScopeElement::ClaudeSession { .. } => {
                     println!("  claude_session  {}", el.claude_session_id().unwrap_or(""));
                 }
+                ScopeElement::Trello { .. } => {
+                    let id = el.trello_board_id()
+                        .map(|id| format!("board={id}"))
+                        .or_else(|| el.trello_list_id().map(|id| format!("list={id}")))
+                        .unwrap_or_default();
+                    println!("  trello          {id}");
+                }
             }
         }
         for w in &lane.windows {
