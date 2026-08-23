@@ -242,7 +242,7 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
                 session: session.to_string(),
                 path: path.to_string(),
             });
-            Some(Signal { reason: SignalReason::PendingCommit, action })
+            Some(Signal { reason: SignalReason::PendingCommit, urgency: SignalReason::PendingCommit.urgency(), action })
         }
 
         (ScopeElement::ClaudeSession { .. }, KIND_CLAUDE_SESSION_STATE) => {
@@ -254,6 +254,7 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
                 _ => SignalReason::ClaudeSessionActive,
             };
             Some(Signal {
+                urgency: reason.urgency(),
                 reason,
                 action: Some(SignalAction::SwitchClaudeSession { session_id: session_id.to_string() }),
             })
@@ -360,6 +361,47 @@ mod tests {
             {"id": "111", "shortUrl": "https://trello.com/c/abc111"}
         ]"#).unwrap();
         assert!(trello_cards_to_observations(&cards).is_empty());
+    }
+
+    #[test]
+    fn claude_permission_signal_is_blocking() {
+        let resolved = vec![(
+            ScopeElement::claude_session("abc"),
+            vec![Observation { kind: KIND_CLAUDE_SESSION_STATE.to_string(), data: serde_json::json!({ "state": "permission_pending" }) }],
+        )];
+        let signals = signals_from(&resolved);
+        assert_eq!(signals[0].urgency, crate::model::Urgency::Blocking);
+    }
+
+    #[test]
+    fn claude_idle_and_pending_commit_signals_are_attention_not_blocking() {
+        let resolved = vec![(
+            ScopeElement::claude_session("abc"),
+            vec![Observation { kind: KIND_CLAUDE_SESSION_STATE.to_string(), data: serde_json::json!({ "state": "idle" }) }],
+        )];
+        let signals = signals_from(&resolved);
+        assert_eq!(signals[0].urgency, crate::model::Urgency::Attention);
+
+        let resolved = vec![(ScopeElement::repo("/a/b"), vec![Observation { kind: KIND_GIT_DIRTY.to_string(), data: serde_json::json!({}) }])];
+        let signals = signals_from(&resolved);
+        assert_eq!(signals[0].urgency, crate::model::Urgency::Attention);
+    }
+
+    #[test]
+    fn claude_active_signal_is_merely_informational() {
+        let resolved = vec![(
+            ScopeElement::claude_session("abc"),
+            vec![Observation { kind: KIND_CLAUDE_SESSION_STATE.to_string(), data: serde_json::json!({ "state": "running" }) }],
+        )];
+        let signals = signals_from(&resolved);
+        assert_eq!(signals[0].urgency, crate::model::Urgency::Info);
+    }
+
+    #[test]
+    fn urgency_ordering_ranks_blocking_above_attention_above_info() {
+        use crate::model::Urgency;
+        assert!(Urgency::Blocking > Urgency::Attention);
+        assert!(Urgency::Attention > Urgency::Info);
     }
 
     #[test]

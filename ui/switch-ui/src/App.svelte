@@ -136,7 +136,7 @@
           <span class="name">{lane.name}</span>
           {#each signals as signal}
             <button
-              class="signal"
+              class="signal urgency-{signal.urgency}"
               class:current-session={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.current_claude_session}
               on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
               on:click|stopPropagation
@@ -215,14 +215,17 @@
 
   .signal {
     font-size: 0.72rem;
-    color: #ffb347;
-    background: #7a5200;
     padding: 4px 8px;
     border-radius: 4px;
     border: 1px solid transparent;
     text-align: left;
     cursor: pointer;
   }
+  /* Urgency color scale: info (ambient, no action needed) < attention
+     (worth a look, no clock on it) < blocking (waiting on you right now). */
+  .signal.urgency-info { color: #7ec8ff; background: #1f3a52; }
+  .signal.urgency-attention { color: #ffb347; background: #7a5200; }
+  .signal.urgency-blocking { color: #ff6b6b; background: #7a1f1f; }
   .signal.current-session {
     border-color: #ffb347;
     border-width: 2px;

@@ -48,6 +48,7 @@ pub enum SignalAction {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Signal {
     pub reason: SignalReason,
+    pub urgency: Urgency,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<SignalAction>,
 }
@@ -59,6 +60,34 @@ pub enum SignalReason {
     ClaudeSessionActive,
     ClaudeSessionAwaiting,
     ClaudeSessionPermission,
+}
+
+// Declared least to most urgent so derived Ord/PartialOrd rank them
+// correctly (Blocking > Attention > Info) - lets callers compare or sort
+// signals by urgency without a separate ranking table.
+//
+// This is deliberately the naive case: one reason maps to exactly one fixed
+// urgency (see SignalReason::urgency() below), with no awareness of other
+// signals, staleness, or lane context. A fuller version of this - urgency as
+// a function of the whole signal set plus outside context (elapsed time,
+// how many other signals are competing for attention, etc.) - is a real
+// design problem for later, not solved here.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Urgency {
+    Info,
+    Attention,
+    Blocking,
+}
+
+impl SignalReason {
+    pub fn urgency(&self) -> Urgency {
+        match self {
+            SignalReason::ClaudeSessionPermission => Urgency::Blocking,
+            SignalReason::ClaudeSessionAwaiting | SignalReason::PendingCommit => Urgency::Attention,
+            SignalReason::ClaudeSessionActive => Urgency::Info,
+        }
+    }
 }
 
 // --- Pane kinds ---
