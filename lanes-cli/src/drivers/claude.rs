@@ -16,11 +16,11 @@ struct ActiveSession {
 /// "busy" | "running" | "permission_pending" | ...), defaulting to "running"
 /// when absent - interpreting it into a signal/reason beyond that is a
 /// policy decision that belongs with whatever's doing the interpreting (see
-/// scope::observe), not the driver. The one correction made here rather
-/// than left to policy: permission_pending gets downgraded to "idle" once
-/// the registry file has sat unmodified for >=1s, since a permission
-/// request that old is more likely a write that never got followed up than
-/// something still genuinely awaiting a response.
+/// scope::observe), not the driver. `permission_pending` is only ever
+/// cleared by the Stop/StopFailure hooks writing "idle" back once the
+/// assistant's turn completes, so as long as `session_is_live` says the
+/// process is still around, an old mtime just means the prompt is still
+/// sitting there unanswered, not that the write was abandoned.
 pub struct ClaudeSession {
     pub session_id: String,
     pub zellij_session: Option<String>,
@@ -52,12 +52,7 @@ fn load_session(path: &Path, live_zellij_sessions: &std::collections::HashSet<St
         return None;
     }
 
-    let raw_state = s.state.as_deref().unwrap_or("running");
-    let state = if raw_state == "permission_pending" && is_stale(path) {
-        "idle".to_string()
-    } else {
-        raw_state.to_string()
-    };
+    let state = s.state.unwrap_or_else(|| "running".to_string());
 
     Some(ClaudeSession {
         session_id: s.session_id,
@@ -120,14 +115,6 @@ fn check_renamed(path: &Path, live_zellij_sessions: &std::collections::HashSet<S
         cwd: s.cwd,
         pid,
     })
-}
-
-fn is_stale(path: &Path) -> bool {
-    fs::metadata(path)
-        .and_then(|m| m.modified())
-        .ok()
-        .and_then(|t| t.elapsed().ok())
-        .map_or(false, |age| age.as_secs() >= 1)
 }
 
 mod dirs {
