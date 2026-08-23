@@ -455,18 +455,30 @@ fn cycle_index(len: usize, current_index: Option<usize>, direction: i32) -> usiz
     (((current + direction) % n + n) % n) as usize
 }
 
+/// The existing tab, if any, with a pane already at `path` - so navigating
+/// to a repo reuses that pane instead of always spawning a new tab. `path`
+/// must already be in the same (absolute) form as pane cwds.
+fn find_tab_at_path<'a>(shape: &'a model::TerminalShape, path: &str) -> Option<&'a model::TabInfo> {
+    shape.tabs.iter().find(|tab| tab.panes.iter().any(|p| p.cwd.as_deref() == Some(path)))
+}
+
 pub fn navigate_to_repo_pane(session: &str, path: &str) -> Result<(), String> {
     // Activate the WezTerm tab for this session
     activate_wezterm_tab(session, true)?;
 
-    // Navigate within Zellij to the right tab
+    // Navigate within Zellij to the right tab. Pane cwds observed from Zellij
+    // are always absolute, but a lane's configured repo path is often written
+    // with a `~/` shorthand - compare expanded forms so an existing pane at
+    // the same directory is actually found instead of always falling through
+    // to spawning a new tab.
+    let path = expand_tilde(path);
+    let path = path.as_str();
+
     let Some((shape, _)) = drivers::zellij::layout_for_session(session) else {
         return Ok(());
     };
 
-    let target_tab = shape.tabs.iter().find(|tab| {
-        tab.panes.iter().any(|p| p.cwd.as_deref() == Some(path))
-    });
+    let target_tab = find_tab_at_path(&shape, path);
 
     if let Some(tab) = target_tab {
         std::process::Command::new("/opt/homebrew/bin/zellij")
@@ -674,6 +686,50 @@ fn expand_tilde(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn pane(cwd: Option<&str>) -> model::PaneInfo {
+        model::PaneInfo { command: None, focused: false, cwd: cwd.map(String::from) }
+    }
+
+    fn tab(name: &str, panes: Vec<model::PaneInfo>) -> model::TabInfo {
+        model::TabInfo { name: name.to_string(), focused: false, panes }
+    }
+
+    #[test]
+    fn find_tab_at_path_matches_a_pane_with_that_exact_cwd() {
+        let shape = model::TerminalShape {
+            cwd: None,
+            tabs: vec![
+                tab("shell", vec![pane(Some("/Users/bmiller/src/other"))]),
+                tab("infra", vec![pane(Some("/Users/bmiller/src/infra")), pane(Some("/Users/bmiller/src/infra"))]),
+            ],
+        };
+        let found = find_tab_at_path(&shape, "/Users/bmiller/src/infra");
+        assert_eq!(found.map(|t| t.name.as_str()), Some("infra"));
+    }
+
+    #[test]
+    fn find_tab_at_path_finds_nothing_when_no_pane_matches() {
+        let shape = model::TerminalShape {
+            cwd: None,
+            tabs: vec![tab("shell", vec![pane(Some("/Users/bmiller/src/other"))])],
+        };
+        assert!(find_tab_at_path(&shape, "/Users/bmiller/src/infra").is_none());
+    }
+
+    #[test]
+    fn find_tab_at_path_requires_already_expanded_paths() {
+        // Regression: a lane's configured repo path is often "~/src/infra",
+        // but pane cwds observed from Zellij are always absolute. Comparing
+        // the raw unexpanded form against a real pane cwd must not match -
+        // callers are responsible for expand_tilde()-ing first.
+        let shape = model::TerminalShape {
+            cwd: None,
+            tabs: vec![tab("infra", vec![pane(Some("/Users/bmiller/src/infra"))])],
+        };
+        assert!(find_tab_at_path(&shape, "~/src/infra").is_none());
+        assert!(find_tab_at_path(&shape, &expand_tilde("~/src/infra")).is_some());
+    }
 
     #[test]
     fn already_focused_zellij_error_is_benign() {
