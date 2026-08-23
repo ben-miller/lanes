@@ -151,7 +151,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
 /// "Reachable" means state.kdl has a cached wezterm-tab-id for this
 /// session - not whether the Zellij session itself is alive, and not a
 /// live WezTerm query. Whichever tool actually owns the WezTerm tab's
-/// lifecycle (e.g. `infra zellij`) is responsible for keeping this cache
+/// lifecycle (e.g. `ztabs`) is responsible for keeping this cache
 /// current: pushing the fresh id via `lanes tabs set` whenever it spawns a
 /// tab, and clearing it via `lanes tabs clear` the moment it kills one.
 /// `lanes` itself trusts the cache rather than re-deriving liveness by

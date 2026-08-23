@@ -263,7 +263,7 @@ fn check_wezterm_tab_cache(cfg: &lanes::config::Config) -> Check {
                 stale.join(", ")
             ));
             hints.push(format!(
-                "cached id stale, lane still exists (re-run `infra zellij sync`/`up`, \
+                "cached id stale, lane still exists (re-run `ztabs sync`/`up`, \
                  or `lanes tabs set <zellij-session-name> <wezterm-tab-id>` by hand): {}",
                 stale.join(", ")
             ));

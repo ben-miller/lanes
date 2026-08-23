@@ -158,7 +158,7 @@ enum TabsCommand {
     /// Remove a session's cached WezTerm tab ID entirely
     ///
     /// Meant to be called by whatever tool actually closes a session's
-    /// WezTerm tab (e.g. `infra zellij deactivate`) at the moment it does
+    /// WezTerm tab (e.g. `ztabs deactivate`) at the moment it does
     /// so, so the cache never sits there pointing at a tab that's already
     /// gone.
     Clear { session: String },

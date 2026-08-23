@@ -138,7 +138,7 @@ pub fn set_wezterm_tab_id(session: &str, id: u64) {
 }
 
 /// Removes the cached tab-id for a session entirely, rather than leaving a
-/// stale one behind - called by `infra zellij deactivate` the moment it
+/// stale one behind - called by `ztabs deactivate` the moment it
 /// kills a pane, so a deactivated lane has no cached id at all instead of
 /// one that (mis)leadingly still looks like it points somewhere.
 pub fn clear_wezterm_tab_id(session: &str) {
