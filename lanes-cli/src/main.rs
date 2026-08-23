@@ -13,8 +13,21 @@ struct Cli {
 enum Command {
     /// Focus a lane: focus terminal and apply window placement
     Focus {
-        /// Lane ID to focus
-        id: String,
+        /// Lane ID to focus. Defaults to the lane whose zellij session
+        /// matches $ZELLIJ_SESSION_NAME if omitted.
+        id: Option<String>,
+    },
+
+    /// Mark a lane active in its config file
+    Activate {
+        /// Lane ID to activate. Defaults to $ZELLIJ_SESSION_NAME's lane.
+        id: Option<String>,
+    },
+
+    /// Mark a lane inactive in its config file
+    Deactivate {
+        /// Lane ID to deactivate. Defaults to $ZELLIJ_SESSION_NAME's lane.
+        id: Option<String>,
     },
 
     /// Check environment dependencies and configuration
@@ -120,7 +133,17 @@ fn main() {
     match cli.command {
         Command::Focus { id } => {
             let cfg = lanes::config::Config::load();
-            cmd::focus::run(&id, &cfg);
+            cmd::focus::run(id, &cfg);
+        }
+
+        Command::Activate { id } => {
+            let cfg = lanes::config::Config::load();
+            cmd::activate::run(id, &cfg);
+        }
+
+        Command::Deactivate { id } => {
+            let cfg = lanes::config::Config::load();
+            cmd::deactivate::run(id, &cfg);
         }
 
         Command::Current { name } => {

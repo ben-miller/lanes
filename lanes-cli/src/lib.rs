@@ -572,6 +572,22 @@ fn parse_bundle_id(path: &str) -> Option<String> {
     Some(bundle.trim().to_string())
 }
 
+/// Resolve a lane id: use `explicit` if given, otherwise fall back to
+/// `$ZELLIJ_SESSION_NAME` and find the lane whose Terminal facet matches it.
+/// Used by `focus`, `activate`, and `deactivate` so all three can be run
+/// with no argument from inside the lane's own zellij session.
+pub fn resolve_lane_id(explicit: Option<String>, cfg: &config::Config) -> Result<String, String> {
+    if let Some(id) = explicit {
+        return Ok(id);
+    }
+    let session = std::env::var("ZELLIJ_SESSION_NAME").map_err(|_| {
+        "No lane id given and $ZELLIJ_SESSION_NAME is unset - pass an id explicitly.".to_string()
+    })?;
+    cfg.lane_for_session(&session)
+        .map(|l| l.id.clone())
+        .ok_or_else(|| format!("No lane found with zellij session {session:?}"))
+}
+
 pub fn focus_lane(lane_id: &str, focus: bool) {
     let cfg = config::Config::load();
     let lane = match cfg.lanes.iter().find(|l| l.id == lane_id) {

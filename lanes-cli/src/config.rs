@@ -58,6 +58,20 @@ impl Config {
     }
 }
 
+/// Flip a lane's `active` flag in its own TOML file, in place. Uses
+/// toml_edit rather than the parse-only `toml` crate so the rest of the
+/// file (formatting, key order, any future comments) is left untouched -
+/// these files are hand-maintained.
+pub fn set_lane_active(lane_id: &str, active: bool) -> std::io::Result<()> {
+    let path = config_dir().join(format!("{lane_id}.toml"));
+    let text = std::fs::read_to_string(&path)?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+    })?;
+    doc["lane"]["active"] = toml_edit::value(active);
+    std::fs::write(&path, doc.to_string())
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
