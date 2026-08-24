@@ -398,8 +398,10 @@ pub fn notify_switch_hide() {
 }
 
 /// Cycle to the next (direction=1) or previous (direction=-1) live Claude
-/// session, ordered by Zellij session name then session ID - matching the
-/// order the Go `claude-session` tool used, so muscle memory carries over.
+/// session, ordered to match lanes.toml's `order` (same ordering the display
+/// uses) - falling back to Zellij session name then session ID for any
+/// session whose lane isn't listed in `order`, or that belongs to no lane at
+/// all.
 pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     let cfg = config::Config::load();
     let live_sessions = if cfg.driver_enabled("claude") {
@@ -415,7 +417,7 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
         .filter(|s| session_belongs_to_reachable_lane(s.zellij_session.as_deref(), &cfg))
         .map(|s| (s.zellij_session.unwrap_or_default(), s.session_id))
         .collect();
-    sessions.sort();
+    sessions.sort_by_key(|(session, id)| (lane_order_rank(session, &cfg), session.clone(), id.clone()));
 
     if sessions.is_empty() {
         return Ok(());
@@ -427,6 +429,17 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     let idx = cycle_index(ids.len(), current_index, direction);
 
     switch_claude_session(&ids[idx])
+}
+
+/// A Zellij session's position in `cfg.lanes` (already sorted by lanes.toml's
+/// `order` in `Config::load`) - `cfg.lanes.len()` for anything not found, so
+/// unmatched sessions sort after every real lane rather than interleaving
+/// with them.
+fn lane_order_rank(zellij_session: &str, cfg: &config::Config) -> usize {
+    cfg.lanes
+        .iter()
+        .position(|l| l.terminal_session() == Some(zellij_session))
+        .unwrap_or(cfg.lanes.len())
 }
 
 /// Whether a live Claude session should be reachable by cycling, based on
@@ -804,6 +817,36 @@ mod tests {
         // cleared) a cached WezTerm tab-id for it - exactly what caused the
         // "wezterm activate-tab failed" cycling errors.
         assert!(!reachable_lane_decision(true, false));
+    }
+
+    fn ordered_lane(id: &str, session: &str) -> model::Lane {
+        model::Lane {
+            id: id.to_string(),
+            name: id.to_string(),
+            active: true,
+            scope: vec![crate::scope::ScopeElement::zellij_session(session)],
+            windows: vec![],
+        }
+    }
+
+    #[test]
+    fn lane_order_rank_follows_configured_lane_order() {
+        // cfg.lanes is already sorted by lanes.toml's `order` by the time
+        // Config::load hands it out, so rank is just position in that list.
+        let cfg = test_config(vec![
+            ordered_lane("sheetwork-planner", "sheetwork-planner"),
+            ordered_lane("infra", "infra"),
+            ordered_lane("lanes-dev", "lanes"),
+        ]);
+        assert_eq!(lane_order_rank("sheetwork-planner", &cfg), 0);
+        assert_eq!(lane_order_rank("infra", &cfg), 1);
+        assert_eq!(lane_order_rank("lanes", &cfg), 2);
+    }
+
+    #[test]
+    fn lane_order_rank_sorts_unmatched_sessions_after_every_real_lane() {
+        let cfg = test_config(vec![ordered_lane("infra", "infra")]);
+        assert_eq!(lane_order_rank("some-unrelated-session", &cfg), 1);
     }
 
     #[test]
