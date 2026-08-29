@@ -1,7 +1,8 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process::Command;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::model::*;
 
@@ -9,7 +10,7 @@ pub fn layout_for_session(session: &str) -> Option<(TerminalShape, Option<String
     dump_layout(session)
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 struct RawPaneInfo {
     id: u32,
     is_plugin: bool,
@@ -24,7 +25,92 @@ struct RawPaneInfo {
     pane_cwd: Option<String>,
 }
 
+/// How long a cached `list-panes` answer is trusted before a caller pays
+/// for a fresh one. Doesn't cost anything on the fast path either way - a
+/// cache hit is a local file read regardless of how long the window is -
+/// it only bounds how quickly a genuine pane-layout change (moving a pane
+/// between tabs, mid-cycle) gets picked up. Sized well above the
+/// sub-second bursts a rapid-cycling keystroke run actually produces (see
+/// perf.log), not as a rate limit.
+const LIST_PANES_CACHE_TTL: Duration = Duration::from_millis(1000);
+
+#[derive(Serialize, Deserialize)]
+struct CachedPanes {
+    fetched_at_epoch_ms: u128,
+    panes: Vec<RawPaneInfo>,
+}
+
+fn list_panes_cache_path(session: &str) -> std::path::PathBuf {
+    // Session names can contain spaces (see parse_running_sessions'
+    // "sheetwork planner" test below) but not path separators in practice -
+    // sanitized anyway rather than trusting that, since this becomes a
+    // filename.
+    let safe: String = session.chars()
+        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
+        .collect();
+    crate::logging::state_dir().join("cache").join(format!("list-panes-{safe}.json"))
+}
+
+/// Pure freshness check, pulled out of `read_cached_panes` so the TTL
+/// boundary is testable without touching the filesystem or the real clock.
+/// `now < fetched_at` (a clock adjustment, or a cache write racing ahead of
+/// this check) counts as stale rather than panicking on underflow or - worse
+/// - wrapping around to "very fresh": a saturating age of 0 would otherwise
+/// read as fresh, when "the timestamp doesn't make sense" should always
+/// fall back to the real `list-panes` call instead.
+fn cache_is_fresh(fetched_at_epoch_ms: u128, now_epoch_ms: u128, ttl: Duration) -> bool {
+    match now_epoch_ms.checked_sub(fetched_at_epoch_ms) {
+        Some(age) => age <= ttl.as_millis(),
+        None => false,
+    }
+}
+
+fn read_cached_panes(session: &str) -> Option<Vec<RawPaneInfo>> {
+    let data = std::fs::read_to_string(list_panes_cache_path(session)).ok()?;
+    let cached: CachedPanes = serde_json::from_str(&data).ok()?;
+    let now = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis();
+    if !cache_is_fresh(cached.fetched_at_epoch_ms, now, LIST_PANES_CACHE_TTL) {
+        return None;
+    }
+    Some(cached.panes)
+}
+
+/// Writes via a temp file + rename so a concurrent reader (another `lanes`
+/// process, or the UI, both of which may be calling this at nearly the same
+/// moment during a rapid-cycling burst) never sees a partially-written
+/// file. Silently does nothing on failure - a missed cache write just means
+/// the next caller pays the real `list-panes` cost instead of finding
+/// something wrong to read.
+fn write_cached_panes(session: &str, panes: &[RawPaneInfo]) {
+    let Ok(now) = SystemTime::now().duration_since(UNIX_EPOCH) else { return };
+    let cached = CachedPanes { fetched_at_epoch_ms: now.as_millis(), panes: panes.to_vec() };
+    let Ok(json) = serde_json::to_string(&cached) else { return };
+    let path = list_panes_cache_path(session);
+    let Some(dir) = path.parent() else { return };
+    if std::fs::create_dir_all(dir).is_err() {
+        return;
+    }
+    let tmp_path = path.with_extension("json.tmp");
+    if std::fs::write(&tmp_path, json).is_err() {
+        return;
+    }
+    let _ = std::fs::rename(&tmp_path, &path);
+}
+
+/// Every caller of `list-panes` (cycling's ambiguous-session lookup,
+/// gather_lanes()'s per-session shape+position fetch) goes through this one
+/// function, each as its own OS process with no shared memory - so a rapid
+/// burst of switches (each spawning its own `lanes` process) plus the UI's
+/// own post-switch refresh all independently ask Zellij the same question
+/// about the same session within the same fraction of a second. Caching
+/// the answer here, rather than in any one caller, means all of them
+/// benefit without needing to know about each other: the first one to ask
+/// pays the real ~120-170ms IPC cost, everyone else within the TTL reads a
+/// file instead.
 fn list_panes(session: &str) -> Vec<RawPaneInfo> {
+    if let Some(cached) = read_cached_panes(session) {
+        return cached;
+    }
     let Ok(out) = Command::new("/opt/homebrew/bin/zellij")
         .args(["--session", session, "action", "list-panes", "--all", "--json"])
         .output()
@@ -34,7 +120,9 @@ fn list_panes(session: &str) -> Vec<RawPaneInfo> {
     if !out.status.success() {
         return Vec::new();
     }
-    serde_json::from_slice(&out.stdout).unwrap_or_default()
+    let panes: Vec<RawPaneInfo> = serde_json::from_slice(&out.stdout).unwrap_or_default();
+    write_cached_panes(session, &panes);
+    panes
 }
 
 /// Terminal pane id -> (tab_position, pane_y, pane_x), i.e. this pane's
@@ -290,6 +378,49 @@ mod tests {
         assert!(shape.tabs[0].panes[0].focused);
         assert_eq!(shape.tabs[1].name, "Tab #2");
         assert_eq!(shape.tabs[1].panes.len(), 1);
+    }
+
+    #[test]
+    fn cache_is_fresh_within_ttl() {
+        assert!(cache_is_fresh(1_000, 1_500, Duration::from_millis(1000)));
+        assert!(cache_is_fresh(1_000, 2_000, Duration::from_millis(1000))); // exactly at the boundary
+    }
+
+    #[test]
+    fn cache_is_fresh_false_once_past_ttl() {
+        assert!(!cache_is_fresh(1_000, 2_001, Duration::from_millis(1000)));
+    }
+
+    #[test]
+    fn cache_is_fresh_false_when_clock_looks_like_it_went_backwards() {
+        // now < fetched_at - a clock adjustment, or a race with the write
+        // itself - must not be treated as "very fresh" via underflow.
+        assert!(!cache_is_fresh(2_000, 1_000, Duration::from_millis(1000)));
+    }
+
+    #[test]
+    fn list_panes_cache_path_sanitizes_session_names_with_spaces() {
+        let path = list_panes_cache_path("sheetwork planner");
+        let name = path.file_name().unwrap().to_str().unwrap();
+        assert_eq!(name, "list-panes-sheetwork_planner.json");
+    }
+
+    #[test]
+    fn write_then_read_cached_panes_round_trips_within_ttl() {
+        // Uses the real HOME-derived cache path (same as production code) -
+        // acceptable here since it's the same pattern state.rs's own tests
+        // rely on for state.kdl, and this test cleans up after itself.
+        let session = "test-cache-round-trip";
+        let path = list_panes_cache_path(session);
+        let _ = std::fs::remove_file(&path);
+
+        let panes = vec![raw_pane(0, false, true, 0, "Tab #1", Some("claude"), Some("/a"))];
+        write_cached_panes(session, &panes);
+        let read_back = read_cached_panes(session).expect("cache should be fresh immediately after writing");
+        assert_eq!(read_back.len(), 1);
+        assert_eq!(read_back[0].id, 0);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     const LAYOUT: &str = r#"layout {

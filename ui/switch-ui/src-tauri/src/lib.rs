@@ -163,6 +163,15 @@ fn is_relevant_change(
         // gather_lanes() call (see logging::perf), so treating it as
         // "relevant" turned every refresh into a self-triggering loop: log
         // the refresh -> watcher sees perf.log change -> refresh again.
+        //
+        // state_dir/cache/ (the list-panes TTL cache - see
+        // drivers::zellij::list_panes) is the same story: gather_lanes()
+        // itself is one of the things that populates it, so treating a
+        // cache write as relevant would trigger the exact refresh that just
+        // populated it.
+        if path.starts_with(state_dir.join("cache")) {
+            return false;
+        }
         return path.extension().and_then(|e| e.to_str()) != Some("log");
     }
     for watch in watches {
@@ -221,6 +230,27 @@ mod tests {
                 "{name} should not be treated as relevant"
             );
         }
+    }
+
+    #[test]
+    fn cache_dir_writes_in_state_dir_are_never_relevant() {
+        // Same class of regression as the *.log exclusion above:
+        // drivers::zellij's list-panes TTL cache lives at
+        // state_dir/cache/*.json, and gather_lanes() is itself one of the
+        // things that populates it - treating a cache write as relevant
+        // would trigger the exact refresh that just populated it.
+        let state_dir = Path::new("/home/x/.local/state/lanes");
+        assert!(
+            !is_relevant_change(
+                &[],
+                Path::new("/home/x/.claude/active-sessions"),
+                state_dir,
+                Path::new("/home/x/.config/lanes"),
+                Path::new("/home/x/.config/lanes.toml"),
+                &state_dir.join("cache").join("list-panes-formation.json"),
+            ),
+            "a cache/ write should not be treated as relevant"
+        );
     }
 }
 
