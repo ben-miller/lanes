@@ -29,16 +29,20 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         .filter_map(|el| el.repo_path().map(expand_tilde))
         .collect();
 
-    // dump-layout (per session) and git status (per repo) are each a
-    // separate subprocess round-trip, independent of every other one - fetch
-    // them all concurrently in one batch rather than once per lane in
-    // sequence (this used to be the dominant cost of every UI refresh).
-    let (layouts, git_status): (
+    // dump-layout and list-panes (per session) and git status (per repo) are
+    // each a separate subprocess round-trip, independent of every other one
+    // - fetch them all concurrently in one batch rather than once per lane
+    // in sequence (this used to be the dominant cost of every UI refresh).
+    let (layouts, pane_positions, git_status): (
         HashMap<String, Option<(model::TerminalShape, Option<String>)>>,
+        HashMap<String, HashMap<u32, (usize, i64, i64)>>,
         HashMap<String, bool>,
     ) = std::thread::scope(|scope| {
-        let layout_handles: Vec<_> = running_sessions.into_iter()
-            .map(|s| (s.to_string(), scope.spawn(move || drivers::zellij::layout_for_session(s))))
+        let layout_handles: Vec<_> = running_sessions.iter()
+            .map(|&s| (s.to_string(), scope.spawn(move || drivers::zellij::layout_for_session(s))))
+            .collect();
+        let pane_position_handles: Vec<_> = running_sessions.into_iter()
+            .map(|s| (s.to_string(), scope.spawn(move || drivers::zellij::pane_positions(s))))
             .collect();
         let git_handles: Vec<_> = repo_paths.into_iter()
             .map(|p| (p.clone(), scope.spawn(move || git_has_changes(&p))))
@@ -47,10 +51,13 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         let layouts = layout_handles.into_iter()
             .map(|(s, handle)| (s, handle.join().ok().flatten()))
             .collect();
+        let pane_positions = pane_position_handles.into_iter()
+            .map(|(s, handle)| (s, handle.join().unwrap_or_default()))
+            .collect();
         let git_status = git_handles.into_iter()
             .map(|(p, handle)| (p, handle.join().unwrap_or(false)))
             .collect();
-        (layouts, git_status)
+        (layouts, pane_positions, git_status)
     });
 
     let lanes = cfg.lanes.iter().map(|lane| {
@@ -63,7 +70,14 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         for el in &lane.scope {
             if let Some(session) = el.zellij_session_name().filter(|s| running.contains(*s)) {
                 resolved.push((el.clone(), vec![]));
-                for c in claude.get(session).into_iter().flatten() {
+                let positions = pane_positions.get(session);
+                let mut claude_sessions: Vec<&drivers::claude::ClaudeSession> =
+                    claude.get(session).into_iter().flatten().collect();
+                // Signals render in this same order in the UI - match it to
+                // each session's on-screen tab/pane position, same as
+                // cycling, rather than registry-file enumeration order.
+                claude_sessions.sort_by_key(|c| pane_position_rank(positions, c.zellij_pane_id));
+                for c in claude_sessions {
                     resolved.push((
                         scope::ScopeElement::claude_session(&c.session_id),
                         vec![scope::Observation {
@@ -399,9 +413,11 @@ pub fn notify_switch_hide() {
 
 /// Cycle to the next (direction=1) or previous (direction=-1) live Claude
 /// session, ordered to match lanes.toml's `order` (same ordering the display
-/// uses) - falling back to Zellij session name then session ID for any
-/// session whose lane isn't listed in `order`, or that belongs to no lane at
-/// all.
+/// uses), and within a shared Zellij session by each session's on-screen
+/// reading-order position - Zellij tab left-to-right, then top-to-bottom/
+/// left-to-right within that tab (see `pane_position_rank`) - falling back
+/// to Zellij session name then session ID for any session whose lane isn't
+/// listed in `order`, or whose pane position couldn't be resolved.
 pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     let cfg = config::Config::load();
     let live_sessions = if cfg.driver_enabled("claude") {
@@ -413,17 +429,37 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     // WezTerm tab-id (see lane_session_missing) - that's exactly what
     // caused the "wezterm activate-tab failed" cycling errors, since
     // there's nothing for a switch to actually land on.
-    let mut sessions: Vec<(String, String)> = live_sessions.into_iter()
+    let live_sessions: Vec<_> = live_sessions.into_iter()
         .filter(|s| session_belongs_to_reachable_lane(s.zellij_session.as_deref(), &cfg))
-        .map(|s| (s.zellij_session.unwrap_or_default(), s.session_id))
         .collect();
-    sessions.sort_by_key(|(session, id)| (lane_order_rank(session, &cfg), session.clone(), id.clone()));
+
+    // Pane positions are only worth querying for sessions that actually
+    // have a live Claude session in them - one list-panes call per distinct
+    // Zellij session, not per Claude session.
+    let mut positions: HashMap<String, HashMap<u32, (usize, i64, i64)>> = HashMap::new();
+    for zellij_session in live_sessions.iter().filter_map(|s| s.zellij_session.as_deref()) {
+        if positions.contains_key(zellij_session) {
+            continue;
+        }
+        positions.insert(zellij_session.to_string(), drivers::zellij::pane_positions(zellij_session));
+    }
+
+    let mut sessions: Vec<(String, String, (usize, i64, i64))> = live_sessions.into_iter()
+        .map(|s| {
+            let session = s.zellij_session.clone().unwrap_or_default();
+            let pane_rank = pane_position_rank(positions.get(&session), s.zellij_pane_id);
+            (session, s.session_id, pane_rank)
+        })
+        .collect();
+    sessions.sort_by_key(|(session, id, pane_rank)| {
+        (lane_order_rank(session, &cfg), *pane_rank, session.clone(), id.clone())
+    });
 
     if sessions.is_empty() {
         return Ok(());
     }
 
-    let ids: Vec<String> = sessions.into_iter().map(|(_, id)| id).collect();
+    let ids: Vec<String> = sessions.into_iter().map(|(_, id, _)| id).collect();
     let cursor = state::read_claude_cursor();
     let current_index = cursor.as_deref().and_then(|c| ids.iter().position(|id| id == c));
     let idx = cycle_index(ids.len(), current_index, direction);
@@ -440,6 +476,24 @@ fn lane_order_rank(zellij_session: &str, cfg: &config::Config) -> usize {
         .iter()
         .position(|l| l.terminal_session() == Some(zellij_session))
         .unwrap_or(cfg.lanes.len())
+}
+
+/// A live Claude session's on-screen reading-order position within its
+/// Zellij session, as (tab_position, pane_y, pane_x) - looked up by its
+/// `zellij_pane_id` in the map `drivers::zellij::pane_positions` returns.
+/// Matching by pane id rather than cwd is deliberate: two Claude sessions in
+/// the same repo but different tabs share a cwd and would otherwise be
+/// indistinguishable. Sessions with no positions available (list-panes
+/// failed) or no recorded pane id sort after every resolved session, in the
+/// same relative order cycling used before this ranking existed.
+fn pane_position_rank(
+    positions: Option<&HashMap<u32, (usize, i64, i64)>>,
+    zellij_pane_id: Option<u32>,
+) -> (usize, i64, i64) {
+    let (Some(positions), Some(pane_id)) = (positions, zellij_pane_id) else {
+        return (usize::MAX, i64::MAX, i64::MAX);
+    };
+    positions.get(&pane_id).copied().unwrap_or((usize::MAX, i64::MAX, i64::MAX))
 }
 
 /// Whether a live Claude session should be reachable by cycling, based on
@@ -847,6 +901,24 @@ mod tests {
     fn lane_order_rank_sorts_unmatched_sessions_after_every_real_lane() {
         let cfg = test_config(vec![ordered_lane("infra", "infra")]);
         assert_eq!(lane_order_rank("some-unrelated-session", &cfg), 1);
+    }
+
+    #[test]
+    fn pane_position_rank_looks_up_by_pane_id() {
+        // Mirrors the real formation case: two Claude panes share a cwd, in
+        // tab 0 (pane id 0) and tab 1 (pane id 3) respectively.
+        let positions: HashMap<u32, (usize, i64, i64)> =
+            [(0u32, (0usize, 1i64, 0i64)), (3u32, (1usize, 1i64, 0i64))].into_iter().collect();
+        assert_eq!(pane_position_rank(Some(&positions), Some(0)), (0, 1, 0));
+        assert_eq!(pane_position_rank(Some(&positions), Some(3)), (1, 1, 0));
+    }
+
+    #[test]
+    fn pane_position_rank_falls_back_to_max_when_unresolved() {
+        let positions: HashMap<u32, (usize, i64, i64)> = [(0u32, (0usize, 1i64, 0i64))].into_iter().collect();
+        assert_eq!(pane_position_rank(Some(&positions), Some(99)), (usize::MAX, i64::MAX, i64::MAX));
+        assert_eq!(pane_position_rank(Some(&positions), None), (usize::MAX, i64::MAX, i64::MAX));
+        assert_eq!(pane_position_rank(None, Some(0)), (usize::MAX, i64::MAX, i64::MAX));
     }
 
     #[test]

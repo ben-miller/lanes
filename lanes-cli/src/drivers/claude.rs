@@ -7,6 +7,7 @@ use serde::Deserialize;
 struct ActiveSession {
     session_id: String,
     zellij_session: Option<String>,
+    zellij_pane_id: Option<u32>,
     pid: Option<u32>,
     state: Option<String>,
     cwd: Option<String>,
@@ -25,6 +26,12 @@ pub struct ClaudeSession {
     pub session_id: String,
     pub zellij_session: Option<String>,
     pub state: String,
+    /// The numeric `$ZELLIJ_PANE_ID` the SessionStart hook captured at
+    /// startup - the same id space `zellij action list-panes` reports, used
+    /// to place this session in its Zellij session's on-screen tab/pane
+    /// order (see `cycle_claude_session`). `cwd` can't be used for this: two
+    /// Claude sessions in the same repo but different tabs share a cwd.
+    pub zellij_pane_id: Option<u32>,
 }
 
 pub fn enumerate() -> Vec<ClaudeSession> {
@@ -58,6 +65,7 @@ fn load_session(path: &Path, live_zellij_sessions: &std::collections::HashSet<St
         session_id: s.session_id,
         zellij_session: s.zellij_session,
         state,
+        zellij_pane_id: s.zellij_pane_id,
     })
 }
 

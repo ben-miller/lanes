@@ -1,10 +1,47 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
+
+use serde::Deserialize;
 
 use crate::model::*;
 
 pub fn layout_for_session(session: &str) -> Option<(TerminalShape, Option<String>)> {
     dump_layout(session)
+}
+
+#[derive(Deserialize)]
+struct RawPaneInfo {
+    id: u32,
+    is_plugin: bool,
+    tab_position: usize,
+    pane_x: i64,
+    pane_y: i64,
+}
+
+/// Terminal pane id -> (tab_position, pane_y, pane_x), i.e. this pane's
+/// on-screen reading-order position: which Zellij tab it's in, then top-to-
+/// bottom/left-to-right within that tab. The id is the same numeric
+/// `$ZELLIJ_PANE_ID` a Claude session's SessionStart hook captures at
+/// startup (see `drivers::claude::ClaudeSession::zellij_pane_id`) - plugin
+/// panes (tab bar, etc.) have their own separate id namespace and are
+/// excluded here so they can't collide with a terminal pane's id.
+pub fn pane_positions(session: &str) -> HashMap<u32, (usize, i64, i64)> {
+    let Ok(out) = Command::new("/opt/homebrew/bin/zellij")
+        .args(["--session", session, "action", "list-panes", "--all", "--json"])
+        .output()
+    else {
+        return HashMap::new();
+    };
+    if !out.status.success() {
+        return HashMap::new();
+    }
+    let Ok(panes) = serde_json::from_slice::<Vec<RawPaneInfo>>(&out.stdout) else {
+        return HashMap::new();
+    };
+    panes.into_iter()
+        .filter(|p| !p.is_plugin)
+        .map(|p| (p.id, (p.tab_position, p.pane_y, p.pane_x)))
+        .collect()
 }
 
 /// `--short` lists a session name regardless of whether it's actually
