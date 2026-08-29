@@ -50,21 +50,36 @@ fn start_switch_socket(handle: tauri::AppHandle) {
     });
 }
 
+/// `async` + `spawn_blocking` is load-bearing, not decoration: Tauri v2 runs
+/// a non-async command's body directly on the main thread, and
+/// gather_lanes() blocks for ~500-600ms doing real subprocess I/O (see the
+/// README's Diagnostics section). While that's running synchronously on the
+/// main thread, nothing else the app needs that thread for can happen
+/// either - confirmed via perf.log: the direct-socket "lane-changed"
+/// highlight update (meant to land in single-digit milliseconds) was
+/// measured stalling 500-600ms, resuming within ~10ms of whichever
+/// get_snapshot call was in flight finishing. Moving the actual work to a
+/// blocking-pool thread and only awaiting it here frees the main thread to
+/// keep dispatching that event (and everything else) while a refresh runs.
 #[tauri::command]
-fn get_snapshot() -> serde_json::Value {
-    let t0 = std::time::Instant::now();
-    lanes::logging::perf("ui.get_snapshot.start", "");
-    let cfg = lanes::config::Config::load();
-    let mut snapshot = lanes::gather_lanes(&cfg);
-    lanes::logging::perf("ui.get_snapshot.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
-    // Inactive-lane filtering is a dashboard display concern, not a
-    // gather_lanes()-level one - the CLI (`lanes list`/`snapshot`/`signals`)
-    // always sees every lane regardless of this toggle; only what Lanes
-    // Switch itself renders is affected.
-    if !lanes::state::read_show_inactive() {
-        snapshot.lanes.retain(|l| l.active);
-    }
-    serde_json::to_value(&snapshot).unwrap()
+async fn get_snapshot() -> serde_json::Value {
+    tauri::async_runtime::spawn_blocking(|| {
+        let t0 = std::time::Instant::now();
+        lanes::logging::perf("ui.get_snapshot.start", "");
+        let cfg = lanes::config::Config::load();
+        let mut snapshot = lanes::gather_lanes(&cfg);
+        lanes::logging::perf("ui.get_snapshot.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
+        // Inactive-lane filtering is a dashboard display concern, not a
+        // gather_lanes()-level one - the CLI (`lanes list`/`snapshot`/`signals`)
+        // always sees every lane regardless of this toggle; only what Lanes
+        // Switch itself renders is affected.
+        if !lanes::state::read_show_inactive() {
+            snapshot.lanes.retain(|l| l.active);
+        }
+        serde_json::to_value(&snapshot).unwrap()
+    })
+    .await
+    .expect("get_snapshot blocking task panicked")
 }
 
 /// Lets the frontend add its own entries to perf.log - the only way it can,
