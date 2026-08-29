@@ -40,15 +40,19 @@ struct CachedPanes {
     panes: Vec<RawPaneInfo>,
 }
 
+// Session names can contain spaces (see parse_running_sessions'
+// "sheetwork planner" test below) but not path separators in practice -
+// sanitized anyway rather than trusting that, since this becomes a filename.
+fn sanitize_for_filename(session: &str) -> String {
+    session.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+}
+
 fn list_panes_cache_path(session: &str) -> std::path::PathBuf {
-    // Session names can contain spaces (see parse_running_sessions'
-    // "sheetwork planner" test below) but not path separators in practice -
-    // sanitized anyway rather than trusting that, since this becomes a
-    // filename.
-    let safe: String = session.chars()
-        .map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' })
-        .collect();
-    crate::logging::state_dir().join("cache").join(format!("list-panes-{safe}.json"))
+    crate::logging::state_dir().join("cache").join(format!("list-panes-{}.json", sanitize_for_filename(session)))
+}
+
+fn list_panes_lock_path(session: &str) -> std::path::PathBuf {
+    crate::logging::state_dir().join("cache").join(format!("list-panes-{}.lock", sanitize_for_filename(session)))
 }
 
 /// Pure freshness check, pulled out of `read_cached_panes` so the TTL
@@ -97,20 +101,21 @@ fn write_cached_panes(session: &str, panes: &[RawPaneInfo]) {
     let _ = std::fs::rename(&tmp_path, &path);
 }
 
-/// Every caller of `list-panes` (cycling's ambiguous-session lookup,
-/// gather_lanes()'s per-session shape+position fetch) goes through this one
-/// function, each as its own OS process with no shared memory - so a rapid
-/// burst of switches (each spawning its own `lanes` process) plus the UI's
-/// own post-switch refresh all independently ask Zellij the same question
-/// about the same session within the same fraction of a second. Caching
-/// the answer here, rather than in any one caller, means all of them
-/// benefit without needing to know about each other: the first one to ask
-/// pays the real ~120-170ms IPC cost, everyone else within the TTL reads a
-/// file instead.
-fn list_panes(session: &str) -> Vec<RawPaneInfo> {
-    if let Some(cached) = read_cached_panes(session) {
-        return cached;
-    }
+/// A cache miss during a genuinely simultaneous burst (several processes
+/// missing within the same ~150ms, faster than realistic tapping) used to
+/// mean every one of them independently called Zellij at once - the exact
+/// contention the cache exists to avoid, just not prevented on the very
+/// first round. This bounds how long a follower waits for whoever's
+/// already fetching, polling this often rather than blocking on the lock
+/// itself, so it can also notice the cache going fresh without needing to
+/// touch the lock at all.
+const LIST_PANES_LOCK_POLL_INTERVAL: Duration = Duration::from_millis(5);
+/// Upper bound on how long a follower waits for a leader before giving up
+/// and just fetching itself - a safety net for a hung/crashed leader, not
+/// an expected wait. Real fetches take ~120-170ms; this is well above that.
+const LIST_PANES_LOCK_MAX_WAIT: Duration = Duration::from_secs(3);
+
+fn fetch_live_and_cache(session: &str) -> Vec<RawPaneInfo> {
     let Ok(out) = Command::new("/opt/homebrew/bin/zellij")
         .args(["--session", session, "action", "list-panes", "--all", "--json"])
         .output()
@@ -123,6 +128,81 @@ fn list_panes(session: &str) -> Vec<RawPaneInfo> {
     let panes: Vec<RawPaneInfo> = serde_json::from_slice(&out.stdout).unwrap_or_default();
     write_cached_panes(session, &panes);
     panes
+}
+
+/// Single-flight: on a cache miss, only the process that wins the lock
+/// actually calls Zellij - everyone else waits for the cache to go fresh
+/// instead of starting a redundant, contending fetch of their own. Uses
+/// `std::fs::File`'s native advisory locking (stable since Rust 1.89 - no
+/// `flock`-wrapper crate needed) specifically because it's released by the
+/// OS the instant a holder's process exits, crash included - a plain
+/// marker file would need its own staleness/cleanup logic to avoid a dead
+/// leader wedging every future caller behind a lock nobody will ever
+/// release.
+fn fetch_via_single_flight(session: &str) -> Vec<RawPaneInfo> {
+    let lock_path = list_panes_lock_path(session);
+    let Some(dir) = lock_path.parent() else { return fetch_live_and_cache(session) };
+    if std::fs::create_dir_all(dir).is_err() {
+        return fetch_live_and_cache(session);
+    }
+    let Ok(lock_file) = std::fs::OpenOptions::new().create(true).write(true).open(&lock_path) else {
+        return fetch_live_and_cache(session);
+    };
+
+    let t0 = std::time::Instant::now();
+    let mut waited = false;
+    loop {
+        match lock_file.try_lock() {
+            Ok(()) => {
+                // Holding the lock now - but someone else may have finished
+                // and released it a moment before we acquired it, in which
+                // case the cache is already fresh and there's nothing left
+                // to do. Only genuinely absent/stale data means we're the
+                // real leader here.
+                let result = match read_cached_panes(session) {
+                    Some(cached) => cached,
+                    None => fetch_live_and_cache(session),
+                };
+                let _ = lock_file.unlock();
+                if waited {
+                    crate::logging::perf(
+                        "zellij.list_panes_waited_for_leader",
+                        &format!("session={session} elapsed_us={}", t0.elapsed().as_micros()),
+                    );
+                }
+                return result;
+            }
+            Err(_) => {
+                waited = true;
+                if t0.elapsed() > LIST_PANES_LOCK_MAX_WAIT {
+                    crate::logging::perf(
+                        "zellij.list_panes_lock_timed_out",
+                        &format!("session={session} elapsed_us={}", t0.elapsed().as_micros()),
+                    );
+                    return fetch_live_and_cache(session);
+                }
+                std::thread::sleep(LIST_PANES_LOCK_POLL_INTERVAL);
+            }
+        }
+    }
+}
+
+/// Every caller of `list-panes` (cycling's ambiguous-session lookup,
+/// gather_lanes()'s per-session shape+position fetch) goes through this one
+/// function, each as its own OS process with no shared memory - so a rapid
+/// burst of switches (each spawning its own `lanes` process) plus the UI's
+/// own post-switch refresh all independently ask Zellij the same question
+/// about the same session within the same fraction of a second. Caching
+/// the answer here, rather than in any one caller, means all of them
+/// benefit without needing to know about each other: the first one to ask
+/// pays the real ~120-170ms IPC cost, everyone else within the TTL reads a
+/// file instead - and a burst that misses the cache all at once still only
+/// pays that cost once, via `fetch_via_single_flight`.
+fn list_panes(session: &str) -> Vec<RawPaneInfo> {
+    if let Some(cached) = read_cached_panes(session) {
+        return cached;
+    }
+    fetch_via_single_flight(session)
 }
 
 /// Terminal pane id -> (tab_position, pane_y, pane_x), i.e. this pane's
@@ -419,6 +499,30 @@ mod tests {
         let read_back = read_cached_panes(session).expect("cache should be fresh immediately after writing");
         assert_eq!(read_back.len(), 1);
         assert_eq!(read_back[0].id, 0);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn file_lock_blocks_a_second_handle_until_released() {
+        // The single-flight mechanism's actual load-bearing assumption:
+        // std::fs::File's native advisory lock (stable since Rust 1.89) is
+        // exclusive across independent handles to the same path, and
+        // releasing it makes it acquirable again. Exercised directly here,
+        // separately from fetch_via_single_flight (which shells out to the
+        // real zellij binary and isn't something a unit test should
+        // depend on).
+        let path = std::env::temp_dir().join(format!("lanes-test-lock-{}.lock", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+
+        let f1 = std::fs::OpenOptions::new().create(true).write(true).open(&path).unwrap();
+        f1.try_lock().expect("first handle should acquire an uncontended lock");
+
+        let f2 = std::fs::OpenOptions::new().create(true).write(true).open(&path).unwrap();
+        assert!(f2.try_lock().is_err(), "second handle should not acquire an already-held lock");
+
+        f1.unlock().expect("holder should be able to release its own lock");
+        assert!(f2.try_lock().is_ok(), "lock should be acquirable once released");
 
         let _ = std::fs::remove_file(&path);
     }
