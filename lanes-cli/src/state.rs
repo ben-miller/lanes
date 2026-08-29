@@ -32,7 +32,11 @@ fn get_scalar_str(doc: &KdlDocument, name: &str) -> Option<String> {
 }
 
 fn get_scalar_bool(doc: &KdlDocument, name: &str) -> bool {
-    doc.get(name).and_then(|n| n.get(0)).and_then(|v| v.as_bool()).unwrap_or(false)
+    get_scalar_bool_or(doc, name, false)
+}
+
+fn get_scalar_bool_or(doc: &KdlDocument, name: &str, default: bool) -> bool {
+    doc.get(name).and_then(|n| n.get(0)).and_then(|v| v.as_bool()).unwrap_or(default)
 }
 
 fn put_scalar(doc: &mut KdlDocument, name: &str, value: impl Into<kdl::KdlEntry>) {
@@ -107,6 +111,21 @@ pub fn read_show_inactive() -> bool {
 pub fn set_show_inactive(show: bool) {
     let mut doc = load_doc();
     put_scalar(&mut doc, "show-inactive", show);
+    save_doc(&doc);
+}
+
+/// Whether `logging::perf` writes to perf.log - the switch-latency
+/// timeline (trigger -> actual switch -> UI update). On by default, unlike
+/// switch-pinned/show-inactive: this exists specifically to have data ready
+/// the moment a lag complaint comes in, not to opt into after the fact.
+/// Same persisted-toggle pattern as those two otherwise.
+pub fn read_diagnostics_enabled() -> bool {
+    get_scalar_bool_or(&load_doc(), "diagnostics-enabled", true)
+}
+
+pub fn set_diagnostics_enabled(enabled: bool) {
+    let mut doc = load_doc();
+    put_scalar(&mut doc, "diagnostics-enabled", enabled);
     save_doc(&doc);
 }
 
@@ -196,6 +215,14 @@ mod tests {
     fn scalar_bool_defaults_false_when_absent() {
         let doc = KdlDocument::new();
         assert_eq!(get_scalar_bool(&doc, "switch-pinned"), false);
+    }
+
+    #[test]
+    fn scalar_bool_or_uses_default_when_absent_but_not_when_present() {
+        let mut doc = KdlDocument::new();
+        assert_eq!(get_scalar_bool_or(&doc, "diagnostics-enabled", true), true);
+        put_scalar(&mut doc, "diagnostics-enabled", false);
+        assert_eq!(get_scalar_bool_or(&doc, "diagnostics-enabled", true), false);
     }
 
     #[test]

@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::process::Command;
 
 use serde::Deserialize;
@@ -13,9 +13,28 @@ pub fn layout_for_session(session: &str) -> Option<(TerminalShape, Option<String
 struct RawPaneInfo {
     id: u32,
     is_plugin: bool,
+    is_focused: bool,
     tab_position: usize,
+    tab_name: String,
     pane_x: i64,
     pane_y: i64,
+    #[serde(default)]
+    pane_command: Option<String>,
+    #[serde(default)]
+    pane_cwd: Option<String>,
+}
+
+fn list_panes(session: &str) -> Vec<RawPaneInfo> {
+    let Ok(out) = Command::new("/opt/homebrew/bin/zellij")
+        .args(["--session", session, "action", "list-panes", "--all", "--json"])
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !out.status.success() {
+        return Vec::new();
+    }
+    serde_json::from_slice(&out.stdout).unwrap_or_default()
 }
 
 /// Terminal pane id -> (tab_position, pane_y, pane_x), i.e. this pane's
@@ -26,22 +45,45 @@ struct RawPaneInfo {
 /// panes (tab bar, etc.) have their own separate id namespace and are
 /// excluded here so they can't collide with a terminal pane's id.
 pub fn pane_positions(session: &str) -> HashMap<u32, (usize, i64, i64)> {
-    let Ok(out) = Command::new("/opt/homebrew/bin/zellij")
-        .args(["--session", session, "action", "list-panes", "--all", "--json"])
-        .output()
-    else {
-        return HashMap::new();
-    };
-    if !out.status.success() {
-        return HashMap::new();
-    }
-    let Ok(panes) = serde_json::from_slice::<Vec<RawPaneInfo>>(&out.stdout) else {
-        return HashMap::new();
-    };
-    panes.into_iter()
+    positions_from_panes(&list_panes(session))
+}
+
+fn positions_from_panes(panes: &[RawPaneInfo]) -> HashMap<u32, (usize, i64, i64)> {
+    panes.iter()
         .filter(|p| !p.is_plugin)
         .map(|p| (p.id, (p.tab_position, p.pane_y, p.pane_x)))
         .collect()
+}
+
+/// A session's TerminalShape (for the UI's per-pane display) and every
+/// pane's on-screen position (see `pane_positions`), from a single
+/// `list-panes` call - `gather_lanes()` used to make a separate
+/// `dump-layout` call for the shape alone, on top of `list-panes` for
+/// position, doubling the per-session subprocess round-trips on every
+/// refresh (measured ~600-700ms total vs ~220ms for the shape alone; see
+/// perf.log's `gather_lanes.subprocess_batch_done`). `list-panes --all
+/// --json` already carries everything `dump-layout`'s KDL gave us
+/// (command, cwd, focus) plus real geometry and pane ids, so one call
+/// produces both.
+pub fn shape_and_positions_for_session(session: &str) -> (TerminalShape, HashMap<u32, (usize, i64, i64)>) {
+    let panes = list_panes(session);
+    (shape_from_panes(&panes), positions_from_panes(&panes))
+}
+
+fn shape_from_panes(panes: &[RawPaneInfo]) -> TerminalShape {
+    let mut by_tab: BTreeMap<usize, TabInfo> = BTreeMap::new();
+    for p in panes.iter().filter(|p| !p.is_plugin) {
+        let tab = by_tab.entry(p.tab_position).or_insert_with(|| TabInfo {
+            name: p.tab_name.clone(),
+            focused: false,
+            panes: Vec::new(),
+        });
+        if p.is_focused {
+            tab.focused = true;
+        }
+        tab.panes.push(PaneInfo { command: p.pane_command.clone(), focused: p.is_focused, cwd: p.pane_cwd.clone() });
+    }
+    TerminalShape { cwd: None, tabs: by_tab.into_values().collect() }
 }
 
 /// `--short` lists a session name regardless of whether it's actually
@@ -204,6 +246,51 @@ fn extract_quoted(s: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn raw_pane(id: u32, is_plugin: bool, is_focused: bool, tab_position: usize, tab_name: &str, command: Option<&str>, cwd: Option<&str>) -> RawPaneInfo {
+        RawPaneInfo {
+            id,
+            is_plugin,
+            is_focused,
+            tab_position,
+            tab_name: tab_name.to_string(),
+            pane_x: 0,
+            pane_y: 0,
+            pane_command: command.map(str::to_string),
+            pane_cwd: cwd.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn positions_from_panes_excludes_plugins_and_keys_by_id() {
+        let panes = vec![
+            raw_pane(0, true, false, 0, "Tab #1", None, None),
+            raw_pane(0, false, true, 0, "Tab #1", Some("claude"), Some("/a")),
+            raw_pane(3, false, false, 1, "Tab #2", Some("claude"), Some("/a")),
+        ];
+        let positions = positions_from_panes(&panes);
+        assert_eq!(positions.len(), 2);
+        assert!(positions.contains_key(&0));
+        assert!(positions.contains_key(&3));
+    }
+
+    #[test]
+    fn shape_from_panes_groups_by_tab_position_excluding_plugins() {
+        let panes = vec![
+            raw_pane(0, true, false, 0, "Tab #1", None, None),
+            raw_pane(0, false, true, 0, "Tab #1", Some("claude"), Some("/a")),
+            raw_pane(1, false, false, 0, "Tab #1", None, Some("/b")),
+            raw_pane(3, false, false, 1, "Tab #2", Some("claude"), Some("/a")),
+        ];
+        let shape = shape_from_panes(&panes);
+        assert_eq!(shape.tabs.len(), 2);
+        assert_eq!(shape.tabs[0].name, "Tab #1");
+        assert_eq!(shape.tabs[0].panes.len(), 2);
+        assert_eq!(shape.tabs[0].panes[0].command.as_deref(), Some("claude"));
+        assert!(shape.tabs[0].panes[0].focused);
+        assert_eq!(shape.tabs[1].name, "Tab #2");
+        assert_eq!(shape.tabs[1].panes.len(), 1);
+    }
 
     const LAYOUT: &str = r#"layout {
     cwd "/Users/bmiller/src/projects/sheetwork"

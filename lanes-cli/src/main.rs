@@ -105,6 +105,32 @@ enum Command {
         #[command(subcommand)]
         command: ComponentCommand,
     },
+
+    /// Manage the switch-latency diagnostics log (perf.log) - trigger,
+    /// actual-switch, and UI-update timestamps for every lane/session
+    /// switch. On by default; see `logging::perf`.
+    Diagnostics {
+        #[command(subcommand)]
+        command: DiagnosticsCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum DiagnosticsCommand {
+    /// Turn switch-latency logging on
+    On,
+
+    /// Turn switch-latency logging off
+    Off,
+
+    /// Print whether switch-latency logging is currently on
+    Status,
+
+    /// Tail perf.log
+    Logs {
+        #[arg(short, long)]
+        follow: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -316,5 +342,22 @@ fn main() {
         Command::Hammerspoon { command: ComponentCommand::Logs { follow } } => {
             cmd::logs::run("hammerspoon.log", follow);
         }
+
+        Command::Diagnostics { command } => match command {
+            DiagnosticsCommand::On => {
+                lanes::state::set_diagnostics_enabled(true);
+                println!("true");
+            }
+            DiagnosticsCommand::Off => {
+                lanes::state::set_diagnostics_enabled(false);
+                println!("false");
+            }
+            DiagnosticsCommand::Status => {
+                println!("{}", lanes::state::read_diagnostics_enabled());
+            }
+            DiagnosticsCommand::Logs { follow } => {
+                cmd::logs::run("perf.log", follow);
+            }
+        },
     }
 }

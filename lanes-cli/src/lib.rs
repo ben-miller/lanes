@@ -16,6 +16,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
 pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
+    let t0 = std::time::Instant::now();
+    logging::perf("gather_lanes.start", "");
+
     let running = drivers::zellij::running_sessions();
     let claude = claude_sessions_by_zellij();
 
@@ -29,36 +32,41 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         .filter_map(|el| el.repo_path().map(expand_tilde))
         .collect();
 
-    // dump-layout and list-panes (per session) and git status (per repo) are
-    // each a separate subprocess round-trip, independent of every other one
+    // One list-panes call per session (giving both the pane shape for
+    // display and each pane's on-screen position - see
+    // shape_and_positions_for_session) plus one git-status call per repo,
+    // each a separate subprocess round-trip independent of every other one
     // - fetch them all concurrently in one batch rather than once per lane
-    // in sequence (this used to be the dominant cost of every UI refresh).
+    // in sequence (this used to be the dominant cost of every UI refresh,
+    // worse still when this used to be two separate per-session calls -
+    // dump-layout and list-panes - see perf.log's
+    // gather_lanes.subprocess_batch_done and the "Diagnostics" section of
+    // the README).
     let (layouts, pane_positions, git_status): (
-        HashMap<String, Option<(model::TerminalShape, Option<String>)>>,
+        HashMap<String, model::TerminalShape>,
         HashMap<String, HashMap<u32, (usize, i64, i64)>>,
         HashMap<String, bool>,
     ) = std::thread::scope(|scope| {
-        let layout_handles: Vec<_> = running_sessions.iter()
-            .map(|&s| (s.to_string(), scope.spawn(move || drivers::zellij::layout_for_session(s))))
-            .collect();
-        let pane_position_handles: Vec<_> = running_sessions.into_iter()
-            .map(|s| (s.to_string(), scope.spawn(move || drivers::zellij::pane_positions(s))))
+        let pane_handles: Vec<_> = running_sessions.into_iter()
+            .map(|s| (s.to_string(), scope.spawn(move || drivers::zellij::shape_and_positions_for_session(s))))
             .collect();
         let git_handles: Vec<_> = repo_paths.into_iter()
             .map(|p| (p.clone(), scope.spawn(move || git_has_changes(&p))))
             .collect();
 
-        let layouts = layout_handles.into_iter()
-            .map(|(s, handle)| (s, handle.join().ok().flatten()))
-            .collect();
-        let pane_positions = pane_position_handles.into_iter()
-            .map(|(s, handle)| (s, handle.join().unwrap_or_default()))
-            .collect();
+        let mut layouts = HashMap::new();
+        let mut pane_positions = HashMap::new();
+        for (s, handle) in pane_handles {
+            let (shape, positions) = handle.join().unwrap_or_default();
+            layouts.insert(s.clone(), shape);
+            pane_positions.insert(s, positions);
+        }
         let git_status = git_handles.into_iter()
             .map(|(p, handle)| (p, handle.join().unwrap_or(false)))
             .collect();
         (layouts, pane_positions, git_status)
     });
+    logging::perf("gather_lanes.subprocess_batch_done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
 
     let lanes = cfg.lanes.iter().map(|lane| {
         // This lane's scope elements + already-known observations, built
@@ -102,7 +110,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             if let Some(session) = el.zellij_session_name() {
                 let is_running = running.contains(session);
                 let (panes, signals) = if is_running {
-                    let shape = layouts.get(session).cloned().flatten();
+                    let shape = layouts.get(session).cloned();
                     let panes = build_terminal_panes(shape, &claude, session);
                     let session_ids: HashSet<&str> = claude.get(session)
                         .map(|refs| refs.iter().map(|c| c.session_id.as_str()).collect())
@@ -148,6 +156,8 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
 
         model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), active: lane.active, session_missing, facets }
     }).collect();
+
+    logging::perf("gather_lanes.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
 
     model::LanewiseSnapshot {
         taken_at: chrono::Utc::now().to_rfc3339(),
@@ -256,11 +266,11 @@ fn process_command(pid: u32) -> Option<String> {
 /// the claude map to know which pane (if any) is a Claude session that's
 /// awaiting attention.
 fn build_terminal_panes(
-    shape: Option<(model::TerminalShape, Option<String>)>,
+    shape: Option<model::TerminalShape>,
     claude: &HashMap<String, Vec<drivers::claude::ClaudeSession>>,
     session: &str,
 ) -> Vec<model::PaneSnapshot> {
-    let Some((shape, _)) = shape else {
+    let Some(shape) = shape else {
         return vec![];
     };
 
@@ -290,6 +300,9 @@ pub(crate) fn git_has_changes(path: &str) -> bool {
 }
 
 pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
+    let t0 = std::time::Instant::now();
+    logging::perf("switch.trigger", &format!("session={session_id}"));
+
     let home = std::env::var("HOME").unwrap_or_default();
     let path = std::path::PathBuf::from(&home)
         .join(".claude")
@@ -333,6 +346,10 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
     // highlight can update from this same message instead of waiting on the
     // next full snapshot refresh.
     notify_switch_socket(&format!("switch:{}|{}\n", lane_id.as_deref().unwrap_or(""), session_id));
+    logging::perf(
+        "switch.optimistic_notify",
+        &format!("session={session_id} lane={} elapsed_us={}", lane_id.as_deref().unwrap_or(""), t0.elapsed().as_micros()),
+    );
 
     let switch_result: Result<(), String> = (|| {
         if zellij_session.is_empty() {
@@ -370,6 +387,16 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
         state::write_claude_cursor_and_lane(old_cursor.as_deref(), old_lane.as_deref());
         notify_switch_socket(&format!("switch:{}|{}\n", old_lane.as_deref().unwrap_or(""), old_cursor.as_deref().unwrap_or("")));
     }
+
+    logging::perf(
+        "switch.complete",
+        &format!(
+            "session={session_id} lane={} status={} elapsed_us={}",
+            lane_id.as_deref().unwrap_or(""),
+            if switch_result.is_ok() { "ok" } else { "err" },
+            t0.elapsed().as_micros(),
+        ),
+    );
 
     switch_result
 }

@@ -63,6 +63,16 @@ If `drivers` is omitted, all built-in drivers run.
 
 Each resource has a `selector` (durable handle for re-finding it), a `locator` (ephemeral runtime ID, for display only), and `extra` annotations added by the correlation pass — including which lane it belongs to if one can be determined from the registry.
 
+## Diagnostics
+
+Every lane/session switch, and every `gather_lanes()` refresh (the CLI's `snapshot`/`signals`, and Lanes Switch's dashboard), writes microsecond-timestamped lines to `~/.local/state/lanes/perf.log` - the switch-latency timeline: when a switch is triggered (`switch.trigger`), when cursor/lane state is optimistically written and the UI socket-notified (`switch.optimistic_notify`), when the actual WezTerm/Zellij switch finishes (`switch.complete`), when Lanes Switch's socket listener receives and re-emits it (`ui.socket_received`/`ui.emitted_lane_changed`), and when the frontend actually applies it (`ui.rendered_lane_changed`). Full-refresh cost is broken out too (`gather_lanes.start`/`.subprocess_batch_done`/`.done`, `ui.get_snapshot.start`/`.done`, `ui.refresh.start`/`.done`) - this is the expensive path (one `list-panes` per running Zellij session, plus one `git status` per repo, run concurrently but each an external process round-trip), and the one most likely to explain a noticeably laggy switch. Measured cost: `zellij action list-panes` alone runs ~120-170ms per session even sequentially (vs. ~10ms for a trivial action like `current-tab-info`) - that floor is inherent to the action itself, not something request flags change, and 5 concurrent sessions only partially parallelize against each other rather than all finishing in that same ~150ms. A switch's own highlight update (`switch.trigger` -> `ui.rendered_lane_changed`) is unaffected by any of this and lands in single-digit milliseconds over the direct socket path; the refresh this section measures is what runs afterward, triggered by the `state.kdl` write every switch makes.
+
+```
+lanes diagnostics status       # on/off
+lanes diagnostics on/off       # toggle logging (on by default)
+lanes diagnostics logs [-f]    # tail perf.log
+```
+
 ## Building and installing
 
 ```bash

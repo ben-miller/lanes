@@ -207,7 +207,7 @@ pub struct TabInfo {
     pub panes: Vec<PaneInfo>,
 }
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Default, Serialize, Deserialize)]
 pub struct TerminalShape {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,

@@ -24,6 +24,33 @@ pub fn append_line(file_name: &str, level: &str, msg: &str) {
     let _ = writeln!(f, "{ts} [{level}] {msg}");
 }
 
+/// Appends one timestamped line to the performance/diagnostics log
+/// (`~/.local/state/lanes/perf.log`) - the lane-switch latency timeline:
+/// when a switch is triggered, when it actually completes, when the UI
+/// receives and renders it. Gated by `state::read_diagnostics_enabled()`
+/// and kept in its own file rather than folded into `append_line`'s
+/// switch-ui.log/hammerspoon.log: it's written on every single switch (not
+/// just warnings/errors), from multiple processes (`lanes` CLI, the Tauri
+/// backend, and the frontend via `log_ui_event`), so it needs to be both
+/// toggleable independently and easy to `tail -f` in isolation while
+/// chasing a specific lag report. Timestamps are microsecond-precision
+/// RFC3339 - `append_line`'s second precision is too coarse for gaps that
+/// are the whole point of measuring.
+pub fn perf(event: &str, detail: &str) {
+    if !crate::state::read_diagnostics_enabled() {
+        return;
+    }
+    let path = state_dir().join("perf.log");
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) else {
+        return;
+    };
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true);
+    let _ = writeln!(f, "{ts} {event} {detail}");
+}
+
 /// Creates `~/.local/state/lanes/<file_name>` (empty, if it doesn't already
 /// exist).
 fn ensure_log_file(file_name: &str) {
@@ -42,4 +69,5 @@ fn ensure_log_file(file_name: &str) {
 pub fn init_state() {
     ensure_log_file("switch-ui.log");
     ensure_log_file("hammerspoon.log");
+    ensure_log_file("perf.log");
 }

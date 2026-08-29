@@ -28,11 +28,13 @@ fn start_switch_socket(handle: tauri::AppHandle) {
             while let Some(Ok(line)) = lines.next() {
                 if let Some(rest) = line.strip_prefix("switch:") {
                     let (lane, session) = rest.split_once('|').unwrap_or((rest, ""));
+                    lanes::logging::perf("ui.socket_received", &format!("lane={lane} session={session}"));
                     let payload = serde_json::json!({
                         "lane": if lane.is_empty() { None } else { Some(lane) },
                         "session": if session.is_empty() { None } else { Some(session) },
                     });
                     handle.emit("lane-changed", payload).ok();
+                    lanes::logging::perf("ui.emitted_lane_changed", &format!("lane={lane} session={session}"));
                 } else if line == "show" {
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.show();
@@ -50,8 +52,11 @@ fn start_switch_socket(handle: tauri::AppHandle) {
 
 #[tauri::command]
 fn get_snapshot() -> serde_json::Value {
+    let t0 = std::time::Instant::now();
+    lanes::logging::perf("ui.get_snapshot.start", "");
     let cfg = lanes::config::Config::load();
     let mut snapshot = lanes::gather_lanes(&cfg);
+    lanes::logging::perf("ui.get_snapshot.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
     // Inactive-lane filtering is a dashboard display concern, not a
     // gather_lanes()-level one - the CLI (`lanes list`/`snapshot`/`signals`)
     // always sees every lane regardless of this toggle; only what Lanes
@@ -60,6 +65,15 @@ fn get_snapshot() -> serde_json::Value {
         snapshot.lanes.retain(|l| l.active);
     }
     serde_json::to_value(&snapshot).unwrap()
+}
+
+/// Lets the frontend add its own entries to perf.log - the only way it can,
+/// since a webview has no filesystem access of its own. Used to mark the
+/// moment the UI actually applies a lane/session change, closing the loop
+/// that starts at `switch.trigger` in `lib.rs`'s `switch_claude_session`.
+#[tauri::command]
+fn log_ui_event(event: String, detail: String) {
+    lanes::logging::perf(&event, &detail);
 }
 
 #[tauri::command]
@@ -124,12 +138,17 @@ fn is_relevant_change(
     global_config_path: &Path,
     path: &Path,
 ) -> bool {
-    if path.starts_with(sessions_dir)
-        || path.starts_with(state_dir)
-        || path.starts_with(lanes_config_dir)
-        || path == global_config_path
-    {
+    if path.starts_with(sessions_dir) || path.starts_with(lanes_config_dir) || path == global_config_path {
         return true;
+    }
+    if path.starts_with(state_dir) {
+        // *.log files (perf.log, switch-ui.log, hammerspoon.log) live in
+        // this same directory but are never state a refresh should react
+        // to - perf.log in particular is written on every single
+        // gather_lanes() call (see logging::perf), so treating it as
+        // "relevant" turned every refresh into a self-triggering loop: log
+        // the refresh -> watcher sees perf.log change -> refresh again.
+        return path.extension().and_then(|e| e.to_str()) != Some("log");
     }
     for watch in watches {
         if !path.starts_with(&watch.root) {
@@ -148,6 +167,46 @@ fn is_relevant_change(
         return !watch.gitignore.matched_path_or_any_parents(path, path.is_dir()).is_ignore();
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_kdl_change_is_relevant() {
+        let state_dir = Path::new("/home/x/.local/state/lanes");
+        assert!(is_relevant_change(
+            &[],
+            Path::new("/home/x/.claude/active-sessions"),
+            state_dir,
+            Path::new("/home/x/.config/lanes"),
+            Path::new("/home/x/.config/lanes.toml"),
+            &state_dir.join("state.kdl"),
+        ));
+    }
+
+    #[test]
+    fn log_files_in_state_dir_are_never_relevant() {
+        // Regression test: perf.log is written on every single gather_lanes()
+        // call (see logging::perf) - if the watcher ever treats a *.log
+        // write in state_dir as relevant again, every refresh re-triggers
+        // itself forever (log the refresh -> watcher fires -> refresh again).
+        let state_dir = Path::new("/home/x/.local/state/lanes");
+        for name in ["perf.log", "switch-ui.log", "hammerspoon.log"] {
+            assert!(
+                !is_relevant_change(
+                    &[],
+                    Path::new("/home/x/.claude/active-sessions"),
+                    state_dir,
+                    Path::new("/home/x/.config/lanes"),
+                    Path::new("/home/x/.config/lanes.toml"),
+                    &state_dir.join(name),
+                ),
+                "{name} should not be treated as relevant"
+            );
+        }
+    }
 }
 
 fn apply_pin(app: &tauri::AppHandle, pin_item: &CheckMenuItem<tauri::Wry>, pinned: bool) {
@@ -221,6 +280,10 @@ fn watch_paths(handle: tauri::AppHandle, pin_item: CheckMenuItem<tauri::Wry>) {
                 let relevant = event.paths.iter()
                     .any(|p| is_relevant_change(&repo_watches, &sessions_dir, &state_dir, &lanes_config_dir, &global_config_path, p));
                 if relevant && last_emit.map_or(true, |t| t.elapsed() >= debounce) {
+                    lanes::logging::perf(
+                        "ui.fs_watcher_emitted_sessions_changed",
+                        &format!("paths={:?}", event.paths),
+                    );
                     handle.emit("sessions-changed", ()).ok();
                     last_emit = Some(Instant::now());
                 }
@@ -285,7 +348,7 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_snapshot, execute_action, set_focused_lane, focus_lane])
+        .invoke_handler(tauri::generate_handler![get_snapshot, execute_action, set_focused_lane, focus_lane, log_ui_event])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

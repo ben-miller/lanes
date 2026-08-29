@@ -15,9 +15,12 @@
   let cols = 1;
 
   async function refresh() {
+    const t0 = performance.now();
+    invoke("log_ui_event", { event: "ui.refresh.start", detail: "" });
     snapshot = await invoke("get_snapshot");
     cols = Math.max(1, Math.min(snapshot.lanes.length, MAX_COLS));
     await resizeToContent(snapshot.lanes.length);
+    invoke("log_ui_event", { event: "ui.refresh.done", detail: `elapsed_ms=${(performance.now() - t0).toFixed(1)}` });
   }
 
   async function resizeToContent(laneCount) {
@@ -56,6 +59,10 @@
     // signal clicks.
     unlistenLane = await listen("lane-changed", (event) => {
       if (snapshot) snapshot = { ...snapshot, focused_lane: event.payload.lane, focused_claude_session: event.payload.session };
+      invoke("log_ui_event", {
+        event: "ui.rendered_lane_changed",
+        detail: `lane=${event.payload.lane ?? ""} session=${event.payload.session ?? ""}`,
+      });
     });
     document.addEventListener("mousedown", (e) => {
       if (!e.target.closest(".signal") && !e.target.closest(".overlay")) {
