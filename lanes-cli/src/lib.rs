@@ -361,6 +361,7 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
         // file at hook time (which came from the same unreliable title
         // matching we removed everywhere else).
         activate_wezterm_tab(&zellij_session, true)?;
+        logging::perf("switch.tab_activated", &format!("session={session_id} elapsed_us={}", t0.elapsed().as_micros()));
 
         if let Some(pane_id) = zellij_pane_id {
             let output = std::process::Command::new("/opt/homebrew/bin/zellij")
@@ -374,6 +375,7 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
                 }
             }
         }
+        logging::perf("switch.pane_focused", &format!("session={session_id} elapsed_us={}", t0.elapsed().as_micros()));
 
         Ok(())
     })();
@@ -446,12 +448,14 @@ pub fn notify_switch_hide() {
 /// to Zellij session name then session ID for any session whose lane isn't
 /// listed in `order`, or whose pane position couldn't be resolved.
 pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
+    let ct0 = std::time::Instant::now();
     let cfg = config::Config::load();
     let live_sessions = if cfg.driver_enabled("claude") {
         drivers::claude::enumerate()
     } else {
         vec![]
     };
+    logging::perf("cycle.enumerated", &format!("elapsed_us={} count={}", ct0.elapsed().as_micros(), live_sessions.len()));
     // Skip sessions that live in an inactive lane, or one with no cached
     // WezTerm tab-id (see lane_session_missing) - that's exactly what
     // caused the "wezterm activate-tab failed" cycling errors, since
@@ -459,17 +463,28 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     let live_sessions: Vec<_> = live_sessions.into_iter()
         .filter(|s| session_belongs_to_reachable_lane(s.zellij_session.as_deref(), &cfg))
         .collect();
+    logging::perf("cycle.filtered", &format!("elapsed_us={} count={}", ct0.elapsed().as_micros(), live_sessions.len()));
 
-    // Pane positions are only worth querying for sessions that actually
-    // have a live Claude session in them - one list-panes call per distinct
-    // Zellij session, not per Claude session.
-    let mut positions: HashMap<String, HashMap<u32, (usize, i64, i64)>> = HashMap::new();
-    for zellij_session in live_sessions.iter().filter_map(|s| s.zellij_session.as_deref()) {
-        if positions.contains_key(zellij_session) {
-            continue;
-        }
-        positions.insert(zellij_session.to_string(), drivers::zellij::pane_positions(zellij_session));
-    }
+    // pane_position_rank is only ever consulted as a tiebreaker between two
+    // live Claude sessions in the *same* Zellij session (see its own doc
+    // comment) - every session with just one live Claude session sorts
+    // entirely on lane_order_rank, so querying list-panes for it resolves
+    // nothing. This used to run unconditionally and sequentially, one
+    // ~120-170ms `list-panes` call per distinct live Zellij session, every
+    // single cycle keypress, before switch_claude_session (and thus
+    // switch.trigger) even ran - perf.log's keystroke -> switch.trigger gap
+    // was almost entirely this loop. Restricting to the actually-ambiguous
+    // sessions and running what's left concurrently (same pattern as
+    // gather_lanes's batch) cuts both the call count and the serialization.
+    let ambiguous_sessions = sessions_needing_pane_positions(live_sessions.iter().map(|s| s.zellij_session.as_deref()));
+    logging::perf("cycle.ambiguous_sessions", &format!("elapsed_us={} sessions={:?}", ct0.elapsed().as_micros(), ambiguous_sessions));
+    let positions: HashMap<String, HashMap<u32, (usize, i64, i64)>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = ambiguous_sessions.into_iter()
+            .map(|s| (s.clone(), scope.spawn(move || drivers::zellij::pane_positions(&s))))
+            .collect();
+        handles.into_iter().map(|(s, h)| (s, h.join().unwrap_or_default())).collect()
+    });
+    logging::perf("cycle.positions_resolved", &format!("elapsed_us={}", ct0.elapsed().as_micros()));
 
     let mut sessions: Vec<(String, String, (usize, i64, i64))> = live_sessions.into_iter()
         .map(|s| {
@@ -490,6 +505,7 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     let cursor = state::read_claude_cursor();
     let current_index = cursor.as_deref().and_then(|c| ids.iter().position(|id| id == c));
     let idx = cycle_index(ids.len(), current_index, direction);
+    logging::perf("cycle.target_resolved", &format!("elapsed_us={} target={}", ct0.elapsed().as_micros(), ids[idx]));
 
     switch_claude_session(&ids[idx])
 }
@@ -521,6 +537,20 @@ fn pane_position_rank(
         return (usize::MAX, i64::MAX, i64::MAX);
     };
     positions.get(&pane_id).copied().unwrap_or((usize::MAX, i64::MAX, i64::MAX))
+}
+
+/// Which Zellij sessions among the given live Claude sessions actually need
+/// a `pane_positions` (list-panes) lookup - only ones hosting 2+ live Claude
+/// sessions, since `pane_position_rank` is never consulted otherwise (a
+/// session with a single live Claude session already sorts entirely on
+/// `lane_order_rank`). Pulled out of `cycle_claude_session` so the "which
+/// sessions are ambiguous" decision is testable without any subprocess I/O.
+fn sessions_needing_pane_positions<'a>(zellij_sessions: impl Iterator<Item = Option<&'a str>>) -> Vec<String> {
+    let mut counts: HashMap<&str, usize> = HashMap::new();
+    for zs in zellij_sessions.flatten() {
+        *counts.entry(zs).or_insert(0) += 1;
+    }
+    counts.into_iter().filter(|(_, count)| *count > 1).map(|(zs, _)| zs.to_string()).collect()
 }
 
 /// Whether a live Claude session should be reachable by cycling, based on
@@ -946,6 +976,24 @@ mod tests {
         assert_eq!(pane_position_rank(Some(&positions), Some(99)), (usize::MAX, i64::MAX, i64::MAX));
         assert_eq!(pane_position_rank(Some(&positions), None), (usize::MAX, i64::MAX, i64::MAX));
         assert_eq!(pane_position_rank(None, Some(0)), (usize::MAX, i64::MAX, i64::MAX));
+    }
+
+    #[test]
+    fn sessions_needing_pane_positions_skips_sessions_with_only_one_live_session() {
+        // The regression this guards: querying list-panes for a session that
+        // hosts only one live Claude session resolves nothing (there's
+        // nothing to disambiguate), but used to run unconditionally -
+        // sequentially, once per distinct live Zellij session - adding a
+        // whole extra ~150ms `list-panes` call to every cycle keypress for
+        // every ordinary single-session lane.
+        let sessions = vec![Some("infra"), Some("lanes-dev"), Some("sheetwork")];
+        assert!(sessions_needing_pane_positions(sessions.into_iter()).is_empty());
+    }
+
+    #[test]
+    fn sessions_needing_pane_positions_includes_only_sessions_with_two_or_more() {
+        let sessions = vec![Some("formation"), Some("formation"), Some("infra"), None];
+        assert_eq!(sessions_needing_pane_positions(sessions.into_iter()), vec!["formation".to_string()]);
     }
 
     #[test]
