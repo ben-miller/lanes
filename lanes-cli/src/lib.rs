@@ -1040,7 +1040,7 @@ pub fn focus_lane(lane_id: &str, focus: bool) -> Result<(), String> {
     }
 }
 
-fn expand_tilde(path: &str) -> String {
+pub fn expand_tilde(path: &str) -> String {
     if let Some(rest) = path.strip_prefix("~/") {
         let home = std::env::var("HOME").unwrap_or_default();
         format!("{}/{}", home, rest)

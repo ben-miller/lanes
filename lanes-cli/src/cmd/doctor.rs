@@ -34,6 +34,7 @@ pub fn run() {
         check_session_naming(&cfg),
         check_lane_order(&cfg),
         check_lane_order_vs_ztabs(&cfg),
+        check_git_default_branches(&cfg),
     ];
 
     if cfg.driver_enabled("zellij") {
@@ -332,6 +333,96 @@ fn is_kebab_case(s: &str) -> bool {
         return false;
     }
     s.split('-').all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
+}
+
+/// The one check in this file that makes a real network call, deliberately
+/// - gather_lanes()'s hot refresh path reads a repo's cached
+/// refs/remotes/origin/HEAD purely locally (see lib.rs's
+/// git_default_branch), which is fast but can silently go stale if the
+/// remote's own default branch changes after clone (git has no hook that
+/// fires on that, and a plain `git fetch` doesn't refresh this ref either -
+/// only `git remote set-head origin -a` does). There's no way to detect
+/// that staleness without actually asking the remote, so it belongs here -
+/// an occasional, manually-run diagnostic - not on every UI refresh.
+fn check_git_default_branches(cfg: &lanes::config::Config) -> Check {
+    let repo_paths: std::collections::HashSet<String> = cfg.lanes.iter()
+        .flat_map(|l| l.scope.iter())
+        .filter_map(|el| el.repo_path())
+        .map(lanes::expand_tilde)
+        .collect();
+
+    let mismatches: Vec<String> = std::thread::scope(|scope| {
+        let handles: Vec<_> = repo_paths.into_iter()
+            .map(|path| scope.spawn(move || check_one_repo_default_branch(&path)))
+            .collect();
+        handles.into_iter().filter_map(|h| h.join().ok().flatten()).collect()
+    });
+
+    if mismatches.is_empty() {
+        Check {
+            label: "git default branches",
+            status: Status::Ok,
+            message: "cached origin/HEAD matches the remote for every checkable repo".to_string(),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "git default branches",
+            status: Status::Warn,
+            message: format!("cached default branch is stale for: {}", mismatches.join("; ")),
+            hint: Some(
+                "run `git remote set-head origin -a` in each - lanes reads this locally \
+                 and has no way to notice a remote's default branch changing on its own"
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// `None` covers three cases lanes treats identically here: no remote named
+/// "origin" (a purely local repo), the network call failed (offline, or a
+/// slow/unreachable remote - no timeout wrapping this yet, a known gap if
+/// that turns out to actually hang in practice), or the cached and actual
+/// values simply agree. Only a confirmed, live mismatch returns `Some`.
+fn check_one_repo_default_branch(path: &str) -> Option<String> {
+    let cached = cached_origin_head(path)?;
+    let actual = remote_origin_head(path)?;
+    if cached == actual {
+        return None;
+    }
+    Some(format!("{path} (cached \"{cached}\", remote says \"{actual}\")"))
+}
+
+fn cached_origin_head(path: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["-C", path, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    String::from_utf8_lossy(&out.stdout).trim().strip_prefix("origin/").map(str::to_string)
+}
+
+fn remote_origin_head(path: &str) -> Option<String> {
+    let out = Command::new("git")
+        .args(["-C", path, "ls-remote", "--symref", "origin", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    parse_ls_remote_symref(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// `git ls-remote --symref origin HEAD` prints a symref line
+/// (`ref: refs/heads/main\tHEAD`) followed by a plain sha/ref line - this
+/// only ever needs the branch name out of the first one.
+fn parse_ls_remote_symref(output: &str) -> Option<String> {
+    output.lines()
+        .find_map(|line| line.strip_prefix("ref: refs/heads/"))
+        .and_then(|rest| rest.split('\t').next())
+        .map(|s| s.trim().to_string())
 }
 
 fn check_session_naming(cfg: &lanes::config::Config) -> Check {
@@ -688,5 +779,29 @@ mod tests {
         let check = check_lane_order(&cfg);
         assert!(matches!(check.status, Status::Warn));
         assert!(check.message.contains("lanes-dev"));
+    }
+
+    #[test]
+    fn parse_ls_remote_symref_reads_the_branch_off_the_symref_line() {
+        let output = "ref: refs/heads/main\tHEAD\nabc123def456\tHEAD\n";
+        assert_eq!(parse_ls_remote_symref(output), Some("main".to_string()));
+    }
+
+    #[test]
+    fn parse_ls_remote_symref_handles_a_non_default_branch_name() {
+        let output = "ref: refs/heads/data-model\tHEAD\nabc123def456\tHEAD\n";
+        assert_eq!(parse_ls_remote_symref(output), Some("data-model".to_string()));
+    }
+
+    #[test]
+    fn parse_ls_remote_symref_is_none_without_a_symref_line() {
+        // e.g. ls-remote output for a remote with no symbolic HEAD ref advertised.
+        let output = "abc123def456\tHEAD\n";
+        assert_eq!(parse_ls_remote_symref(output), None);
+    }
+
+    #[test]
+    fn parse_ls_remote_symref_is_none_on_empty_output() {
+        assert_eq!(parse_ls_remote_symref(""), None);
     }
 }
