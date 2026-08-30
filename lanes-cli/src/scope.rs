@@ -108,6 +108,7 @@ pub struct Observation {
 // gather_lanes()'s parallel-prefetched git/layout status) can construct an
 // Observation directly instead of going through observe() and re-querying.
 pub const KIND_GIT_DIRTY: &str = "git.dirty";
+pub const KIND_GIT_NON_DEFAULT_BRANCH: &str = "git.non_default_branch";
 pub const KIND_CLAUDE_SESSION_STATE: &str = "claude.session.state";
 pub const KIND_ZELLIJ_SESSION_RUNNING: &str = "zellij.session.running";
 pub const KIND_TRELLO_CARD: &str = "trello.card";
@@ -253,6 +254,24 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
                 action,
                 // The label already says everything relevant here.
                 detail: None,
+            })
+        }
+
+        (ScopeElement::Repo { .. }, KIND_GIT_NON_DEFAULT_BRANCH) => {
+            let path = element.repo_path()?;
+            let current = obs.data.get("current").and_then(|v| v.as_str())?;
+            let default = obs.data.get("default").and_then(|v| v.as_str())?;
+            let action = zellij_session.map(|session| SignalAction::FocusRepoPane {
+                session: session.to_string(),
+                path: path.to_string(),
+            });
+            let reason = SignalReason::Repo(RepoReason::NonDefaultBranch);
+            Some(Signal {
+                urgency: reason.urgency(),
+                reason,
+                cyclable: false,
+                action,
+                detail: Some(format!("on \"{current}\", default is \"{default}\"")),
             })
         }
 
@@ -457,6 +476,41 @@ mod tests {
         assert_eq!(signals.len(), 1);
         assert!(matches!(signals[0].reason, crate::model::SignalReason::Repo(crate::model::RepoReason::PendingCommit)));
         assert!(signals[0].action.is_none());
+    }
+
+    #[test]
+    fn non_default_branch_signal_names_both_branches_in_detail() {
+        let resolved = vec![
+            (
+                ScopeElement::repo("/Users/bmiller/src/infra"),
+                vec![Observation {
+                    kind: KIND_GIT_NON_DEFAULT_BRANCH.to_string(),
+                    data: serde_json::json!({ "current": "feature/foo", "default": "main" }),
+                }],
+            ),
+            (ScopeElement::zellij_session("infra"), vec![]),
+        ];
+        let signals = signals_from(&resolved);
+        assert_eq!(signals.len(), 1);
+        assert!(matches!(signals[0].reason, crate::model::SignalReason::Repo(crate::model::RepoReason::NonDefaultBranch)));
+        assert_eq!(signals[0].urgency, crate::model::Urgency::Warning);
+        assert_eq!(signals[0].detail.as_deref(), Some("on \"feature/foo\", default is \"main\""));
+        match &signals[0].action {
+            Some(crate::model::SignalAction::FocusRepoPane { session, path }) => {
+                assert_eq!(session, "infra");
+                assert_eq!(path, "/Users/bmiller/src/infra");
+            }
+            other => panic!("expected FocusRepoPane action, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn non_default_branch_signal_missing_data_fields_produces_no_signal() {
+        let resolved = vec![(
+            ScopeElement::repo("/Users/bmiller/src/infra"),
+            vec![Observation { kind: KIND_GIT_NON_DEFAULT_BRANCH.to_string(), data: serde_json::json!({}) }],
+        )];
+        assert!(signals_from(&resolved).is_empty());
     }
 
     #[test]

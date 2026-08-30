@@ -167,6 +167,7 @@
 
   function reasonLabel(signal) {
     if (signal.reason === "pending_commit") return "pending commit";
+    if (signal.reason === "non_default_branch") return "non-default branch";
     if (signal.reason === "active") return "running";
     if (signal.reason === "awaiting") return "idle";
     if (signal.reason === "ready") return "ready";

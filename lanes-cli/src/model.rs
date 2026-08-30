@@ -150,6 +150,12 @@ pub enum ClaudeSessionReason {
 #[serde(rename_all = "snake_case")]
 pub enum RepoReason {
     PendingCommit,
+    /// The checked-out branch isn't the repo's actual default (origin/HEAD,
+    /// or a local main/master fallback - see lib.rs's git_default_branch).
+    /// Only ever produced when they genuinely differ - there's no config
+    /// toggle to show/hide this per se, it's just never generated at all
+    /// when you're already on the default branch.
+    NonDefaultBranch,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -217,6 +223,12 @@ impl SignalReason {
             SignalReason::ClaudeSession(ClaudeSessionReason::Ready) => Urgency::Attention,
             SignalReason::ClaudeSession(ClaudeSessionReason::Active) => Urgency::Info,
             SignalReason::Repo(RepoReason::PendingCommit) => Urgency::Attention,
+            // Warning, not Attention/"ready" - Attention's redefined
+            // meaning in this palette is "positive, ready for you," which
+            // fits uncommitted work fine but not "you might be on the
+            // wrong branch." Same tier as SessionNotRunning: worth
+            // noticing, not blocking anything.
+            SignalReason::Repo(RepoReason::NonDefaultBranch) => Urgency::Warning,
             SignalReason::Lanes(LanesReason::SessionMissing) => Urgency::Blocking,
             SignalReason::Lanes(LanesReason::SessionNotRunning) => Urgency::Warning,
         }

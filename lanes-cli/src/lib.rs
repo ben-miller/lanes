@@ -45,13 +45,13 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
     let (layouts, pane_positions, git_status): (
         HashMap<String, model::TerminalShape>,
         HashMap<String, HashMap<u32, (usize, i64, i64)>>,
-        HashMap<String, bool>,
+        HashMap<String, RepoStatus>,
     ) = std::thread::scope(|scope| {
         let pane_handles: Vec<_> = running_sessions.into_iter()
             .map(|s| (s.to_string(), scope.spawn(move || drivers::zellij::shape_and_positions_for_session(s))))
             .collect();
         let git_handles: Vec<_> = repo_paths.into_iter()
-            .map(|p| (p.clone(), scope.spawn(move || git_has_changes(&p))))
+            .map(|p| (p.clone(), scope.spawn(move || git_repo_status(&p))))
             .collect();
 
         let mut layouts = HashMap::new();
@@ -62,7 +62,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             pane_positions.insert(s, positions);
         }
         let git_status = git_handles.into_iter()
-            .map(|(p, handle)| (p, handle.join().unwrap_or(false)))
+            .map(|(p, handle)| (p, handle.join().unwrap_or_default()))
             .collect();
         (layouts, pane_positions, git_status)
     });
@@ -95,12 +95,17 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
                     ));
                 }
             } else if let Some(path) = el.repo_path() {
-                let dirty = git_status.get(&expand_tilde(path)).copied().unwrap_or(false);
-                let obs = if dirty {
-                    vec![scope::Observation { kind: scope::KIND_GIT_DIRTY.to_string(), data: serde_json::json!({}) }]
-                } else {
-                    vec![]
-                };
+                let status = git_status.get(&expand_tilde(path));
+                let mut obs = Vec::new();
+                if status.is_some_and(|s| s.dirty) {
+                    obs.push(scope::Observation { kind: scope::KIND_GIT_DIRTY.to_string(), data: serde_json::json!({}) });
+                }
+                if let Some((current, default)) = status.and_then(|s| s.non_default_branch.as_ref()) {
+                    obs.push(scope::Observation {
+                        kind: scope::KIND_GIT_NON_DEFAULT_BRANCH.to_string(),
+                        data: serde_json::json!({ "current": current, "default": default }),
+                    });
+                }
                 resolved.push((el.clone(), obs));
             }
         }
@@ -424,6 +429,77 @@ pub(crate) fn git_has_changes(path: &str) -> bool {
         return false;
     };
     out.status.success() && !out.stdout.is_empty()
+}
+
+/// The checked-out branch, or `None` for a detached HEAD (matches git's own
+/// terminology for that state - "HEAD" isn't a real branch name worth
+/// surfacing as one) or a repo git itself couldn't answer for.
+fn git_current_branch(path: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", path, "symbolic-ref", "--short", "-q", "HEAD"])
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if branch.is_empty() { None } else { Some(branch) }
+}
+
+/// The repo's actual default branch - `origin/HEAD`, the same pointer
+/// GitHub/GitLab set on clone, so this needs no per-repo config of our own
+/// to know "main" isn't universal (some repos really do use "master",
+/// "trunk", etc). Falls back to a local "main" or "master" branch (in that
+/// order) if origin/HEAD is stale or the repo has no remote at all - `None`
+/// (not a guess) if neither resolves, since a wrong guess here would create
+/// false-positive "wrong branch" signals, worse than just not supporting
+/// that repo yet.
+fn git_default_branch(path: &str) -> Option<String> {
+    let out = std::process::Command::new("git")
+        .args(["-C", path, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"])
+        .output()
+        .ok()?;
+    if out.status.success() {
+        let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if let Some(branch) = full.strip_prefix("origin/") {
+            if !branch.is_empty() {
+                return Some(branch.to_string());
+            }
+        }
+    }
+    for candidate in ["main", "master"] {
+        let exists = std::process::Command::new("git")
+            .args(["-C", path, "show-ref", "--verify", "--quiet", &format!("refs/heads/{candidate}")])
+            .status()
+            .is_ok_and(|s| s.success());
+        if exists {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+/// The two facts gather_lanes() needs about one repo, fetched together
+/// since both are just separate `git` subprocess round-trips against the
+/// same repo - one closure per repo in the concurrent batch, not two,
+/// avoiding doubling the subprocess count this session already worked to
+/// cut down (see the Diagnostics section of the README).
+#[derive(Default)]
+pub(crate) struct RepoStatus {
+    pub dirty: bool,
+    /// (current, default) if the checked-out branch differs from the
+    /// repo's actual default - None if they match, or if the default
+    /// couldn't be determined at all (see git_default_branch).
+    pub non_default_branch: Option<(String, String)>,
+}
+
+pub(crate) fn git_repo_status(path: &str) -> RepoStatus {
+    let dirty = git_has_changes(path);
+    let non_default_branch = git_default_branch(path).and_then(|default| {
+        let current = git_current_branch(path).unwrap_or_else(|| "detached HEAD".to_string());
+        (current != default).then_some((current, default))
+    });
+    RepoStatus { dirty, non_default_branch }
 }
 
 pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
@@ -976,6 +1052,94 @@ fn expand_tilde(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A real scratch git repo (not a mock) with a single commit on
+    /// `main`, no remote - init/commit are cheap and deterministic, and
+    /// this exercises the actual `git` subprocess calls git_current_branch/
+    /// git_default_branch/git_repo_status make, same as
+    /// write_then_read_cached_panes_round_trips_within_ttl's real-I/O
+    /// pattern in drivers::zellij's tests. Caller is responsible for
+    /// removing the returned path when done.
+    fn scratch_git_repo(initial_branch: &str) -> std::path::PathBuf {
+        // cargo test runs tests in parallel on separate threads within the
+        // same process - keying only on (pid, branch name) let two tests
+        // that happen to use the same branch name (e.g. multiple "main"
+        // repos) race on the same directory. Thread id is unique per test
+        // thread, closing that gap.
+        let thread_id = format!("{:?}", std::thread::current().id());
+        let safe_thread_id: String = thread_id.chars().filter(|c| c.is_alphanumeric()).collect();
+        let dir = std::env::temp_dir().join(format!(
+            "lanes-test-repo-{}-{}-{}",
+            std::process::id(),
+            safe_thread_id,
+            initial_branch
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let git = |args: &[&str]| {
+            let status = std::process::Command::new("git")
+                .args(["-C", dir.to_str().unwrap()])
+                .args(args)
+                .status()
+                .expect("git command should run");
+            assert!(status.success(), "git {args:?} failed");
+        };
+        git(&["init", "--quiet", "--initial-branch", initial_branch]);
+        git(&["config", "user.email", "test@example.com"]);
+        git(&["config", "user.name", "Test"]);
+        std::fs::write(dir.join("f.txt"), "content").unwrap();
+        git(&["add", "f.txt"]);
+        git(&["commit", "--quiet", "-m", "init"]);
+        dir
+    }
+
+    #[test]
+    fn git_current_branch_reads_the_real_checked_out_branch() {
+        let dir = scratch_git_repo("feature-xyz");
+        assert_eq!(git_current_branch(dir.to_str().unwrap()), Some("feature-xyz".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_default_branch_falls_back_to_local_main_without_a_remote() {
+        // No origin/HEAD to consult (no remote at all) - falls back to the
+        // local "main" branch existing, per git_default_branch's fallback
+        // chain, rather than returning None just because there's no remote.
+        let dir = scratch_git_repo("main");
+        assert_eq!(git_default_branch(dir.to_str().unwrap()), Some("main".to_string()));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_default_branch_is_none_when_neither_remote_nor_local_fallback_resolves() {
+        // Neither origin/HEAD nor a local main/master exists - must not
+        // guess "main" anyway, since a wrong guess here creates a false
+        // "wrong branch" signal, worse than not supporting this repo yet.
+        let dir = scratch_git_repo("some-other-name");
+        assert_eq!(git_default_branch(dir.to_str().unwrap()), None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_repo_status_flags_non_default_branch_against_a_real_repo() {
+        let dir = scratch_git_repo("main");
+        std::process::Command::new("git")
+            .args(["-C", dir.to_str().unwrap(), "checkout", "--quiet", "-b", "feature-xyz"])
+            .status()
+            .unwrap();
+        let status = git_repo_status(dir.to_str().unwrap());
+        assert_eq!(status.non_default_branch, Some(("feature-xyz".to_string(), "main".to_string())));
+        assert!(!status.dirty);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn git_repo_status_has_no_branch_signal_when_already_on_default() {
+        let dir = scratch_git_repo("main");
+        let status = git_repo_status(dir.to_str().unwrap());
+        assert_eq!(status.non_default_branch, None);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     fn pane(cwd: Option<&str>) -> model::PaneInfo {
         model::PaneInfo { command: None, focused: false, cwd: cwd.map(String::from) }
