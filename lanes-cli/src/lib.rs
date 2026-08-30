@@ -675,6 +675,15 @@ pub fn notify_switch_edit_mode(enabled: bool) {
     notify_switch_socket(&format!("edit-mode:{enabled}\n"));
 }
 
+/// Tells an already-running app to briefly pulse acknowledgment of a
+/// show-inactive keypress that had no effect (edit mode was on - see
+/// `ToggleShowInactive`, which never writes the value in that case). No
+/// value rides along; this is purely "you pressed something, here's why
+/// nothing changed."
+pub fn notify_switch_show_inactive_noop() {
+    notify_switch_socket("show-inactive-noop\n");
+}
+
 /// Cycle to the next (direction=1) or previous (direction=-1) live Claude
 /// session, ordered to match lanes.toml's `order` (same ordering the display
 /// uses), and within a shared Zellij session by each session's on-screen

@@ -352,9 +352,26 @@ fn main() {
         }
 
         Command::ToggleShowInactive => {
-            let show = !lanes::state::read_show_inactive();
-            lanes::state::set_show_inactive(show);
-            println!("{}", show);
+            // Blocked outright while edit mode is on, not just visually
+            // deferred - edit mode already shows every lane regardless of
+            // this preference (see App.svelte's visibleLanes), so there's
+            // nothing for it to affect right now. The value must not
+            // change at all here, not change-but-not-render: writing it
+            // anyway and only skipping the redraw meant the preference had
+            // already silently flipped by the time edit mode was left.
+            // Pings the running app to acknowledge the keypress (a brief
+            // border pulse - see App.svelte) rather than surfacing this as
+            // a Hammerspoon error alert: it's not a failure, it's a
+            // real no-op, and a system alert is a much louder signal than
+            // this deserves.
+            if lanes::state::read_edit_mode() {
+                lanes::notify_switch_show_inactive_noop();
+                println!("no-op: edit mode is on");
+            } else {
+                let show = !lanes::state::read_show_inactive();
+                lanes::state::set_show_inactive(show);
+                println!("{}", show);
+            }
         }
 
         Command::ShowSwitch => {

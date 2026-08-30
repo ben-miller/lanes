@@ -17,6 +17,7 @@ use tauri::{Emitter, Manager};
 fn start_switch_socket(
     handle: tauri::AppHandle,
     edit_mode_item: CheckMenuItem<tauri::Wry>,
+    show_inactive_item: CheckMenuItem<tauri::Wry>,
     last_applied_edit_mode: Arc<AtomicBool>,
 ) {
     let home = std::env::var("HOME").unwrap_or_default();
@@ -63,9 +64,11 @@ fn start_switch_socket(
                         // redundant second show()/set_focus() call - visible
                         // as a flicker, not just wasted work.
                         if last_applied_edit_mode.swap(enabled, Ordering::SeqCst) != enabled {
-                            apply_edit_mode(&handle, &edit_mode_item, enabled);
+                            apply_edit_mode(&handle, &edit_mode_item, &show_inactive_item, enabled);
                         }
                     }
+                } else if line == "show-inactive-noop" {
+                    handle.emit("show-inactive-noop", ()).ok();
                 }
             }
         }
@@ -326,11 +329,22 @@ fn apply_pin(app: &tauri::AppHandle, pin_item: &CheckMenuItem<tauri::Wry>, pinne
 /// just back in its plain read-only form. Turning it on does raise the
 /// window though, same as pin: the hypo+E shortcut is meant to work from
 /// anywhere, not just while Lanes Switch already happens to be visible.
-/// Doesn't touch show-inactive at all - the frontend's own filter (see
-/// App.svelte's visibleLanes) already shows everything while editMode is
-/// on, so there's nothing to force or restore on this side.
-fn apply_edit_mode(app: &tauri::AppHandle, edit_mode_item: &CheckMenuItem<tauri::Wry>, enabled: bool) {
+/// Doesn't touch show-inactive's *value* at all - the frontend's own filter
+/// (see App.svelte's visibleLanes) already shows everything while editMode
+/// is on, so there's nothing to force or restore on this side. It does
+/// disable the tray item, though: show-inactive genuinely can't do
+/// anything right now (same reasoning), and `ToggleShowInactive` in the CLI
+/// refuses to change the value at all while edit mode is on - disabling
+/// the checkbox here keeps that same rule visible and true from the tray
+/// too, rather than leaving a clickable control that silently does nothing.
+fn apply_edit_mode(
+    app: &tauri::AppHandle,
+    edit_mode_item: &CheckMenuItem<tauri::Wry>,
+    show_inactive_item: &CheckMenuItem<tauri::Wry>,
+    enabled: bool,
+) {
     let _ = edit_mode_item.set_checked(enabled);
+    let _ = show_inactive_item.set_enabled(!enabled);
     if enabled {
         if let Some(win) = app.get_webview_window("main") {
             let _ = win.show();
@@ -404,7 +418,7 @@ fn watch_paths(
                     }
                     let edit_mode = lanes::state::read_edit_mode();
                     if last_applied_edit_mode.swap(edit_mode, Ordering::SeqCst) != edit_mode {
-                        apply_edit_mode(&handle, &edit_mode_item, edit_mode);
+                        apply_edit_mode(&handle, &edit_mode_item, &show_inactive_item, edit_mode);
                     }
                     let show_inactive = lanes::state::read_show_inactive();
                     if show_inactive != last_show_inactive {
@@ -466,7 +480,12 @@ pub fn run() {
                 show_inactive_item.clone(),
                 last_applied_edit_mode.clone(),
             );
-            start_switch_socket(app.handle().clone(), edit_mode_item.clone(), last_applied_edit_mode.clone());
+            start_switch_socket(
+                app.handle().clone(),
+                edit_mode_item.clone(),
+                show_inactive_item.clone(),
+                last_applied_edit_mode.clone(),
+            );
             apply_pin(app.handle(), &pin_item, pinned_at_startup);
 
             let pin_item_for_handler = pin_item.clone();
@@ -497,7 +516,7 @@ pub fn run() {
                         if let Ok(enabled) = edit_mode_item_for_handler.is_checked() {
                             lanes::state::set_edit_mode(enabled);
                             last_applied_edit_mode_for_handler.store(enabled, Ordering::SeqCst);
-                            apply_edit_mode(app, &edit_mode_item_for_handler, enabled);
+                            apply_edit_mode(app, &edit_mode_item_for_handler, &show_inactive_item_for_handler, enabled);
                         }
                     } else if event.id.0.as_str() == "quit" {
                         app.exit(0);

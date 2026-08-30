@@ -91,6 +91,7 @@
   let unlistenFocus;
   let unlistenEditMode;
   let unlistenShowInactive;
+  let unlistenShowInactiveNoop;
 
   // state.kdl's edit-mode/show-inactive fields are the source of truth (see
   // src-tauri) - these mirror them locally rather than owning them, so the
@@ -117,9 +118,23 @@
     invoke("log_ui_event", { event: "ui.edit_mode_apply.resized", detail: `enabled=${enabled}` });
   }
 
-  // Border pulse, not a resize - restarted by toggling the class off then
-  // back on across a tick (CSS animations don't replay on a class that's
-  // already applied).
+  // Can't actually happen while editMode is on - the CLI's
+  // ToggleShowInactive refuses to change the value at all in that case (see
+  // pulseAcknowledge below for what fires instead), and the tray checkbox
+  // is disabled too (see apply_edit_mode) - so this never needs to guard
+  // against or acknowledge a same-but-not-rendered case.
+  async function applyShowInactive(show) {
+    if (show === showInactive) return;
+    showInactive = show;
+    await tick();
+    await resizeToContent();
+  }
+
+  // Border pulse acknowledging a show-inactive keypress that had no effect
+  // (edit mode was on - see ToggleShowInactive, which never sends
+  // show-inactive-changed in that case, only this). Restarted by toggling
+  // the class off then back on across a tick, since a CSS animation won't
+  // replay on a class that's already applied.
   let pulseNoop = false;
   let pulseNoopTimer;
 
@@ -130,22 +145,6 @@
       clearTimeout(pulseNoopTimer);
       pulseNoopTimer = setTimeout(() => { pulseNoop = false; }, 300);
     });
-  }
-
-  async function applyShowInactive(show) {
-    if (show === showInactive) return;
-    showInactive = show;
-    // In edit mode every lane is already shown regardless of showInactive
-    // (see visibleLanes) - the row list genuinely won't change, so there's
-    // nothing to resize toward. Without some acknowledgment this reads as
-    // "the keypress did nothing," when really it just took effect
-    // invisibly and will show once edit mode is left.
-    if (editMode) {
-      pulseAcknowledge();
-      return;
-    }
-    await tick();
-    await resizeToContent();
   }
 
   function setEditMode(enabled) {
@@ -167,6 +166,7 @@
     showInactive = await invoke("get_show_inactive");
     unlistenEditMode = await listen("edit-mode-changed", (event) => applyEditMode(event.payload));
     unlistenShowInactive = await listen("show-inactive-changed", (event) => applyShowInactive(event.payload));
+    unlistenShowInactiveNoop = await listen("show-inactive-noop", () => pulseAcknowledge());
     unlistenSessions = await listen("sessions-changed", () => refresh());
     // Fires immediately on a lane/session change (see lib.rs) - update both
     // highlights right away instead of waiting on the slower full refresh
@@ -215,6 +215,7 @@
     if (unlistenFocus) unlistenFocus();
     if (unlistenEditMode) unlistenEditMode();
     if (unlistenShowInactive) unlistenShowInactive();
+    if (unlistenShowInactiveNoop) unlistenShowInactiveNoop();
   });
 
   function allSignals(lane) {
@@ -519,15 +520,15 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
+    /* No visible background/border of its own - this exists so the
+       pulse-noop outline below (which follows the element's own
+       border-radius) comes out rounded instead of a hard square. */
     border-radius: 8px;
   }
-  /* Acknowledges a keypress that had no visible effect - toggling
-     show-inactive while editMode is already on, which already shows every
-     lane regardless (see visibleLanes). Without this, that keypress reads
-     as "did nothing" even though it registered and will show once edit
-     mode is left. A brief border pulse, not a banner/toast - same
-     restrained language as the focus ring, and it doesn't imply the row
-     list changed, because it didn't. */
+  /* Acknowledges a show-inactive keypress that had no effect (edit mode was
+     on - see ToggleShowInactive). A brief outline pulse, not a banner or
+     system alert - same restrained language as the focus ring, offset
+     outward so it doesn't sit flush against the lane rows' own borders. */
   .panel.pulse-noop {
     outline: 2px solid transparent;
     outline-offset: 6px;
