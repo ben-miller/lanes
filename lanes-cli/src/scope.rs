@@ -229,7 +229,7 @@ pub fn signals_from(resolved: &[(ScopeElement, Vec<Observation>)]) -> Vec<crate:
 }
 
 fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<&str>) -> Option<crate::model::Signal> {
-    use crate::model::{Signal, SignalAction, SignalReason};
+    use crate::model::{Signal, SignalAction, SignalKind, SignalReason};
 
     match (element, obs.kind.as_str()) {
         (ScopeElement::Repo { .. }, KIND_GIT_DIRTY) => {
@@ -242,20 +242,33 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
                 session: session.to_string(),
                 path: path.to_string(),
             });
-            Some(Signal { reason: SignalReason::PendingCommit, urgency: SignalReason::PendingCommit.urgency(), action })
+            Some(Signal {
+                kind: SignalKind::Repo,
+                reason: SignalReason::PendingCommit,
+                urgency: SignalReason::PendingCommit.urgency(),
+                // Placeholder - gather_lanes() corrects this once the
+                // lane's cyclable fact is known (see Signal::cyclable). A
+                // repo signal is never actually cyclable regardless.
+                cyclable: false,
+                action,
+            })
         }
 
         (ScopeElement::ClaudeSession { .. }, KIND_CLAUDE_SESSION_STATE) => {
             let session_id = element.claude_session_id()?;
             let state = obs.data.get("state").and_then(|v| v.as_str()).unwrap_or("");
             let reason = match state {
-                "idle" => SignalReason::ClaudeSessionAwaiting,
-                "permission_pending" => SignalReason::ClaudeSessionPermission,
-                _ => SignalReason::ClaudeSessionActive,
+                "idle" => SignalReason::Awaiting,
+                "permission_pending" => SignalReason::Permission,
+                _ => SignalReason::Active,
             };
             Some(Signal {
+                kind: SignalKind::ClaudeSession,
                 urgency: reason.urgency(),
                 reason,
+                // Placeholder - gather_lanes() corrects this once the
+                // lane's cyclable fact is known (see Signal::cyclable).
+                cyclable: false,
                 action: Some(SignalAction::SwitchClaudeSession { session_id: session_id.to_string() }),
             })
         }
@@ -456,10 +469,10 @@ mod tests {
     #[test]
     fn claude_session_state_maps_to_matching_reason() {
         let cases = [
-            ("idle", "claude_session_awaiting"),
-            ("permission_pending", "claude_session_permission"),
-            ("busy", "claude_session_active"),
-            ("running", "claude_session_active"),
+            ("idle", "awaiting"),
+            ("permission_pending", "permission"),
+            ("busy", "active"),
+            ("running", "active"),
         ];
         for (state, expected_reason) in cases {
             let resolved = vec![(

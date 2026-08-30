@@ -57,21 +57,52 @@ pub enum SignalAction {
     FocusRepoPane { session: String, path: String },
 }
 
+/// Which domain a signal is about - a real, queryable field rather than
+/// just a naming convention baked into `SignalReason`'s variant names, so a
+/// consumer (the UI's kind pill, in particular) can group/label signals
+/// without string-matching `reason`. `Lanes` is distinct from the other two:
+/// it's Lanes reporting a fact about its own tracking (e.g. a lane whose
+/// Zellij session has no cached WezTerm tab), not relaying an observation
+/// from an external tool the way ClaudeSession/Repo signals do.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignalKind {
+    ClaudeSession,
+    Repo,
+    Lanes,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Signal {
+    pub kind: SignalKind,
     pub reason: SignalReason,
     pub urgency: Urgency,
+    // Whether this specific signal is something `sessions next`/`prev`
+    // would actually land on - see lib.rs's signal_cyclable(). Not known at
+    // construction time (signal_for() builds signals before a lane's
+    // reachability is resolved), so every construction site sets this to
+    // `false` as a placeholder; gather_lanes() corrects it once the lane's
+    // own cyclable fact is known. Never trust this field on a Signal that
+    // didn't pass through that correction pass.
+    pub cyclable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<SignalAction>,
 }
 
+// Variant names no longer repeat their SignalKind prefix (was
+// ClaudeSessionActive/Awaiting/Permission) - `kind` carries that now, so the
+// reason only needs to say what's true within that domain.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalReason {
     PendingCommit,
-    ClaudeSessionActive,
-    ClaudeSessionAwaiting,
-    ClaudeSessionPermission,
+    Active,
+    Awaiting,
+    Permission,
+    /// See `SignalKind::Lanes` - a lane that's active but whose Zellij
+    /// session has no cached WezTerm tab, so there's nothing for a switch
+    /// to actually land on.
+    SessionMissing,
 }
 
 // Declared least to most urgent so derived Ord/PartialOrd rank them
@@ -95,9 +126,9 @@ pub enum Urgency {
 impl SignalReason {
     pub fn urgency(&self) -> Urgency {
         match self {
-            SignalReason::ClaudeSessionPermission => Urgency::Blocking,
-            SignalReason::ClaudeSessionAwaiting | SignalReason::PendingCommit => Urgency::Attention,
-            SignalReason::ClaudeSessionActive => Urgency::Info,
+            SignalReason::Permission | SignalReason::SessionMissing => Urgency::Blocking,
+            SignalReason::Awaiting | SignalReason::PendingCommit => Urgency::Attention,
+            SignalReason::Active => Urgency::Info,
         }
     }
 }
@@ -165,13 +196,13 @@ pub struct LaneSnapshot {
     pub id: String,
     pub name: String,
     pub active: bool,
-    // True when this lane is active but its Zellij session isn't actually
-    // running - a lane you think is part of your working set but whose
-    // terminal doesn't really exist. Distinct from `active` (a config
-    // choice) and from a Terminal facet's own `running` (which the UI would
-    // otherwise have to reach into facets to check) - computed once here so
-    // the frontend just reads one bool per lane.
-    pub session_missing: bool,
+    // Whether this lane would actually be visited by `sessions next`/`prev`
+    // right now - active, reachable, and hosting at least one live Claude
+    // session. Computed in gather_lanes() via the same
+    // reachable_lane_decision() cycle_claude_session's own filter uses, not
+    // a UI-side guess re-derived from `active`/`facets` - see that
+    // function's doc comment.
+    pub cyclable: bool,
     pub facets: Vec<FacetSnapshot>,
 }
 

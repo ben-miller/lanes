@@ -152,9 +152,53 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             zone: w.zone.clone(),
         }));
 
-        let session_missing = lane_session_missing(lane.active, &facets);
+        let reachable = lane_reachable(&facets);
 
-        model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), active: lane.active, session_missing, facets }
+        // Session-missing used to be its own bool field on LaneSnapshot,
+        // read separately from every other "this needs you" fact. It's just
+        // another signal now (kind: Lanes) - pushed into the Terminal
+        // facet's own signals list, the same place every other signal for
+        // this lane already lives, so the UI has exactly one list to read
+        // instead of a list plus a special-cased bool.
+        if lane_session_missing(lane.active, reachable) {
+            if let Some(model::FacetSnapshot::Terminal { signals, .. }) =
+                facets.iter_mut().find(|f| matches!(f, model::FacetSnapshot::Terminal { .. }))
+            {
+                signals.push(model::Signal {
+                    kind: model::SignalKind::Lanes,
+                    reason: model::SignalReason::SessionMissing,
+                    urgency: model::SignalReason::SessionMissing.urgency(),
+                    // Never actually cyclable (kind != ClaudeSession) - set
+                    // properly below along with everything else, this is
+                    // just the same placeholder every construction site uses.
+                    cyclable: false,
+                    action: None,
+                });
+            }
+        }
+
+        let has_claude_signal = facets.iter()
+            .any(|f| f.signals().iter().any(|s| s.kind == model::SignalKind::ClaudeSession));
+        let cyclable = lane_cyclable(lane.active, reachable, has_claude_signal);
+
+        // Every signal was constructed with cyclable=false as a placeholder
+        // (signal_for() runs before a lane's own reachability is known) -
+        // correct them all now that lane-level cyclable is known, so the UI
+        // reads this straight off each signal instead of re-deriving "is
+        // this specific chip something a cycle would land on" from
+        // signal.kind and lane.cyclable itself.
+        for facet in facets.iter_mut() {
+            let signals = match facet {
+                model::FacetSnapshot::Terminal { signals, .. } => signals,
+                model::FacetSnapshot::Repo { signals, .. } => signals,
+                model::FacetSnapshot::Window { .. } => continue,
+            };
+            for s in signals.iter_mut() {
+                s.cyclable = signal_cyclable(s.kind, cyclable);
+            }
+        }
+
+        model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), active: lane.active, cyclable, facets }
     }).collect();
 
     logging::perf("gather_lanes.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
@@ -169,8 +213,9 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
 
 /// A lane you're treating as active, but that isn't actually reachable
 /// right now - distinct from an inactive lane (a deliberate choice, nothing
-/// "wrong" about it) and from a lane with no terminal facet at all (nothing
-/// to be missing). Only meaningful for lanes that declare a terminal.
+/// "wrong" about it) and from a lane with no terminal facet at all (`None`,
+/// from `lane_reachable` - nothing to be missing). Only meaningful for lanes
+/// that declare a terminal.
 ///
 /// "Reachable" means state.kdl has a cached wezterm-tab-id for this
 /// session - not whether the Zellij session itself is alive, and not a
@@ -181,19 +226,51 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
 /// `lanes` itself trusts the cache rather than re-deriving liveness by
 /// polling WezTerm - the tool that owns the tab already knows the truth
 /// the instant it changes, so there's nothing to rediscover.
-fn lane_session_missing(active: bool, facets: &[model::FacetSnapshot]) -> bool {
-    let Some(session) = facets.iter().find_map(|f| match f {
-        model::FacetSnapshot::Terminal { session, .. } => Some(session.as_str()),
-        _ => None,
-    }) else {
-        return false;
-    };
-    let reachable = state::get_wezterm_tab_id(session).is_some();
-    lane_session_missing_decision(active, reachable)
+fn lane_session_missing(active: bool, reachable: Option<bool>) -> bool {
+    reachable.is_some_and(|r| lane_session_missing_decision(active, r))
 }
 
 fn lane_session_missing_decision(active: bool, reachable: bool) -> bool {
     active && !reachable
+}
+
+/// This lane's terminal reachability - state.kdl has a cached WezTerm
+/// tab-id for its Zellij session - or None if it has no terminal facet at
+/// all (nothing to be reachable or not). The single place that reads
+/// state.kdl for this fact; both `lane_session_missing` and gather_lanes()'s
+/// `cyclable` computation go through it rather than each re-deriving
+/// reachability their own way.
+fn lane_reachable(facets: &[model::FacetSnapshot]) -> Option<bool> {
+    let session = facets.iter().find_map(|f| match f {
+        model::FacetSnapshot::Terminal { session, .. } => Some(session.as_str()),
+        _ => None,
+    })?;
+    Some(state::get_wezterm_tab_id(session).is_some())
+}
+
+/// Whether this lane would actually be visited by `sessions next`/`prev`
+/// right now. Reuses `reachable_lane_decision()` - the exact same pure
+/// function `session_belongs_to_reachable_lane()` filters
+/// `cycle_claude_session`'s live-session list through - rather than the UI
+/// re-deriving an equivalent-looking rule of its own that could silently
+/// drift from the real cycling behavior over time. Having a live Claude
+/// session is the other half: a reachable lane with only a pending-commit
+/// signal still has nothing for a cycle to land on.
+fn lane_cyclable(active: bool, reachable: Option<bool>, has_claude_signal: bool) -> bool {
+    reachable.is_some_and(|r| reachable_lane_decision(active, r)) && has_claude_signal
+}
+
+/// Whether one specific signal is something `sessions next`/`prev` would
+/// actually land on. `cycle_claude_session` only ever collects live Claude
+/// sessions (`drivers::claude::enumerate()`) - it never looks at repo or
+/// lanes-kind facts at all, regardless of a lane's own reachability - so a
+/// signal can only be cyclable if it's a ClaudeSession-kind one *and* its
+/// lane is cyclable. Every ClaudeSession signal shown under a given lane
+/// belongs to that lane by construction (gather_lanes() only ever resolves
+/// a lane's own zellij session's live sessions into it), so there's no
+/// further per-session check beyond the lane's own cyclable fact.
+fn signal_cyclable(kind: model::SignalKind, lane_cyclable: bool) -> bool {
+    kind == model::SignalKind::ClaudeSession && lane_cyclable
 }
 
 /// drivers::claude::enumerate() grouped by zellij session, for the lanes
@@ -1012,12 +1089,64 @@ mod tests {
     }
 
     #[test]
-    fn active_lane_with_no_terminal_facet_is_not_session_missing() {
+    fn repo_only_facets_have_no_reachability_to_speak_of() {
         // A repo-only lane has no session to be missing in the first place -
-        // this goes through the real lane_session_missing() (not the pure
-        // decision fn below) specifically to confirm it never even reaches
-        // for state.kdl when there's no terminal facet at all.
-        assert!(!lane_session_missing(true, &[model::FacetSnapshot::Repo { path: "/a/b".to_string(), signals: vec![] }]));
+        // this goes through the real lane_reachable() (not a mock) to
+        // confirm it never even reaches for state.kdl when there's no
+        // terminal facet at all, just returns None.
+        assert_eq!(lane_reachable(&[model::FacetSnapshot::Repo { path: "/a/b".to_string(), signals: vec![] }]), None);
+    }
+
+    #[test]
+    fn lane_session_missing_is_false_when_reachability_is_unknown() {
+        assert!(!lane_session_missing(true, None));
+    }
+
+    #[test]
+    fn active_reachable_lane_with_a_claude_session_is_cyclable() {
+        assert!(lane_cyclable(true, Some(true), true));
+    }
+
+    #[test]
+    fn reachable_lane_with_only_a_repo_signal_is_not_cyclable() {
+        // Nothing for a cycle to land on - matches
+        // session_belongs_to_reachable_lane() only ever filtering live
+        // Claude sessions in the first place.
+        assert!(!lane_cyclable(true, Some(true), false));
+    }
+
+    #[test]
+    fn inactive_lane_is_never_cyclable_even_with_a_claude_session() {
+        assert!(!lane_cyclable(false, Some(true), true));
+    }
+
+    #[test]
+    fn unreachable_lane_is_never_cyclable_even_with_a_claude_session() {
+        assert!(!lane_cyclable(true, Some(false), true));
+    }
+
+    #[test]
+    fn lane_with_unknown_reachability_is_not_cyclable() {
+        assert!(!lane_cyclable(true, None, true));
+    }
+
+    #[test]
+    fn claude_session_signal_in_a_cyclable_lane_is_cyclable() {
+        assert!(signal_cyclable(model::SignalKind::ClaudeSession, true));
+    }
+
+    #[test]
+    fn claude_session_signal_in_a_non_cyclable_lane_is_not_cyclable() {
+        assert!(!signal_cyclable(model::SignalKind::ClaudeSession, false));
+    }
+
+    #[test]
+    fn repo_and_lanes_signals_are_never_cyclable_even_in_a_cyclable_lane() {
+        // cycle_claude_session only ever collects live Claude sessions -
+        // a pending-commit or session-missing signal is never something a
+        // cycle would land on, regardless of the lane's own cyclable fact.
+        assert!(!signal_cyclable(model::SignalKind::Repo, true));
+        assert!(!signal_cyclable(model::SignalKind::Lanes, true));
     }
 
     // The rest go through the pure decision fn directly, not lane_session_missing()
