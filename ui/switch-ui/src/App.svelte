@@ -41,7 +41,20 @@
     try {
       snapshot = await invoke("get_snapshot");
       await tick();
-      await resizeToContent();
+      // Never resize/reposition the window while the overlay is showing -
+      // clicking a signal opens the overlay, then immediately calls
+      // refresh(), which used to resize the window right underneath it.
+      // Programmatic win.setSize()/setPosition() on macOS can produce a
+      // spurious momentary focus loss, and the focus-guard (see onMount)
+      // treats any click landing during that window as "just focus the
+      // window," swallowing it rather than letting it reach a button's
+      // on:click - which is exactly what made the dismiss button
+      // intermittently do nothing right after opening an overlay. Skipped
+      // here regardless of whether that's the full mechanism, since
+      // resizing out from under an open modal is bad UX either way; the
+      // deferred call in dismissOverlay()/copyErrorReport's flow catches
+      // up once the overlay actually closes.
+      if (!activeSignal) await resizeToContent();
     } finally {
       invoke("log_ui_event", { event: "ui.refresh.done", detail: `elapsed_ms=${(performance.now() - t0).toFixed(1)}` });
       refreshInFlight = false;
@@ -158,7 +171,7 @@
     if (signal.reason === "awaiting") return "idle";
     if (signal.reason === "permission") return "permission";
     if (signal.reason === "session_missing") return "session missing";
-    if (signal.reason === "session_not_running") return "not running";
+    if (signal.reason === "session_not_running") return "no zellij session";
     return signal.reason;
   }
 
@@ -205,6 +218,10 @@
 
   function dismissOverlay() {
     activeSignal = null;
+    // Catch up on any resize that was skipped in refresh() while this
+    // overlay was open (see the comment there) - window content may have
+    // changed lane count/signal count during that time.
+    resizeToContent();
   }
 
   async function copyErrorReport() {
@@ -274,10 +291,10 @@
         <div class="overlay-action">no action</div>
       {/if}
       {#if activeSignal.status}
-        <div class="overlay-status" class:ok={activeSignal.status === 'ok'}>{activeSignal.status}</div>
+        <div class="overlay-status">{activeSignal.status}</div>
       {/if}
       <div class="overlay-buttons">
-        {#if activeSignal.status && activeSignal.status !== 'ok'}
+        {#if activeSignal.status}
           <button class="overlay-copy" title="copy error" on:click={copyErrorReport}>⧉</button>
         {/if}
         <button class="overlay-dismiss" on:click={dismissOverlay}>dismiss</button>
@@ -543,7 +560,6 @@
     color: var(--block-fg);
     word-break: break-all;
   }
-  .overlay-status.ok { color: var(--ready-fg); }
 
   .overlay-buttons {
     margin-top: 0.4rem;
