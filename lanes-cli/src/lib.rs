@@ -198,7 +198,10 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         // correct them all now that lane-level cyclable is known, so the UI
         // reads this straight off each signal instead of re-deriving "is
         // this specific chip something a cycle would land on" from
-        // signal.kind() and lane.cyclable itself.
+        // signal.kind() and lane.cyclable itself. Same pass also upgrades
+        // Awaiting -> Ready (see upgrade_awaiting_to_ready) - that
+        // reclassification depends on the exact same cyclable fact, only
+        // knowable at this same point in the pipeline.
         for facet in facets.iter_mut() {
             let signals = match facet {
                 model::FacetSnapshot::Terminal { signals, .. } => signals,
@@ -207,6 +210,8 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             };
             for s in signals.iter_mut() {
                 s.cyclable = signal_cyclable(s.kind(), cyclable);
+                s.reason = upgrade_awaiting_to_ready(s.reason.clone(), s.cyclable);
+                s.urgency = s.reason.urgency();
             }
         }
 
@@ -299,6 +304,23 @@ fn lane_cyclable(active: bool, reachable: Option<bool>, has_claude_signal: bool)
 /// further per-session check beyond the lane's own cyclable fact.
 fn signal_cyclable(kind: model::SignalKind, lane_cyclable: bool) -> bool {
     kind == model::SignalKind::ClaudeSession && lane_cyclable
+}
+
+/// Upgrades an idle-Claude signal to Ready once its lane turns out
+/// cyclable - the distinction the user actually cares about isn't Claude's
+/// own busy/idle state (that's Active vs Awaiting, untouched here), it's
+/// whether this particular idle session is one `sessions next`/`prev` would
+/// actually land on. Every other reason (Active, Permission, and anything
+/// non-ClaudeSession) passes through unchanged regardless of cyclable -
+/// this only ever narrows Awaiting specifically.
+fn upgrade_awaiting_to_ready(reason: model::SignalReason, cyclable: bool) -> model::SignalReason {
+    use model::{ClaudeSessionReason, SignalReason};
+    match reason {
+        SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting) if cyclable => {
+            SignalReason::ClaudeSession(ClaudeSessionReason::Ready)
+        }
+        other => other,
+    }
 }
 
 /// drivers::claude::enumerate() grouped by zellij session, for the lanes
@@ -1175,6 +1197,40 @@ mod tests {
         // cycle would land on, regardless of the lane's own cyclable fact.
         assert!(!signal_cyclable(model::SignalKind::Repo, true));
         assert!(!signal_cyclable(model::SignalKind::Lanes, true));
+    }
+
+    #[test]
+    fn awaiting_upgrades_to_ready_when_cyclable() {
+        use model::{ClaudeSessionReason, SignalReason};
+        assert!(matches!(
+            upgrade_awaiting_to_ready(SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting), true),
+            SignalReason::ClaudeSession(ClaudeSessionReason::Ready)
+        ));
+    }
+
+    #[test]
+    fn awaiting_stays_awaiting_when_not_cyclable() {
+        use model::{ClaudeSessionReason, SignalReason};
+        assert!(matches!(
+            upgrade_awaiting_to_ready(SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting), false),
+            SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting)
+        ));
+    }
+
+    #[test]
+    fn non_awaiting_reasons_are_never_upgraded_regardless_of_cyclable() {
+        use model::{ClaudeSessionReason, LanesReason, RepoReason, SignalReason};
+        let untouched = [
+            SignalReason::ClaudeSession(ClaudeSessionReason::Active),
+            SignalReason::ClaudeSession(ClaudeSessionReason::Permission),
+            SignalReason::Repo(RepoReason::PendingCommit),
+            SignalReason::Lanes(LanesReason::SessionMissing),
+            SignalReason::Lanes(LanesReason::SessionNotRunning),
+        ];
+        for reason in untouched {
+            let upgraded = upgrade_awaiting_to_ready(reason.clone(), true);
+            assert_eq!(format!("{upgraded:?}"), format!("{reason:?}"));
+        }
     }
 
     // The rest go through the pure decision fn directly, not lane_session_missing()

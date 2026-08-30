@@ -169,6 +169,7 @@
     if (signal.reason === "pending_commit") return "pending commit";
     if (signal.reason === "active") return "running";
     if (signal.reason === "awaiting") return "idle";
+    if (signal.reason === "ready") return "ready";
     if (signal.reason === "permission") return "permission";
     if (signal.reason === "session_missing") return "session missing";
     if (signal.reason === "session_not_running") return "no zellij session";

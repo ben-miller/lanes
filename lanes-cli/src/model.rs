@@ -136,6 +136,14 @@ pub enum ClaudeSessionReason {
     Active,
     Awaiting,
     Permission,
+    /// Never constructed directly by signal_for() - lane cyclability isn't
+    /// known yet at that point in the pipeline. Only ever synthesized
+    /// downstream, by gather_lanes() upgrading an Awaiting signal once its
+    /// lane turns out cyclable (see lib.rs's upgrade_awaiting_to_ready) -
+    /// same precedent as `cyclable` itself being a correction-pass-only
+    /// fact. An idle Claude session that's actually part of the cycling
+    /// rotation, as opposed to one sitting idle off to the side.
+    Ready,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -202,6 +210,11 @@ impl SignalReason {
         match self {
             SignalReason::ClaudeSession(ClaudeSessionReason::Permission) => Urgency::Blocking,
             SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting) => Urgency::Attention,
+            // Same tier as Awaiting for now - Ready is a data-model
+            // distinction (is this session part of the cycling rotation),
+            // not yet a severity one. The existing cyclable-driven opacity
+            // dimming already separates the two visually as a byproduct.
+            SignalReason::ClaudeSession(ClaudeSessionReason::Ready) => Urgency::Attention,
             SignalReason::ClaudeSession(ClaudeSessionReason::Active) => Urgency::Info,
             SignalReason::Repo(RepoReason::PendingCommit) => Urgency::Attention,
             SignalReason::Lanes(LanesReason::SessionMissing) => Urgency::Blocking,
@@ -394,6 +407,7 @@ mod tests {
         assert_eq!(SignalReason::ClaudeSession(ClaudeSessionReason::Permission).urgency(), Urgency::Blocking);
         assert_eq!(SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting).urgency(), Urgency::Attention);
         assert_eq!(SignalReason::ClaudeSession(ClaudeSessionReason::Active).urgency(), Urgency::Info);
+        assert_eq!(SignalReason::ClaudeSession(ClaudeSessionReason::Ready).urgency(), Urgency::Attention);
         assert_eq!(SignalReason::Repo(RepoReason::PendingCommit).urgency(), Urgency::Attention);
         assert_eq!(SignalReason::Lanes(LanesReason::SessionMissing).urgency(), Urgency::Blocking);
         assert_eq!(SignalReason::Lanes(LanesReason::SessionNotRunning).urgency(), Urgency::Warning);
