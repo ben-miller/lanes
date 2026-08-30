@@ -98,7 +98,13 @@ fn set_focused_lane(lane_id: String) {
 
 #[tauri::command]
 fn focus_lane(lane_id: String) {
-    if let Err(e) = lanes::focus_lane(&lane_id, false) {
+    // focus=true, matching every other caller in the codebase (switch_
+    // claude_session, navigate_to_repo_pane, the CLI's own `lanes focus`) -
+    // false meant WezTerm's active tab switched silently in the background
+    // without the app ever coming to the foreground, which is exactly why
+    // clicking a lane with nothing more specific to route through looked
+    // like it did nothing at all.
+    if let Err(e) = lanes::focus_lane(&lane_id, true) {
         lanes::logging::append_line("switch-ui.log", "warn", &format!("focus_lane({lane_id}): {e}"));
     }
 }

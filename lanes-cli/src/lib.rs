@@ -491,16 +491,7 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
         logging::perf("switch.tab_activated", &format!("session={session_id} elapsed_us={}", t0.elapsed().as_micros()));
 
         if let Some(pane_id) = zellij_pane_id {
-            let output = std::process::Command::new("/opt/homebrew/bin/zellij")
-                .args(["--session", &zellij_session, "action", "focus-pane-id", &pane_id.to_string()])
-                .output()
-                .map_err(|e| format!("zellij focus-pane-id: {}", e))?;
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                if !is_benign_zellij_focus_error(&stderr) {
-                    return Err(format!("zellij focus-pane-id failed: {}", stderr.trim()));
-                }
-            }
+            focus_zellij_pane(&zellij_session, pane_id)?;
         }
         logging::perf("switch.pane_focused", &format!("session={session_id} elapsed_us={}", t0.elapsed().as_micros()));
 
@@ -536,6 +527,39 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
 /// switch that actually landed correctly just because of this quirk.
 fn is_benign_zellij_focus_error(stderr: &str) -> bool {
     stderr.contains("already focused")
+}
+
+/// Focuses one pane within an already-active Zellij session - pulled out of
+/// switch_claude_session so focus_lane's deterministic first-pane fallback
+/// (see its own doc comment) can reuse the exact same call and the same
+/// tolerance for zellij's "already focused" quirk, rather than
+/// reimplementing it.
+fn focus_zellij_pane(zellij_session: &str, pane_id: u64) -> Result<(), String> {
+    let output = std::process::Command::new("/opt/homebrew/bin/zellij")
+        .args(["--session", zellij_session, "action", "focus-pane-id", &pane_id.to_string()])
+        .output()
+        .map_err(|e| format!("zellij focus-pane-id: {}", e))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !is_benign_zellij_focus_error(&stderr) {
+            return Err(format!("zellij focus-pane-id failed: {}", stderr.trim()));
+        }
+    }
+    Ok(())
+}
+
+/// The pane_id of the leftmost/topmost pane in a Zellij session's current
+/// layout - the same on-screen reading-order tie-break
+/// pane_position_rank/cycling already use, reused here as focus_lane's
+/// deterministic "which pane, absent anything more specific" answer.
+/// `None` if the session has no pane data available (list-panes failed,
+/// or genuinely no terminal panes) - callers treat that as "nothing to
+/// focus more specifically," not an error.
+fn first_pane_id(session: &str) -> Option<u32> {
+    drivers::zellij::pane_positions(session)
+        .into_iter()
+        .min_by_key(|(_, position)| *position)
+        .map(|(pane_id, _)| pane_id)
 }
 
 fn switch_socket_path() -> PathBuf {
@@ -906,6 +930,21 @@ pub fn focus_lane(lane_id: &str, focus: bool) -> Result<(), String> {
             if let Err(e) = activate_wezterm_tab(session, focus) {
                 eprintln!("warning: {}", e);
                 warnings.push(e);
+                continue;
+            }
+            // Deterministically land on a real pane rather than whatever
+            // Zellij's own internal state happens to have last focused -
+            // "focus this lane" should always put you somewhere you can
+            // immediately type into, not just switch WezTerm's active tab
+            // and leave the actual in-session focus as a coin flip. Only
+            // reached for lanes with no more specific routing already
+            // handled elsewhere (a Claude session's own pane_id, via
+            // switch_claude_session) - this is the general fallback.
+            if let Some(pane_id) = first_pane_id(session) {
+                if let Err(e) = focus_zellij_pane(session, pane_id as u64) {
+                    eprintln!("warning: {}", e);
+                    warnings.push(e);
+                }
             }
         }
     }
