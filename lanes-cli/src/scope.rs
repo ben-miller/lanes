@@ -229,7 +229,7 @@ pub fn signals_from(resolved: &[(ScopeElement, Vec<Observation>)]) -> Vec<crate:
 }
 
 fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<&str>) -> Option<crate::model::Signal> {
-    use crate::model::{Signal, SignalAction, SignalKind, SignalReason};
+    use crate::model::{ClaudeSessionReason, RepoReason, Signal, SignalAction, SignalReason};
 
     match (element, obs.kind.as_str()) {
         (ScopeElement::Repo { .. }, KIND_GIT_DIRTY) => {
@@ -242,10 +242,10 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
                 session: session.to_string(),
                 path: path.to_string(),
             });
+            let reason = SignalReason::Repo(RepoReason::PendingCommit);
             Some(Signal {
-                kind: SignalKind::Repo,
-                reason: SignalReason::PendingCommit,
-                urgency: SignalReason::PendingCommit.urgency(),
+                urgency: reason.urgency(),
+                reason,
                 // Placeholder - gather_lanes() corrects this once the
                 // lane's cyclable fact is known (see Signal::cyclable). A
                 // repo signal is never actually cyclable regardless.
@@ -257,13 +257,12 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
         (ScopeElement::ClaudeSession { .. }, KIND_CLAUDE_SESSION_STATE) => {
             let session_id = element.claude_session_id()?;
             let state = obs.data.get("state").and_then(|v| v.as_str()).unwrap_or("");
-            let reason = match state {
-                "idle" => SignalReason::Awaiting,
-                "permission_pending" => SignalReason::Permission,
-                _ => SignalReason::Active,
-            };
+            let reason = SignalReason::ClaudeSession(match state {
+                "idle" => ClaudeSessionReason::Awaiting,
+                "permission_pending" => ClaudeSessionReason::Permission,
+                _ => ClaudeSessionReason::Active,
+            });
             Some(Signal {
-                kind: SignalKind::ClaudeSession,
                 urgency: reason.urgency(),
                 reason,
                 // Placeholder - gather_lanes() corrects this once the
@@ -435,7 +434,7 @@ mod tests {
         ];
         let signals = signals_from(&resolved);
         assert_eq!(signals.len(), 1);
-        assert!(matches!(signals[0].reason, crate::model::SignalReason::PendingCommit));
+        assert!(matches!(signals[0].reason, crate::model::SignalReason::Repo(crate::model::RepoReason::PendingCommit)));
         match &signals[0].action {
             Some(crate::model::SignalAction::FocusRepoPane { session, path }) => {
                 assert_eq!(session, "infra");
@@ -453,7 +452,7 @@ mod tests {
         )];
         let signals = signals_from(&resolved);
         assert_eq!(signals.len(), 1);
-        assert!(matches!(signals[0].reason, crate::model::SignalReason::PendingCommit));
+        assert!(matches!(signals[0].reason, crate::model::SignalReason::Repo(crate::model::RepoReason::PendingCommit)));
         assert!(signals[0].action.is_none());
     }
 
@@ -484,8 +483,15 @@ mod tests {
             )];
             let signals = signals_from(&resolved);
             assert_eq!(signals.len(), 1, "state={state}");
+            // signals[0].reason is SignalReason - adjacently tagged
+            // (kind/reason), so serializing it alone (not flattened through
+            // Signal) is its own {"kind": ..., "reason": ...} object. See
+            // the signal_reason_flattens_into_flat_kind_and_reason_on_signal
+            // test for confirmation of the flattened shape Signal itself
+            // actually produces on the wire.
             let reason_json = serde_json::to_value(&signals[0].reason).unwrap();
-            assert_eq!(reason_json, expected_reason, "state={state}");
+            assert_eq!(reason_json["kind"], "claude_session", "state={state}");
+            assert_eq!(reason_json["reason"], expected_reason, "state={state}");
             match &signals[0].action {
                 Some(crate::model::SignalAction::SwitchClaudeSession { session_id }) => {
                     assert_eq!(session_id, "abc123");

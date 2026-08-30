@@ -57,13 +57,16 @@ pub enum SignalAction {
     FocusRepoPane { session: String, path: String },
 }
 
-/// Which domain a signal is about - a real, queryable field rather than
-/// just a naming convention baked into `SignalReason`'s variant names, so a
-/// consumer (the UI's kind pill, in particular) can group/label signals
-/// without string-matching `reason`. `Lanes` is distinct from the other two:
-/// it's Lanes reporting a fact about its own tracking (e.g. a lane whose
-/// Zellij session has no cached WezTerm tab), not relaying an observation
-/// from an external tool the way ClaudeSession/Repo signals do.
+/// Which domain a signal is about. Not just a tag - it's the type that
+/// actually owns which reasons are valid, so a `Repo` signal carrying a
+/// `Permission` reason (nonsensical - permission prompts are a Claude
+/// concept) is a compile error, not a discipline problem. `SignalReason`
+/// wraps one of these three per-domain reason enums (adjacently tagged: see
+/// its own doc comment for why the wire shape is unaffected by any of
+/// this). `Lanes` is distinct from the other two: it's Lanes reporting a
+/// fact about its own tracking (e.g. a lane whose Zellij session has no
+/// cached WezTerm tab, or isn't running at all), not relaying an
+/// observation from an external tool the way ClaudeSession/Repo signals do.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SignalKind {
@@ -74,7 +77,7 @@ pub enum SignalKind {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Signal {
-    pub kind: SignalKind,
+    #[serde(flatten)]
     pub reason: SignalReason,
     pub urgency: Urgency,
     // Whether this specific signal is something `sessions next`/`prev`
@@ -89,25 +92,69 @@ pub struct Signal {
     pub action: Option<SignalAction>,
 }
 
-// Variant names no longer repeat their SignalKind prefix (was
-// ClaudeSessionActive/Awaiting/Permission) - `kind` carries that now, so the
-// reason only needs to say what's true within that domain.
+impl Signal {
+    pub fn kind(&self) -> SignalKind {
+        self.reason.kind()
+    }
+}
+
+/// One reason per domain, namespaced so e.g. ClaudeSessionReason::Active and
+/// a hypothetical future RepoReason::Active could never be confused for each
+/// other - each domain's vocabulary lives in its own enum, closed to just
+/// the reasons that actually make sense there.
+///
+/// Adjacently tagged (`tag = "kind", content = "reason"`) specifically so
+/// the wire shape is unaffected by this being nested internally: serializing
+/// `SignalReason::ClaudeSession(ClaudeSessionReason::Active)` produces
+/// `{"kind": "claude_session", "reason": "active"}` - the exact same two
+/// sibling string fields a flat enum would have produced. `Signal` flattens
+/// this field in so those two keys sit directly on the outer signal object,
+/// same as before. Existing consumers (the frontend's `signal.kind`/
+/// `signal.reason`) don't need to know any of this changed.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
+#[serde(tag = "kind", content = "reason", rename_all = "snake_case")]
 pub enum SignalReason {
-    PendingCommit,
+    ClaudeSession(ClaudeSessionReason),
+    Repo(RepoReason),
+    Lanes(LanesReason),
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ClaudeSessionReason {
     Active,
     Awaiting,
     Permission,
-    /// See `SignalKind::Lanes` - a lane that's active but whose Zellij
-    /// session has no cached WezTerm tab, so there's nothing for a switch
-    /// to actually land on.
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RepoReason {
+    PendingCommit,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LanesReason {
+    /// A lane that's active but whose Zellij session has no cached WezTerm
+    /// tab, so there's nothing for a switch to actually land on.
     SessionMissing,
+    /// A lane whose declared Zellij session isn't a running process at all
+    /// - distinct from SessionMissing (a WezTerm-tab-caching fact). Fires
+    /// regardless of the lane's active state: an inactive lane with no
+    /// session is the common case (you tore the environment down), an
+    /// active one is more surprising, but both are the same underlying
+    /// fact and get the same ambient Info urgency - it's a status chip to
+    /// One tier below Blocking (Warning, not Attention) - a lane missing
+    /// its whole terminal session is more concerning than "worth a look
+    /// when convenient" (Attention/ready-green's actual meaning), but nothing
+    /// here is itself waiting on you the way a permission prompt is.
+    SessionNotRunning,
 }
 
 // Declared least to most urgent so derived Ord/PartialOrd rank them
-// correctly (Blocking > Attention > Info) - lets callers compare or sort
-// signals by urgency without a separate ranking table.
+// correctly (Blocking > Warning > Attention > Info) - lets callers compare
+// or sort signals by urgency without a separate ranking table.
 //
 // This is deliberately the naive case: one reason maps to exactly one fixed
 // urgency (see SignalReason::urgency() below), with no awareness of other
@@ -115,20 +162,39 @@ pub enum SignalReason {
 // a function of the whole signal set plus outside context (elapsed time,
 // how many other signals are competing for attention, etc.) - is a real
 // design problem for later, not solved here.
+//
+// Four tiers, not three: Attention was deliberately redefined to mean
+// "ready for you, a good state" (green) rather than "caution" - idle Claude
+// and a pending commit both live there. That reinterpretation left no home
+// for the classic "something's off, not blocking" case, which is exactly
+// what SessionNotRunning is - Warning fills that gap as its own tier
+// (orange) rather than overloading Attention's now-positive meaning.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Urgency {
     Info,
     Attention,
+    Warning,
     Blocking,
 }
 
 impl SignalReason {
+    pub fn kind(&self) -> SignalKind {
+        match self {
+            SignalReason::ClaudeSession(_) => SignalKind::ClaudeSession,
+            SignalReason::Repo(_) => SignalKind::Repo,
+            SignalReason::Lanes(_) => SignalKind::Lanes,
+        }
+    }
+
     pub fn urgency(&self) -> Urgency {
         match self {
-            SignalReason::Permission | SignalReason::SessionMissing => Urgency::Blocking,
-            SignalReason::Awaiting | SignalReason::PendingCommit => Urgency::Attention,
-            SignalReason::Active => Urgency::Info,
+            SignalReason::ClaudeSession(ClaudeSessionReason::Permission) => Urgency::Blocking,
+            SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting) => Urgency::Attention,
+            SignalReason::ClaudeSession(ClaudeSessionReason::Active) => Urgency::Info,
+            SignalReason::Repo(RepoReason::PendingCommit) => Urgency::Attention,
+            SignalReason::Lanes(LanesReason::SessionMissing) => Urgency::Blocking,
+            SignalReason::Lanes(LanesReason::SessionNotRunning) => Urgency::Warning,
         }
     }
 }
@@ -243,5 +309,66 @@ pub struct TerminalShape {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cwd: Option<String>,
     pub tabs: Vec<TabInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn signal_reason_flattens_into_flat_kind_and_reason_on_signal() {
+        // The whole point of #[serde(flatten)] on Signal::reason: even
+        // though SignalReason is internally nested (adjacently tagged), a
+        // Signal on the wire still has plain sibling "kind"/"reason" string
+        // fields, not a nested {"reason": {"kind": ..., "reason": ...}}
+        // object - existing consumers (the frontend) don't see this
+        // refactor at all.
+        let signal = Signal {
+            reason: SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting),
+            urgency: Urgency::Attention,
+            cyclable: true,
+            action: None,
+        };
+        let json = serde_json::to_value(&signal).unwrap();
+        assert_eq!(json["kind"], "claude_session");
+        assert_eq!(json["reason"], "awaiting");
+        assert_eq!(json["urgency"], "attention");
+        assert_eq!(json["cyclable"], true);
+        assert!(json.get("action").is_none());
+    }
+
+    #[test]
+    fn signal_kind_matches_the_reason_it_wraps() {
+        assert_eq!(
+            Signal {
+                reason: SignalReason::Repo(RepoReason::PendingCommit),
+                urgency: Urgency::Attention,
+                cyclable: false,
+                action: None,
+            }
+            .kind(),
+            SignalKind::Repo
+        );
+        assert_eq!(
+            Signal {
+                reason: SignalReason::Lanes(LanesReason::SessionNotRunning),
+                urgency: Urgency::Warning,
+                cyclable: false,
+                action: None,
+            }
+            .kind(),
+            SignalKind::Lanes
+        );
+    }
+
+    #[test]
+    fn urgency_matches_documented_policy_per_reason() {
+        assert_eq!(SignalReason::ClaudeSession(ClaudeSessionReason::Permission).urgency(), Urgency::Blocking);
+        assert_eq!(SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting).urgency(), Urgency::Attention);
+        assert_eq!(SignalReason::ClaudeSession(ClaudeSessionReason::Active).urgency(), Urgency::Info);
+        assert_eq!(SignalReason::Repo(RepoReason::PendingCommit).urgency(), Urgency::Attention);
+        assert_eq!(SignalReason::Lanes(LanesReason::SessionMissing).urgency(), Urgency::Blocking);
+        assert_eq!(SignalReason::Lanes(LanesReason::SessionNotRunning).urgency(), Urgency::Warning);
+    }
 }
 

@@ -158,6 +158,7 @@
     if (signal.reason === "awaiting") return "idle";
     if (signal.reason === "permission") return "permission";
     if (signal.reason === "session_missing") return "session missing";
+    if (signal.reason === "session_not_running") return "not running";
     return signal.reason;
   }
 
@@ -311,6 +312,7 @@
     --accent: #7c3aed;
     --ambient-fg: #3d6a8a;  --ambient-bg: #dcebf4;
     --ready-fg: #2d6b48;    --ready-bg: #dbeee1;
+    --warn-fg: #8a4a0f;     --warn-bg: #fbe6cc;
     --block-fg: #ad2f28;    --block-bg: #fadcd9;
     --kind-fg: #565f68;     --kind-bg: #eaedf0;
     --shadow-color: rgba(20, 24, 30, 0.05);
@@ -345,6 +347,7 @@
       --accent: #b794f6;
       --ambient-fg: #7bb3d9;  --ambient-bg: #182a38;
       --ready-fg: #16311f;    --ready-bg: #7ec49b;
+      --warn-fg: #f0a94e;     --warn-bg: #3d2a10;
       --block-fg: #ef7b71;    --block-bg: #3a1714;
       --kind-fg: #a3adb8;     --kind-bg: #262a30;
       --shadow-color: rgba(0, 0, 0, 0.3);
@@ -491,6 +494,7 @@
   }
   .signal.urgency-info { background: var(--ambient-bg); color: var(--ambient-fg); }
   .signal.urgency-attention { background: var(--ready-bg); color: var(--ready-fg); }
+  .signal.urgency-warning { background: var(--warn-bg); color: var(--warn-fg); }
   .signal.urgency-blocking { background: var(--block-bg); color: var(--block-fg); }
 
   .backdrop {

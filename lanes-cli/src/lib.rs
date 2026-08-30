@@ -153,21 +153,22 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         }));
 
         let reachable = lane_reachable(&facets);
+        let terminal_running = lane_terminal_running(&facets);
 
-        // Session-missing used to be its own bool field on LaneSnapshot,
-        // read separately from every other "this needs you" fact. It's just
-        // another signal now (kind: Lanes) - pushed into the Terminal
-        // facet's own signals list, the same place every other signal for
-        // this lane already lives, so the UI has exactly one list to read
-        // instead of a list plus a special-cased bool.
-        if lane_session_missing(lane.active, reachable) {
-            if let Some(model::FacetSnapshot::Terminal { signals, .. }) =
-                facets.iter_mut().find(|f| matches!(f, model::FacetSnapshot::Terminal { .. }))
-            {
+        // Both of these used to be their own bool fields, read separately
+        // from every other "this needs you" fact (session_missing on
+        // LaneSnapshot; terminal_running lived only inside the Terminal
+        // facet itself, surfaced nowhere). They're both just Lanes-kind
+        // signals now, pushed into the Terminal facet's own signals list -
+        // the one list the UI already reads for everything else.
+        if let Some(model::FacetSnapshot::Terminal { signals, .. }) =
+            facets.iter_mut().find(|f| matches!(f, model::FacetSnapshot::Terminal { .. }))
+        {
+            if lane_session_missing(lane.active, reachable) {
+                let reason = model::SignalReason::Lanes(model::LanesReason::SessionMissing);
                 signals.push(model::Signal {
-                    kind: model::SignalKind::Lanes,
-                    reason: model::SignalReason::SessionMissing,
-                    urgency: model::SignalReason::SessionMissing.urgency(),
+                    urgency: reason.urgency(),
+                    reason,
                     // Never actually cyclable (kind != ClaudeSession) - set
                     // properly below along with everything else, this is
                     // just the same placeholder every construction site uses.
@@ -175,10 +176,19 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
                     action: None,
                 });
             }
+            if terminal_running == Some(false) {
+                let reason = model::SignalReason::Lanes(model::LanesReason::SessionNotRunning);
+                signals.push(model::Signal {
+                    urgency: reason.urgency(),
+                    reason,
+                    cyclable: false,
+                    action: None,
+                });
+            }
         }
 
         let has_claude_signal = facets.iter()
-            .any(|f| f.signals().iter().any(|s| s.kind == model::SignalKind::ClaudeSession));
+            .any(|f| f.signals().iter().any(|s| s.kind() == model::SignalKind::ClaudeSession));
         let cyclable = lane_cyclable(lane.active, reachable, has_claude_signal);
 
         // Every signal was constructed with cyclable=false as a placeholder
@@ -186,7 +196,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         // correct them all now that lane-level cyclable is known, so the UI
         // reads this straight off each signal instead of re-deriving "is
         // this specific chip something a cycle would land on" from
-        // signal.kind and lane.cyclable itself.
+        // signal.kind() and lane.cyclable itself.
         for facet in facets.iter_mut() {
             let signals = match facet {
                 model::FacetSnapshot::Terminal { signals, .. } => signals,
@@ -194,7 +204,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
                 model::FacetSnapshot::Window { .. } => continue,
             };
             for s in signals.iter_mut() {
-                s.cyclable = signal_cyclable(s.kind, cyclable);
+                s.cyclable = signal_cyclable(s.kind(), cyclable);
             }
         }
 
@@ -246,6 +256,22 @@ fn lane_reachable(facets: &[model::FacetSnapshot]) -> Option<bool> {
         _ => None,
     })?;
     Some(state::get_wezterm_tab_id(session).is_some())
+}
+
+/// Whether this lane's declared Zellij session is an actually-running
+/// process right now - or `None` if it has no terminal facet at all
+/// (nothing to be running or not). Distinct from `lane_reachable`: that's a
+/// WezTerm-tab-caching fact, this is "does the Zellij session itself exist"
+/// - a lane can in principle be reachable (a cached tab-id) while its
+/// session has since died, or vice versa. Sourced from `FacetSnapshot::
+/// Terminal.running`, already computed earlier in `gather_lanes()` from
+/// `drivers::zellij::running_sessions()` - this doesn't re-derive it, just
+/// reads back the one Terminal facet a lane can have.
+fn lane_terminal_running(facets: &[model::FacetSnapshot]) -> Option<bool> {
+    facets.iter().find_map(|f| match f {
+        model::FacetSnapshot::Terminal { running, .. } => Some(*running),
+        _ => None,
+    })
 }
 
 /// Whether this lane would actually be visited by `sessions next`/`prev`
