@@ -667,6 +667,14 @@ pub fn notify_switch_hide() {
     notify_switch_socket("hide\n");
 }
 
+/// Same direct-socket bypass as show/hide, extended to edit-mode - the CLI
+/// already wrote the new value to state.kdl (see `ToggleEditMode`), this
+/// just tells an already-running app about it immediately instead of
+/// leaving it to notice via the fs watcher's inherent floor latency.
+pub fn notify_switch_edit_mode(enabled: bool) {
+    notify_switch_socket(&format!("edit-mode:{enabled}\n"));
+}
+
 /// Cycle to the next (direction=1) or previous (direction=-1) live Claude
 /// session, ordered to match lanes.toml's `order` (same ordering the display
 /// uses), and within a shared Zellij session by each session's on-screen

@@ -86,6 +86,22 @@ enum Command {
     /// See `IsPinned` for how the running app picks this up.
     TogglePinned,
 
+    /// Flip Lanes Switch's edit-mode state and print the new value.
+    ///
+    /// state.kdl is the source of truth, same as `TogglePinned` - the
+    /// running app watches it and shows/arms its edit-mode UI whenever it
+    /// changes, regardless of who wrote it (Hammerspoon, the tray menu, or
+    /// the app itself via Escape).
+    ToggleEditMode,
+
+    /// Flip whether Lanes Switch's dashboard shows inactive lanes, and
+    /// print the new value.
+    ///
+    /// state.kdl is the source of truth, same as `TogglePinned` - the
+    /// running app's tray checkbox and dashboard both pick this up whenever
+    /// it changes, regardless of who wrote it.
+    ToggleShowInactive,
+
     /// Ask the running Lanes Switch app to show+focus its window, without
     /// changing pin state. See `IsPinned` for the state.kdl watch mechanism.
     ShowSwitch,
@@ -325,6 +341,20 @@ fn main() {
             if !pinned {
                 std::process::exit(1);
             }
+        }
+
+        Command::ToggleEditMode => {
+            let enabled = !lanes::state::read_edit_mode();
+            lanes::logging::perf("edit_mode.cli_toggle", &format!("enabled={enabled}"));
+            lanes::state::set_edit_mode(enabled);
+            lanes::notify_switch_edit_mode(enabled);
+            println!("{}", enabled);
+        }
+
+        Command::ToggleShowInactive => {
+            let show = !lanes::state::read_show_inactive();
+            lanes::state::set_show_inactive(show);
+            println!("{}", show);
         }
 
         Command::ShowSwitch => {

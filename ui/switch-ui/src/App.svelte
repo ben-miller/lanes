@@ -4,11 +4,10 @@
   import { getCurrentWindow, LogicalSize, LogicalPosition, primaryMonitor } from "@tauri-apps/api/window";
   import { onMount, onDestroy, tick } from "svelte";
 
-  // The panel is a fixed-width column of rows now, not a lane-count-driven
-  // grid - width never needs recomputing. Height still does: row height is
-  // organic (depends on how many signal chips a lane has and whether they
-  // wrap), so it's measured from the rendered DOM rather than calculated.
+  // The panel is a fixed-width column of rows normally - width only needs
+  // recomputing for edit mode, which adds a toggle switch to each row.
   const PANEL_WIDTH = 360;
+  const EDIT_MODE_EXTRA_WIDTH = 36;
 
   let snapshot = null;
   let activeSignal = null;
@@ -67,7 +66,7 @@
 
   async function resizeToContent() {
     if (!dashboardEl) return;
-    const width = PANEL_WIDTH;
+    const width = panelWidth;
     const height = dashboardEl.offsetHeight;
 
     const win = getCurrentWindow();
@@ -90,6 +89,68 @@
   let unlistenSessions;
   let unlistenLane;
   let unlistenFocus;
+  let unlistenEditMode;
+  let unlistenShowInactive;
+
+  // state.kdl's edit-mode/show-inactive fields are the source of truth (see
+  // src-tauri) - these mirror them locally rather than owning them, so the
+  // tray checkbox, hypo+E/I, and this window's own Escape key all stay in
+  // sync regardless of which one triggered the change.
+  let editMode = false;
+  let showInactive = false;
+  $: panelWidth = PANEL_WIDTH + (editMode ? EDIT_MODE_EXTRA_WIDTH : 0);
+  // get_snapshot() always returns every lane now - filtering which ones
+  // actually render is done here, against whatever the last fetch already
+  // has in memory, specifically so flipping editMode/showInactive is a pure
+  // local re-render (resizeToContent measures the result) rather than
+  // needing a whole new gather_lanes() round trip (~500-600ms of real
+  // subprocess I/O - see the README's Diagnostics section) just to show or
+  // hide rows that were sitting right here the whole time.
+  $: visibleLanes = snapshot ? snapshot.lanes.filter(l => l.active || showInactive || editMode) : [];
+
+  async function applyEditMode(enabled) {
+    if (enabled === editMode) return;
+    invoke("log_ui_event", { event: "ui.edit_mode_apply.start", detail: `enabled=${enabled}` });
+    editMode = enabled;
+    await tick();
+    await resizeToContent();
+    invoke("log_ui_event", { event: "ui.edit_mode_apply.resized", detail: `enabled=${enabled}` });
+  }
+
+  // Border pulse, not a resize - restarted by toggling the class off then
+  // back on across a tick (CSS animations don't replay on a class that's
+  // already applied).
+  let pulseNoop = false;
+  let pulseNoopTimer;
+
+  function pulseAcknowledge() {
+    pulseNoop = false;
+    tick().then(() => {
+      pulseNoop = true;
+      clearTimeout(pulseNoopTimer);
+      pulseNoopTimer = setTimeout(() => { pulseNoop = false; }, 300);
+    });
+  }
+
+  async function applyShowInactive(show) {
+    if (show === showInactive) return;
+    showInactive = show;
+    // In edit mode every lane is already shown regardless of showInactive
+    // (see visibleLanes) - the row list genuinely won't change, so there's
+    // nothing to resize toward. Without some acknowledgment this reads as
+    // "the keypress did nothing," when really it just took effect
+    // invisibly and will show once edit mode is left.
+    if (editMode) {
+      pulseAcknowledge();
+      return;
+    }
+    await tick();
+    await resizeToContent();
+  }
+
+  function setEditMode(enabled) {
+    invoke("set_edit_mode", { enabled });
+  }
 
   // Whether the OS window was focused *before* the click currently in
   // flight. Read at mousedown (capture phase, so it runs before anything
@@ -102,6 +163,10 @@
   onMount(async () => {
     refresh();
     timer = setInterval(refresh, 10000);
+    editMode = await invoke("get_edit_mode");
+    showInactive = await invoke("get_show_inactive");
+    unlistenEditMode = await listen("edit-mode-changed", (event) => applyEditMode(event.payload));
+    unlistenShowInactive = await listen("show-inactive-changed", (event) => applyShowInactive(event.payload));
     unlistenSessions = await listen("sessions-changed", () => refresh());
     // Fires immediately on a lane/session change (see lib.rs) - update both
     // highlights right away instead of waiting on the slower full refresh
@@ -148,6 +213,8 @@
     if (unlistenSessions) unlistenSessions();
     if (unlistenLane) unlistenLane();
     if (unlistenFocus) unlistenFocus();
+    if (unlistenEditMode) unlistenEditMode();
+    if (unlistenShowInactive) unlistenShowInactive();
   });
 
   function allSignals(lane) {
@@ -242,6 +309,16 @@
     await refresh();
   }
 
+  // Flips lane.active optimistically (so the switch itself and
+  // visibleLanes' filter react immediately) and persists via the same
+  // set_lane_active the CLI's `lanes activate`/`deactivate` already used -
+  // edit mode is just a GUI for that existing per-lane flag, not a new one.
+  async function toggleLaneActive(lane) {
+    const active = !lane.active;
+    snapshot = { ...snapshot, lanes: snapshot.lanes.map(l => l.id === lane.id ? { ...l, active } : l) };
+    await invoke("set_lane_active", { laneId: lane.id, active });
+  }
+
   function dismissOverlay() {
     activeSignal = null;
     // Catch up on any resize that was skipped in refresh() while this
@@ -268,16 +345,18 @@
   }
 
   function handleKeydown(e) {
-    if (e.key === "Escape") dismissOverlay();
+    if (e.key !== "Escape") return;
+    if (activeSignal) { dismissOverlay(); return; }
+    if (editMode) { setEditMode(false); return; }
   }
 </script>
 
 <svelte:window on:keydown={handleKeydown} />
 
 {#if snapshot}
-  <div class="dashboard" bind:this={dashboardEl} style="width: {PANEL_WIDTH}px">
-    <div class="panel">
-      {#each snapshot.lanes as lane}
+  <div class="dashboard" bind:this={dashboardEl} style="width: {panelWidth}px">
+    <div class="panel" class:pulse-noop={pulseNoop}>
+      {#each visibleLanes as lane}
         {@const signals = allSignals(lane)}
         <div
           class="lane"
@@ -286,22 +365,32 @@
           class:is-unreachable={!!unreachableSignal(lane)}
           on:click={() => handleLaneClick(lane)}
         >
-          <div class="lane-head"><span class="lane-name">{lane.name}</span></div>
-          {#if signals.length > 0}
-            <div class="signals">
-              {#each signals as signal}
-                <button
-                  class="signal urgency-{signal.urgency}"
-                  class:is-active={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.focused_claude_session}
-                  class:is-cyclable={signal.cyclable}
-                  class:is-unreachable={isUnreachable(signal)}
-                  on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
-                  on:click|stopPropagation
-                ><span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}</button>
-              {/each}
-            </div>
-          {:else}
-            <div class="lane-empty">no signals</div>
+          <div class="lane-body">
+            <div class="lane-head"><span class="lane-name">{lane.name}</span></div>
+            {#if signals.length > 0}
+              <div class="signals">
+                {#each signals as signal}
+                  <button
+                    class="signal urgency-{signal.urgency}"
+                    class:is-active={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.focused_claude_session}
+                    class:is-cyclable={signal.cyclable}
+                    class:is-unreachable={isUnreachable(signal)}
+                    on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
+                    on:click|stopPropagation
+                  ><span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}</button>
+                {/each}
+              </div>
+            {:else}
+              <div class="lane-empty">no signals</div>
+            {/if}
+          </div>
+          {#if editMode}
+            <button
+              class="lane-toggle"
+              class:is-on={lane.active}
+              aria-label={lane.active ? `Deactivate ${lane.name}` : `Activate ${lane.name}`}
+              on:click|stopPropagation={() => toggleLaneActive(lane)}
+            ></button>
           {/if}
         </div>
       {/each}
@@ -414,6 +503,9 @@
     color: var(--ink);
     font-family: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", Menlo, monospace;
     cursor: default;
+    /* This is a fixed custom window, not a scrollable page - it should
+       never show a scrollbar. */
+    overflow: hidden;
   }
   :global(*) { cursor: inherit; }
 
@@ -427,9 +519,30 @@
     display: flex;
     flex-direction: column;
     gap: 0.4rem;
+    border-radius: 8px;
+  }
+  /* Acknowledges a keypress that had no visible effect - toggling
+     show-inactive while editMode is already on, which already shows every
+     lane regardless (see visibleLanes). Without this, that keypress reads
+     as "did nothing" even though it registered and will show once edit
+     mode is left. A brief border pulse, not a banner/toast - same
+     restrained language as the focus ring, and it doesn't imply the row
+     list changed, because it didn't. */
+  .panel.pulse-noop {
+    outline: 2px solid transparent;
+    outline-offset: 6px;
+    animation: pulse-noop 300ms ease;
+  }
+  @keyframes pulse-noop {
+    0% { outline-color: transparent; }
+    40% { outline-color: var(--accent); }
+    100% { outline-color: transparent; }
   }
 
   .lane {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
     background: var(--panel);
     border: 1px solid var(--border);
     border-radius: 8px;
@@ -438,6 +551,37 @@
     cursor: pointer;
     transition: border-color 0.1s ease;
   }
+  .lane-body { flex: 1; min-width: 0; }
+
+  /* Edit mode's only visible change - a toggle switch per row for the
+     existing Lane.active flag (same one `lanes activate`/`deactivate`
+     already flip), mounted only while editMode is on. */
+  .lane-toggle {
+    flex: none;
+    width: 26px;
+    height: 16px;
+    border-radius: 999px;
+    background: var(--border);
+    position: relative;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  .lane-toggle::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--panel);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+    transition: transform 0.15s ease;
+  }
+  .lane-toggle.is-on { background: var(--accent); }
+  .lane-toggle.is-on::after { transform: translateX(10px); }
   /* Cyclable lanes (from lib.rs's lane_cyclable - active, reachable, and
      hosting a live Claude session) get a stronger neutral border even
      unfocused, so a glance at the stack shows which lanes `sessions next`/

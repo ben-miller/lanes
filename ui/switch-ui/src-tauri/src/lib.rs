@@ -1,6 +1,8 @@
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecursiveMode, Watcher};
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
@@ -12,7 +14,11 @@ use tauri::{Emitter, Manager};
 /// (write -> OS notices -> watcher wakes up -> app reacts) - the CLI writes
 /// state.kdl too, so that path remains the fallback for when this app isn't
 /// running yet to receive the message.
-fn start_switch_socket(handle: tauri::AppHandle) {
+fn start_switch_socket(
+    handle: tauri::AppHandle,
+    edit_mode_item: CheckMenuItem<tauri::Wry>,
+    last_applied_edit_mode: Arc<AtomicBool>,
+) {
     let home = std::env::var("HOME").unwrap_or_default();
     let sock_path = PathBuf::from(&home).join(".local/state/lanes/switch.sock");
     let _ = std::fs::remove_file(&sock_path);
@@ -44,6 +50,22 @@ fn start_switch_socket(handle: tauri::AppHandle) {
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.hide();
                     }
+                } else if let Some(rest) = line.strip_prefix("edit-mode:") {
+                    if let Ok(enabled) = rest.trim().parse::<bool>() {
+                        lanes::logging::perf("ui.socket_received_edit_mode", &format!("enabled={enabled}"));
+                        // Swap-and-compare against the *shared* last-applied
+                        // value (also touched by watch_paths' own fs-watcher
+                        // loop below) - without this, the state.kdl write
+                        // this same message rides in on would independently
+                        // trigger watch_paths to apply the identical change
+                        // again moments later (each loop otherwise only
+                        // tracks its own local "last seen" value), causing a
+                        // redundant second show()/set_focus() call - visible
+                        // as a flicker, not just wasted work.
+                        if last_applied_edit_mode.swap(enabled, Ordering::SeqCst) != enabled {
+                            apply_edit_mode(&handle, &edit_mode_item, enabled);
+                        }
+                    }
                 }
             }
         }
@@ -67,15 +89,16 @@ async fn get_snapshot() -> serde_json::Value {
         let t0 = std::time::Instant::now();
         lanes::logging::perf("ui.get_snapshot.start", "");
         let cfg = lanes::config::Config::load();
-        let mut snapshot = lanes::gather_lanes(&cfg);
+        let snapshot = lanes::gather_lanes(&cfg);
         lanes::logging::perf("ui.get_snapshot.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
-        // Inactive-lane filtering is a dashboard display concern, not a
-        // gather_lanes()-level one - the CLI (`lanes list`/`snapshot`/`signals`)
-        // always sees every lane regardless of this toggle; only what Lanes
-        // Switch itself renders is affected.
-        if !lanes::state::read_show_inactive() {
-            snapshot.lanes.retain(|l| l.active);
-        }
+        // Always returns every lane now - inactive-lane filtering is a
+        // dashboard display concern (the CLI's `lanes list`/`snapshot`/
+        // `signals` already always see every lane regardless), and doing it
+        // here meant toggling it required a whole new gather_lanes() round
+        // trip (~500-600ms of real subprocess I/O) just to show/hide rows
+        // that were already sitting right here. The frontend filters
+        // show_inactive/edit_mode itself against whatever the last fetch
+        // already returned - instant, no refetch needed.
         serde_json::to_value(&snapshot).unwrap()
     })
     .await
@@ -107,6 +130,31 @@ fn focus_lane(lane_id: String) {
     if let Err(e) = lanes::focus_lane(&lane_id, true) {
         lanes::logging::append_line("switch-ui.log", "warn", &format!("focus_lane({lane_id}): {e}"));
     }
+}
+
+#[tauri::command]
+fn get_edit_mode() -> bool {
+    lanes::state::read_edit_mode()
+}
+
+/// Called directly by the frontend (Escape while armed) rather than only
+/// ever flowing from the tray checkbox / hypo+E - state.kdl is still the
+/// single source of truth either way, so the tray checkbox's `set_checked`
+/// (driven by watch_paths noticing this same write) stays in sync no
+/// matter which of the three triggered it.
+#[tauri::command]
+fn set_edit_mode(enabled: bool) {
+    lanes::state::set_edit_mode(enabled);
+}
+
+#[tauri::command]
+fn set_lane_active(lane_id: String, active: bool) -> Result<(), String> {
+    lanes::config::set_lane_active(&lane_id, active).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+fn get_show_inactive() -> bool {
+    lanes::state::read_show_inactive()
 }
 
 #[tauri::command]
@@ -273,7 +321,33 @@ fn apply_pin(app: &tauri::AppHandle, pin_item: &CheckMenuItem<tauri::Wry>, pinne
     }
 }
 
-fn watch_paths(handle: tauri::AppHandle, pin_item: CheckMenuItem<tauri::Wry>) {
+/// Unlike apply_pin, turning edit mode off never hides the window - you'd
+/// still want the dashboard visible right after you're done editing it,
+/// just back in its plain read-only form. Turning it on does raise the
+/// window though, same as pin: the hypo+E shortcut is meant to work from
+/// anywhere, not just while Lanes Switch already happens to be visible.
+/// Doesn't touch show-inactive at all - the frontend's own filter (see
+/// App.svelte's visibleLanes) already shows everything while editMode is
+/// on, so there's nothing to force or restore on this side.
+fn apply_edit_mode(app: &tauri::AppHandle, edit_mode_item: &CheckMenuItem<tauri::Wry>, enabled: bool) {
+    let _ = edit_mode_item.set_checked(enabled);
+    if enabled {
+        if let Some(win) = app.get_webview_window("main") {
+            let _ = win.show();
+            let _ = win.set_focus();
+        }
+    }
+    app.emit("edit-mode-changed", enabled).ok();
+    lanes::logging::perf("ui.emitted_edit_mode_changed", &format!("enabled={enabled}"));
+}
+
+fn watch_paths(
+    handle: tauri::AppHandle,
+    pin_item: CheckMenuItem<tauri::Wry>,
+    edit_mode_item: CheckMenuItem<tauri::Wry>,
+    show_inactive_item: CheckMenuItem<tauri::Wry>,
+    last_applied_edit_mode: Arc<AtomicBool>,
+) {
     let home = std::env::var("HOME").unwrap_or_default();
     let sessions_dir = PathBuf::from(&home).join(".claude").join("active-sessions");
     let state_dir = PathBuf::from(&home).join(".local/state/lanes");
@@ -314,6 +388,7 @@ fn watch_paths(handle: tauri::AppHandle, pin_item: CheckMenuItem<tauri::Wry>) {
         let debounce = Duration::from_millis(100);
         let mut last_emit: Option<Instant> = None;
         let mut last_pinned = lanes::state::read_switch_pinned();
+        let mut last_show_inactive = lanes::state::read_show_inactive();
 
         for res in rx {
             if let Ok(event) = res {
@@ -326,6 +401,20 @@ fn watch_paths(handle: tauri::AppHandle, pin_item: CheckMenuItem<tauri::Wry>) {
                     if pinned != last_pinned {
                         last_pinned = pinned;
                         apply_pin(&handle, &pin_item, pinned);
+                    }
+                    let edit_mode = lanes::state::read_edit_mode();
+                    if last_applied_edit_mode.swap(edit_mode, Ordering::SeqCst) != edit_mode {
+                        apply_edit_mode(&handle, &edit_mode_item, edit_mode);
+                    }
+                    let show_inactive = lanes::state::read_show_inactive();
+                    if show_inactive != last_show_inactive {
+                        last_show_inactive = show_inactive;
+                        // Keeps both the tray checkbox and the dashboard's
+                        // own filtering (see App.svelte's visibleLanes) from
+                        // going stale when the write came from outside the
+                        // tray (hypo+I, the CLI directly).
+                        let _ = show_inactive_item.set_checked(show_inactive);
+                        handle.emit("show-inactive-changed", show_inactive).ok();
                     }
                 }
                 let relevant = event.paths.iter()
@@ -357,21 +446,33 @@ pub fn run() {
             let pin_item = CheckMenuItem::with_id(app, "pin", "Pin on Top", true, pinned_at_startup, None::<&str>)?;
             let show_inactive_at_startup = lanes::state::read_show_inactive();
             let show_inactive_item = CheckMenuItem::with_id(app, "show-inactive", "Show Inactive", true, show_inactive_at_startup, None::<&str>)?;
+            let edit_mode_at_startup = lanes::state::read_edit_mode();
+            let edit_mode_item = CheckMenuItem::with_id(app, "edit-mode", "Edit Lanes", true, edit_mode_at_startup, None::<&str>)?;
             let quit_item = MenuItem::with_id(app, "quit", "Quit Lanes", true, None::<&str>)?;
             let menu = MenuBuilder::new(app)
                 .item(&pin_item)
                 .item(&show_inactive_item)
+                .item(&edit_mode_item)
                 .separator()
                 .item(&quit_item)
                 .build()?;
             let icon = tauri::image::Image::from_bytes(include_bytes!("../icons/tray-icon.png"))?;
 
-            watch_paths(app.handle().clone(), pin_item.clone());
-            start_switch_socket(app.handle().clone());
+            let last_applied_edit_mode = Arc::new(AtomicBool::new(edit_mode_at_startup));
+            watch_paths(
+                app.handle().clone(),
+                pin_item.clone(),
+                edit_mode_item.clone(),
+                show_inactive_item.clone(),
+                last_applied_edit_mode.clone(),
+            );
+            start_switch_socket(app.handle().clone(), edit_mode_item.clone(), last_applied_edit_mode.clone());
             apply_pin(app.handle(), &pin_item, pinned_at_startup);
 
             let pin_item_for_handler = pin_item.clone();
             let show_inactive_item_for_handler = show_inactive_item.clone();
+            let edit_mode_item_for_handler = edit_mode_item.clone();
+            let last_applied_edit_mode_for_handler = last_applied_edit_mode.clone();
             TrayIconBuilder::new()
                 .icon(icon)
                 .icon_as_template(true)
@@ -385,11 +486,18 @@ pub fn run() {
                     } else if event.id.0.as_str() == "show-inactive" {
                         if let Ok(show) = show_inactive_item_for_handler.is_checked() {
                             lanes::state::set_show_inactive(show);
-                            // Not reflected in gather_lanes() output until the
-                            // next get_snapshot() call - nudge the frontend to
-                            // make that call now instead of waiting on the
-                            // next unrelated refresh.
-                            app.emit("sessions-changed", ()).ok();
+                            // The frontend filters show-inactive itself
+                            // against whatever it already has (see
+                            // App.svelte's visibleLanes) - no need to
+                            // trigger a full resnapshot, just tell it the
+                            // new value.
+                            app.emit("show-inactive-changed", show).ok();
+                        }
+                    } else if event.id.0.as_str() == "edit-mode" {
+                        if let Ok(enabled) = edit_mode_item_for_handler.is_checked() {
+                            lanes::state::set_edit_mode(enabled);
+                            last_applied_edit_mode_for_handler.store(enabled, Ordering::SeqCst);
+                            apply_edit_mode(app, &edit_mode_item_for_handler, enabled);
                         }
                     } else if event.id.0.as_str() == "quit" {
                         app.exit(0);
@@ -399,7 +507,17 @@ pub fn run() {
 
             Ok(())
         })
-        .invoke_handler(tauri::generate_handler![get_snapshot, execute_action, set_focused_lane, focus_lane, log_ui_event])
+        .invoke_handler(tauri::generate_handler![
+            get_snapshot,
+            execute_action,
+            set_focused_lane,
+            focus_lane,
+            log_ui_event,
+            get_edit_mode,
+            set_edit_mode,
+            set_lane_active,
+            get_show_inactive
+        ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
 }

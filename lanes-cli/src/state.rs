@@ -114,6 +114,20 @@ pub fn set_show_inactive(show: bool) {
     save_doc(&doc);
 }
 
+/// Whether Lanes Switch's dashboard is in edit mode (a per-lane
+/// enable/disable toggle switch visible on each row). Same persisted-toggle
+/// pattern as switch-pinned/show-inactive - defaults to false so a fresh
+/// launch always opens in the plain read-only view.
+pub fn read_edit_mode() -> bool {
+    get_scalar_bool(&load_doc(), "edit-mode")
+}
+
+pub fn set_edit_mode(enabled: bool) {
+    let mut doc = load_doc();
+    put_scalar(&mut doc, "edit-mode", enabled);
+    save_doc(&doc);
+}
+
 /// Whether `logging::perf` writes to perf.log - the switch-latency
 /// timeline (trigger -> actual switch -> UI update). On by default, unlike
 /// switch-pinned/show-inactive: this exists specifically to have data ready
