@@ -189,13 +189,10 @@
       // Don't bother actually attempting the focus - it would just fail
       // via activate_wezterm_tab's own error, which is roundabout and
       // depends on wezterm's specific wording. We already know why it'd
-      // fail, so say so directly instead.
-      const session = lane.facets.find(f => f.kind === "terminal")?.session;
-      activeSignal = {
-        lane,
-        signal: missing,
-        status: `No WezTerm tab is currently reachable for Zellij session "${session ?? "?"}".`,
-      };
+      // fail: missing.detail already explains it (see lib.rs's
+      // gather_lanes) - the overlay renders it the same way it would for
+      // clicking the chip directly, no status/local explanation needed.
+      activeSignal = { lane, signal: missing, status: null };
       return;
     }
     snapshot = { ...snapshot, focused_lane: lane.id };
@@ -230,6 +227,7 @@
     const report = [
       `lane: ${s.lane.name}`,
       `signal: ${signalLabel(s.signal)}`,
+      `detail: ${s.signal.detail ?? "(none)"}`,
       `action: ${s.signal.action ? JSON.stringify(s.signal.action) : "none"}`,
       `error: ${s.status ?? "(none)"}`,
     ].join("\n");
@@ -285,6 +283,9 @@
     <div class="overlay" on:mousedown|stopPropagation role="dialog">
       <div class="overlay-lane">{activeSignal.lane.name}</div>
       <div class="overlay-reason">{signalLabel(activeSignal.signal)}</div>
+      {#if activeSignal.signal.detail}
+        <div class="overlay-detail">{activeSignal.signal.detail}</div>
+      {/if}
       {#if activeSignal.signal.action}
         <div class="overlay-action">{JSON.stringify(activeSignal.signal.action)}</div>
       {:else}
@@ -294,8 +295,8 @@
         <div class="overlay-status">{activeSignal.status}</div>
       {/if}
       <div class="overlay-buttons">
-        {#if activeSignal.status}
-          <button class="overlay-copy" title="copy error" on:click={copyErrorReport}>⧉</button>
+        {#if activeSignal.status || activeSignal.signal.detail}
+          <button class="overlay-copy" title="copy report" on:click={copyErrorReport}>⧉</button>
         {/if}
         <button class="overlay-dismiss" on:click={dismissOverlay}>dismiss</button>
       </div>
@@ -550,6 +551,11 @@
     color: var(--accent);
   }
 
+  .overlay-detail {
+    font-size: 0.74rem;
+    color: var(--ink);
+    line-height: 1.5;
+  }
   .overlay-action {
     font-size: 0.68rem;
     color: var(--ink-muted);

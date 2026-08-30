@@ -161,7 +161,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         // facet itself, surfaced nowhere). They're both just Lanes-kind
         // signals now, pushed into the Terminal facet's own signals list -
         // the one list the UI already reads for everything else.
-        if let Some(model::FacetSnapshot::Terminal { signals, .. }) =
+        if let Some(model::FacetSnapshot::Terminal { session, signals, .. }) =
             facets.iter_mut().find(|f| matches!(f, model::FacetSnapshot::Terminal { .. }))
         {
             if lane_session_missing(lane.active, reachable) {
@@ -174,6 +174,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
                     // just the same placeholder every construction site uses.
                     cyclable: false,
                     action: None,
+                    detail: Some(format!("no cached WezTerm tab for zellij session \"{session}\"")),
                 });
             }
             if terminal_running == Some(false) {
@@ -183,6 +184,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
                     reason,
                     cyclable: false,
                     action: None,
+                    detail: Some(format!("expected zellij session \"{session}\" to be running")),
                 });
             }
         }

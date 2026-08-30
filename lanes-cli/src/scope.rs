@@ -251,6 +251,8 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
                 // repo signal is never actually cyclable regardless.
                 cyclable: false,
                 action,
+                // The label already says everything relevant here.
+                detail: None,
             })
         }
 
@@ -269,6 +271,7 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
                 // lane's cyclable fact is known (see Signal::cyclable).
                 cyclable: false,
                 action: Some(SignalAction::SwitchClaudeSession { session_id: session_id.to_string() }),
+                detail: None,
             })
         }
 

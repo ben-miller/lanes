@@ -90,6 +90,17 @@ pub struct Signal {
     pub cyclable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<SignalAction>,
+    // Static, human-readable context about this specific signal instance -
+    // orthogonal to `action` (that's "is there something to click," this is
+    // "is there something worth explaining"), and unrelated to the
+    // frontend's own `status` concept (the *outcome* of actually invoking
+    // `action`, computed client-side, never sent from here). Most reasons
+    // don't need one - a "claude · idle" chip's label already says
+    // everything relevant. Reserved for reasons where the label alone
+    // doesn't say enough to be useful (e.g. Lanes::SessionMissing/
+    // SessionNotRunning naming which Zellij session was expected).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
 }
 
 impl Signal {
@@ -328,13 +339,28 @@ mod tests {
             urgency: Urgency::Attention,
             cyclable: true,
             action: None,
+            detail: Some("waiting for your input".to_string()),
         };
         let json = serde_json::to_value(&signal).unwrap();
         assert_eq!(json["kind"], "claude_session");
         assert_eq!(json["reason"], "awaiting");
         assert_eq!(json["urgency"], "attention");
         assert_eq!(json["cyclable"], true);
+        assert_eq!(json["detail"], "waiting for your input");
         assert!(json.get("action").is_none());
+    }
+
+    #[test]
+    fn signal_omits_detail_from_json_when_none() {
+        let signal = Signal {
+            reason: SignalReason::Repo(RepoReason::PendingCommit),
+            urgency: Urgency::Attention,
+            cyclable: false,
+            action: None,
+            detail: None,
+        };
+        let json = serde_json::to_value(&signal).unwrap();
+        assert!(json.get("detail").is_none());
     }
 
     #[test]
@@ -345,6 +371,7 @@ mod tests {
                 urgency: Urgency::Attention,
                 cyclable: false,
                 action: None,
+                detail: None,
             }
             .kind(),
             SignalKind::Repo
@@ -355,6 +382,7 @@ mod tests {
                 urgency: Urgency::Warning,
                 cyclable: false,
                 action: None,
+                detail: None,
             }
             .kind(),
             SignalKind::Lanes
