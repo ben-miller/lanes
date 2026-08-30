@@ -180,22 +180,49 @@
     return `${kindLabel(signal)} · ${reasonLabel(signal)}`;
   }
 
-  function missingSignal(lane) {
-    return allSignals(lane).find(s => s.kind === "lanes" && s.reason === "session_missing");
+  // Both reasons mean the same thing: this lane's terminal isn't actually
+  // there - session_missing (no cached WezTerm tab) and session_not_running
+  // (no Zellij session at all) are the two Lanes-kind facts gather_lanes()
+  // ever produces for that. Shared by the lane-click guard below and the
+  // is-unreachable class on both the lane card and the chip itself, so
+  // neither invites a hover affordance for something that's just an error
+  // display, not a normal action.
+  function isUnreachable(signal) {
+    return signal.kind === "lanes" && (signal.reason === "session_missing" || signal.reason === "session_not_running");
+  }
+
+  function unreachableSignal(lane) {
+    return allSignals(lane).find(isUnreachable);
   }
 
   async function handleLaneClick(lane) {
-    const missing = missingSignal(lane);
-    if (missing) {
+    const unreachable = unreachableSignal(lane);
+    if (unreachable) {
       // Don't bother actually attempting the focus - it would just fail
       // via activate_wezterm_tab's own error, which is roundabout and
       // depends on wezterm's specific wording. We already know why it'd
-      // fail: missing.detail already explains it (see lib.rs's
+      // fail: unreachable.detail already explains it (see lib.rs's
       // gather_lanes) - the overlay renders it the same way it would for
       // clicking the chip directly, no status/local explanation needed.
-      activeSignal = { lane, signal: missing, status: null };
+      activeSignal = { lane, signal: unreachable, status: null };
       return;
     }
+    // Clicking the lane card itself (not a specific chip) routes through
+    // whichever signal is first in display order and actually has
+    // something to do - purely positional (leftmost/topmost first, same
+    // order the chips render in), with no regard for kind or cyclable.
+    // cyclable answers a different question entirely (would the *global*
+    // hypo+J/K rotation land here, which requires the whole lane to be
+    // active+reachable) - clicking a specific lane directly doesn't care
+    // about that at all, it only cares what's actually sitting in it.
+    const firstActionable = allSignals(lane).find(s => s.action);
+    if (firstActionable) {
+      await handleSignalClick(lane, firstActionable);
+      return;
+    }
+    // Nothing actionable to route through (e.g. every signal here is
+    // detail-only, or there are no signals at all) - fall back to plain
+    // focus.
     snapshot = { ...snapshot, focused_lane: lane.id };
     await invoke("focus_lane", { laneId: lane.id });
     await refresh();
@@ -255,6 +282,7 @@
           class="lane"
           class:is-cyclable={lane.cyclable}
           class:is-focused={snapshot.focused_lane === lane.id}
+          class:is-unreachable={!!unreachableSignal(lane)}
           on:click={() => handleLaneClick(lane)}
         >
           <div class="lane-head"><span class="lane-name">{lane.name}</span></div>
@@ -265,6 +293,7 @@
                   class="signal urgency-{signal.urgency}"
                   class:is-active={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.focused_claude_session}
                   class:is-cyclable={signal.cyclable}
+                  class:is-unreachable={isUnreachable(signal)}
                   on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
                   on:click|stopPropagation
                 ><span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}</button>
@@ -432,8 +461,11 @@
      for an unfocused state; by the time a hover could show, the window is
      already focused. Declared after .lane.is-cyclable/:not(.is-cyclable) -
      same specificity (0,2,0) as either, so source order alone decides the
-     tie, and this needs to win on both. */
-  .lane:hover { border-color: var(--accent); }
+     tie, and this needs to win on both. Excludes is-unreachable (via
+     :not()) - clicking one of these just opens an explanatory overlay, not
+     a real action (see unreachableSignal in <script>), so it shouldn't
+     invite the same "this is a live target" affordance normal lanes get. */
+  .lane:hover:not(.is-unreachable) { border-color: var(--accent); }
   /* Focus surrounds whatever border is already there (Trello-style) rather
      than replacing it - a box-shadow ring sitting just outside the lane's
      own edge, so "focused" and "cyclable" stay two legible facts at once
@@ -483,8 +515,10 @@
      is-cyclable dimming below) reads as "clickable" without introducing a
      fourth color into a chip that already carries kind + urgency. Same
      "only fires once the window is key" note as .lane:hover applies here
-     too - see the focus-guard in <script>. */
-  .signal:hover { filter: brightness(var(--signal-hover-brightness)); }
+     too - see the focus-guard in <script>. Excludes is-unreachable, same
+     reasoning as .lane:hover above - this chip just opens an explanatory
+     overlay, not a real action. */
+  .signal:hover:not(.is-unreachable) { filter: brightness(var(--signal-hover-brightness)); }
   /* The one signal chip that IS the currently-focused Claude session,
      distinct from "this lane is focused" - a lane can be focused with
      several live Claude sessions in it, only one of which is the one
