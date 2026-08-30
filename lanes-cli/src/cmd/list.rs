@@ -28,6 +28,7 @@ pub fn run(lanes: &[Lane], json: bool) {
                     let id = el.trello_board_id()
                         .map(|id| format!("board={id}"))
                         .or_else(|| el.trello_list_id().map(|id| format!("list={id}")))
+                        .or_else(|| el.trello_list_card_position().map(|(id, pos)| format!("list={id} position={pos}")))
                         .unwrap_or_default();
                     println!("  trello          {id}");
                 }

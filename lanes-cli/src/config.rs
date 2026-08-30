@@ -151,6 +151,11 @@ fn default_true() -> bool {
 enum ScopeElementRaw {
     ZellijSession { session: String },
     Repo { path: String },
+    // Only the list+position shape for now - board/list-without-position
+    // aren't used by any lane yet, so there's nothing to validate a choice
+    // between. Add them here (and to the `From` impl below) when a lane
+    // actually wants one.
+    Trello { list: String, position: u32 },
 }
 
 impl From<ScopeElementRaw> for ScopeElement {
@@ -158,6 +163,7 @@ impl From<ScopeElementRaw> for ScopeElement {
         match raw {
             ScopeElementRaw::ZellijSession { session } => ScopeElement::zellij_session(&session),
             ScopeElementRaw::Repo { path } => ScopeElement::repo(&path),
+            ScopeElementRaw::Trello { list, position } => ScopeElement::trello_list_card(&list, position),
         }
     }
 }
@@ -294,6 +300,28 @@ session = "sheetwork"
         assert_eq!(file.lane.name, "Sheetwork");
         assert_eq!(file.scope.len(), 1);
         assert!(matches!(&file.scope[0], ScopeElementRaw::ZellijSession { session } if session == "sheetwork"));
+    }
+
+    #[test]
+    fn parses_lane_file_trello_list_card_scope_element() {
+        let content = r#"
+[lane]
+id = "lanes-dev"
+name = "Lanes Dev"
+
+[[scope]]
+kind = "trello"
+list = "abc123"
+position = 1
+"#;
+        let file: LaneFile = toml::from_str(content).unwrap();
+        assert_eq!(file.scope.len(), 1);
+        assert!(matches!(
+            &file.scope[0],
+            ScopeElementRaw::Trello { list, position } if list == "abc123" && *position == 1
+        ));
+        let element: ScopeElement = file.scope.into_iter().next().unwrap().into();
+        assert_eq!(element.trello_list_card_position(), Some(("abc123", 1)));
     }
 
     #[test]

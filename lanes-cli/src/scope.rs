@@ -55,6 +55,18 @@ impl ScopeElement {
         ScopeElement::Trello { locator: format!("trello://list/{}", list_id) }
     }
 
+    /// A specific position within a list - e.g. "the 3rd card" - rather than
+    /// the whole list. Not a `card://` locator: Trello has no "fetch card N"
+    /// endpoint, so this is really "list X, but only fetch as far as
+    /// position N" - a query shape on the list locator, encoded as its own
+    /// URI suffix the same way board vs. list already share one enum
+    /// variant. See observe_trello_list_position() for why this is cheaper
+    /// than the plain list locator (proportional to `position`, not to the
+    /// list's total size).
+    pub fn trello_list_card(list_id: &str, position: u32) -> Self {
+        ScopeElement::Trello { locator: format!("trello://list/{}/position/{}", list_id, position) }
+    }
+
     /// The raw repo path, if this is a Repo element - the inverse of
     /// `repo()`. Named accessors like this exist so callers extract values
     /// back out of a locator in one place instead of re-typing the scheme
@@ -89,7 +101,25 @@ impl ScopeElement {
 
     pub fn trello_list_id(&self) -> Option<&str> {
         match self {
-            ScopeElement::Trello { locator } => locator.strip_prefix("trello://list/"),
+            // Deliberately excludes the "/position/N" shape - strip_prefix
+            // alone would happily return "abc123/position/3" as if it were
+            // a bare list id, silently corrupting the plain-list code path
+            // instead of falling through to the position-aware one.
+            ScopeElement::Trello { locator } => {
+                let rest = locator.strip_prefix("trello://list/")?;
+                if rest.contains('/') { None } else { Some(rest) }
+            }
+            _ => None,
+        }
+    }
+
+    pub fn trello_list_card_position(&self) -> Option<(&str, u32)> {
+        match self {
+            ScopeElement::Trello { locator } => {
+                let rest = locator.strip_prefix("trello://list/")?;
+                let (list_id, position) = rest.split_once("/position/")?;
+                Some((list_id, position.parse().ok()?))
+            }
             _ => None,
         }
     }
@@ -160,10 +190,14 @@ fn observe_zellij_session(element: &ScopeElement) -> Vec<Observation> {
 /// Unlike the local kinds, this needs real credentials and a network call -
 /// shells out to curl rather than adding an HTTP client dependency, same
 /// "shell out to a CLI" approach used for git/zellij/wezterm elsewhere in
-/// this codebase. Quietly returns nothing if TRELLO_API_KEY/TRELLO_API_TOKEN
-/// aren't set, same "not configured -> empty" pattern as the old brotab
-/// driver had for a missing `bt` binary.
+/// this codebase. Quietly returns nothing if the Keychain entries aren't
+/// present (see keychain_secret()), same "not configured -> empty" pattern
+/// as the old brotab driver had for a missing `bt` binary.
 fn observe_trello(element: &ScopeElement) -> Vec<Observation> {
+    if let Some((list_id, position)) = element.trello_list_card_position() {
+        return observe_trello_list_card_position(list_id, position);
+    }
+
     let (resource, id) = if let Some(board_id) = element.trello_board_id() {
         ("boards", board_id)
     } else if let Some(list_id) = element.trello_list_id() {
@@ -172,19 +206,72 @@ fn observe_trello(element: &ScopeElement) -> Vec<Observation> {
         return vec![];
     };
 
-    let Ok(key) = std::env::var("TRELLO_API_KEY") else { return vec![] };
-    let Ok(token) = std::env::var("TRELLO_API_TOKEN") else { return vec![] };
+    let Some((key, token)) = trello_credentials() else { return vec![] };
 
     let url = format!(
         "https://api.trello.com/1/{resource}/{id}/cards?key={key}&token={token}&filter=open&fields=name,shortUrl,due"
     );
-    let Ok(output) = std::process::Command::new("curl").args(["-s", &url]).output() else {
+    trello_cards_to_observations(&fetch_trello_cards(&url))
+}
+
+/// Credentials come from the login Keychain, not the environment - avoids
+/// them sitting in a plaintext dotfile and being inherited into every child
+/// process's environment, and sidesteps needing them set in both the
+/// interactive shell (fish) and whatever Hammerspoon spawns `lanes` through
+/// (`bash -lc`, a different shell entirely) since this runs identically
+/// regardless of what launched the process. `security` whitelists itself
+/// for passwordless access to an item at creation time (`security
+/// add-generic-password ...`), so this doesn't prompt.
+///
+/// Account/service names (`trello`/`api-key`/`token`) deliberately match
+/// what `infra trello` (py/lib/infra_trello.py) already uses - these are
+/// the same credentials, not a second lanes-specific copy. See that file's
+/// `keychain()` helper (py/lib/table.py) for the other reader of this exact
+/// Keychain entry.
+fn keychain_secret(service: &str) -> Option<String> {
+    let output = std::process::Command::new("/usr/bin/security")
+        .args(["find-generic-password", "-a", "trello", "-s", service, "-w"])
+        .output()
+        .ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let secret = String::from_utf8(output.stdout).ok()?;
+    let secret = secret.trim();
+    if secret.is_empty() { None } else { Some(secret.to_string()) }
+}
+
+fn trello_credentials() -> Option<(String, String)> {
+    let key = keychain_secret("api-key")?;
+    let token = keychain_secret("token")?;
+    Some((key, token))
+}
+
+/// Trello has no "fetch card N" endpoint (confirmed against their REST
+/// docs - `pos` is a sparse float used for ordering, not an index you can
+/// query by). `limit` is the closest lever: requesting `limit=position`
+/// returns only the first `position` cards, so this is proportional to
+/// `position`, not to the list's total size - the whole reason this locator
+/// shape exists instead of always using the plain list one and discarding
+/// everything but one card client-side.
+fn observe_trello_list_card_position(list_id: &str, position: u32) -> Vec<Observation> {
+    if position == 0 {
+        return vec![];
+    }
+    let Some((key, token)) = trello_credentials() else { return vec![] };
+
+    let url = format!(
+        "https://api.trello.com/1/lists/{list_id}/cards?key={key}&token={token}&filter=open&fields=name,shortUrl,due&limit={position}"
+    );
+    nth_card_to_observations(&fetch_trello_cards(&url), position)
+}
+
+fn fetch_trello_cards(url: &str) -> Vec<serde_json::Value> {
+    let Ok(output) = std::process::Command::new("curl").args(["-s", url]).output() else {
         return vec![];
     };
     let Ok(body) = String::from_utf8(output.stdout) else { return vec![] };
-    let Ok(cards) = serde_json::from_str::<Vec<serde_json::Value>>(&body) else { return vec![] };
-
-    trello_cards_to_observations(&cards)
+    serde_json::from_str(&body).unwrap_or_default()
 }
 
 /// Split from observe_trello() so the actual parsing logic - the part that
@@ -202,6 +289,23 @@ fn trello_cards_to_observations(cards: &[serde_json::Value]) -> Vec<Observation>
             })
         })
         .collect()
+}
+
+/// Split from observe_trello_list_card_position() for the same reason
+/// trello_cards_to_observations() is: the part that can go wrong (the
+/// off-by-one between 1-indexed `position` and a 0-indexed Vec, and the
+/// "position is beyond how many cards exist" case) is unit-testable without
+/// live credentials or a network call. `position` is 1-indexed to match how
+/// a human says "the 3rd card" - `cards` is expected to already be exactly
+/// `limit=position`'s response, so the target is always its last element.
+fn nth_card_to_observations(cards: &[serde_json::Value], position: u32) -> Vec<Observation> {
+    if position == 0 {
+        return vec![];
+    }
+    match cards.get((position - 1) as usize) {
+        Some(card) => trello_cards_to_observations(std::slice::from_ref(card)),
+        None => vec![],
+    }
 }
 
 /// Resolve a whole scope (e.g. one lane's), pairing each element with its
@@ -344,6 +448,27 @@ mod tests {
     }
 
     #[test]
+    fn trello_list_card_locator_encodes_list_id_and_position() {
+        let el = ScopeElement::trello_list_card("xyz789", 3);
+        assert_eq!(el, ScopeElement::Trello { locator: "trello://list/xyz789/position/3".to_string() });
+        assert_eq!(el.trello_list_card_position(), Some(("xyz789", 3)));
+    }
+
+    #[test]
+    fn trello_list_card_locator_does_not_match_plain_list_or_board_accessors() {
+        let el = ScopeElement::trello_list_card("xyz789", 3);
+        assert_eq!(el.trello_list_id(), None);
+        assert_eq!(el.trello_board_id(), None);
+    }
+
+    #[test]
+    fn plain_trello_list_locator_does_not_match_the_position_accessor() {
+        let el = ScopeElement::trello_list("xyz789");
+        assert_eq!(el.trello_list_card_position(), None);
+        assert_eq!(el.trello_list_id(), Some("xyz789"));
+    }
+
+    #[test]
     fn accessors_round_trip_the_constructors() {
         assert_eq!(ScopeElement::repo("/a/b").repo_path(), Some("/a/b"));
         assert_eq!(ScopeElement::claude_session("abc").claude_session_id(), Some("abc"));
@@ -387,6 +512,45 @@ mod tests {
         assert_eq!(observations[0].data["due"], "2026-08-20T00:00:00.000Z");
         assert_eq!(observations[1].data["name"], "Write the doc");
         assert!(observations[1].data["due"].is_null());
+    }
+
+    fn sample_cards() -> Vec<serde_json::Value> {
+        serde_json::from_str(r#"[
+            {"id": "1", "name": "First", "shortUrl": "https://trello.com/c/1", "due": null},
+            {"id": "2", "name": "Second", "shortUrl": "https://trello.com/c/2", "due": null},
+            {"id": "3", "name": "Third", "shortUrl": "https://trello.com/c/3", "due": null}
+        ]"#).unwrap()
+    }
+
+    #[test]
+    fn nth_card_picks_the_last_element_of_a_limit_n_batch() {
+        // Mirrors what observe_trello_list_card_position() actually passes
+        // in: the response to `limit=position`, so position 3 means "take
+        // the last of these 3 cards", not "index 3".
+        let observations = nth_card_to_observations(&sample_cards(), 3);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].data["name"], "Third");
+    }
+
+    #[test]
+    fn nth_card_position_one_is_the_first_card() {
+        let observations = nth_card_to_observations(&sample_cards()[..1], 1);
+        assert_eq!(observations.len(), 1);
+        assert_eq!(observations[0].data["name"], "First");
+    }
+
+    #[test]
+    fn nth_card_beyond_available_cards_produces_no_observation() {
+        // The list has fewer cards than `position` asked for - Trello's
+        // `limit` just returns everything it has, so the target slot is
+        // simply absent from the response rather than an error.
+        let observations = nth_card_to_observations(&sample_cards(), 10);
+        assert!(observations.is_empty());
+    }
+
+    #[test]
+    fn nth_card_position_zero_produces_no_observation() {
+        assert!(nth_card_to_observations(&sample_cards(), 0).is_empty());
     }
 
     #[test]
