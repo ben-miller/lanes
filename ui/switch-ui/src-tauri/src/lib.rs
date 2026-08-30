@@ -156,6 +156,16 @@ fn set_lane_active(lane_id: String, active: bool) -> Result<(), String> {
 }
 
 #[tauri::command]
+fn set_claude_session_disabled(session_id: String, disabled: bool) {
+    lanes::state::set_claude_session_disabled(&session_id, disabled);
+}
+
+#[tauri::command]
+fn get_disabled_claude_sessions() -> Vec<String> {
+    lanes::state::all_disabled_claude_sessions()
+}
+
+#[tauri::command]
 fn get_show_inactive() -> bool {
     lanes::state::read_show_inactive()
 }
@@ -535,7 +545,9 @@ pub fn run() {
             get_edit_mode,
             set_edit_mode,
             set_lane_active,
-            get_show_inactive
+            get_show_inactive,
+            set_claude_session_disabled,
+            get_disabled_claude_sessions
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

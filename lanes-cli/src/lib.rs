@@ -214,7 +214,13 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
                 model::FacetSnapshot::Window { .. } => continue,
             };
             for s in signals.iter_mut() {
-                s.cyclable = signal_cyclable(s.kind(), cyclable);
+                let session_disabled = match &s.action {
+                    Some(model::SignalAction::SwitchClaudeSession { session_id }) => {
+                        state::is_claude_session_disabled(session_id)
+                    }
+                    _ => false,
+                };
+                s.cyclable = signal_cyclable(s.kind(), cyclable, session_disabled);
                 s.reason = upgrade_awaiting_to_ready(s.reason.clone(), s.cyclable);
                 s.urgency = s.reason.urgency();
             }
@@ -303,12 +309,15 @@ fn lane_cyclable(active: bool, reachable: Option<bool>, has_claude_signal: bool)
 /// sessions (`drivers::claude::enumerate()`) - it never looks at repo or
 /// lanes-kind facts at all, regardless of a lane's own reachability - so a
 /// signal can only be cyclable if it's a ClaudeSession-kind one *and* its
-/// lane is cyclable. Every ClaudeSession signal shown under a given lane
-/// belongs to that lane by construction (gather_lanes() only ever resolves
-/// a lane's own zellij session's live sessions into it), so there's no
-/// further per-session check beyond the lane's own cyclable fact.
-fn signal_cyclable(kind: model::SignalKind, lane_cyclable: bool) -> bool {
-    kind == model::SignalKind::ClaudeSession && lane_cyclable
+/// lane is cyclable *and* that specific session hasn't been individually
+/// excluded (see state::is_claude_session_disabled - edit mode's per-session
+/// toggle, keyed by session_id so it resets whenever the session itself
+/// does). Every ClaudeSession signal shown under a given lane belongs to
+/// that lane by construction (gather_lanes() only ever resolves a lane's
+/// own zellij session's live sessions into it), so there's no further
+/// per-session check beyond these two facts.
+fn signal_cyclable(kind: model::SignalKind, lane_cyclable: bool, session_disabled: bool) -> bool {
+    kind == model::SignalKind::ClaudeSession && lane_cyclable && !session_disabled
 }
 
 /// Upgrades an idle-Claude signal to Ready once its lane turns out
@@ -703,9 +712,14 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     // Skip sessions that live in an inactive lane, or one with no cached
     // WezTerm tab-id (see lane_session_missing) - that's exactly what
     // caused the "wezterm activate-tab failed" cycling errors, since
-    // there's nothing for a switch to actually land on.
+    // there's nothing for a switch to actually land on. Also skip anything
+    // individually excluded via edit mode's per-session toggle (see
+    // state::is_claude_session_disabled) - same rule signal_cyclable()
+    // applies for the dashboard's own cyclable flag, kept in sync here
+    // rather than re-derived.
     let live_sessions: Vec<_> = live_sessions.into_iter()
         .filter(|s| session_belongs_to_reachable_lane(s.zellij_session.as_deref(), &cfg))
+        .filter(|s| !state::is_claude_session_disabled(&s.session_id))
         .collect();
     logging::perf("cycle.filtered", &format!("elapsed_us={} count={}", ct0.elapsed().as_micros(), live_sessions.len()));
 
@@ -1402,12 +1416,17 @@ mod tests {
 
     #[test]
     fn claude_session_signal_in_a_cyclable_lane_is_cyclable() {
-        assert!(signal_cyclable(model::SignalKind::ClaudeSession, true));
+        assert!(signal_cyclable(model::SignalKind::ClaudeSession, true, false));
     }
 
     #[test]
     fn claude_session_signal_in_a_non_cyclable_lane_is_not_cyclable() {
-        assert!(!signal_cyclable(model::SignalKind::ClaudeSession, false));
+        assert!(!signal_cyclable(model::SignalKind::ClaudeSession, false, false));
+    }
+
+    #[test]
+    fn individually_disabled_claude_session_is_not_cyclable_even_in_a_cyclable_lane() {
+        assert!(!signal_cyclable(model::SignalKind::ClaudeSession, true, true));
     }
 
     #[test]
@@ -1415,8 +1434,8 @@ mod tests {
         // cycle_claude_session only ever collects live Claude sessions -
         // a pending-commit or session-missing signal is never something a
         // cycle would land on, regardless of the lane's own cyclable fact.
-        assert!(!signal_cyclable(model::SignalKind::Repo, true));
-        assert!(!signal_cyclable(model::SignalKind::Lanes, true));
+        assert!(!signal_cyclable(model::SignalKind::Repo, true, false));
+        assert!(!signal_cyclable(model::SignalKind::Lanes, true, false));
     }
 
     #[test]

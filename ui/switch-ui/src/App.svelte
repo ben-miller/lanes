@@ -164,6 +164,7 @@
     timer = setInterval(refresh, 10000);
     editMode = await invoke("get_edit_mode");
     showInactive = await invoke("get_show_inactive");
+    disabledClaudeSessions = new Set(await invoke("get_disabled_claude_sessions"));
     unlistenEditMode = await listen("edit-mode-changed", (event) => applyEditMode(event.payload));
     unlistenShowInactive = await listen("show-inactive-changed", (event) => applyShowInactive(event.payload));
     unlistenShowInactiveNoop = await listen("show-inactive-noop", () => pulseAcknowledge());
@@ -320,6 +321,24 @@
     await invoke("set_lane_active", { laneId: lane.id, active });
   }
 
+  // Excludes/re-includes one specific Claude session from sessions next/prev
+  // cycling, keyed by its own session_id (see state::is_claude_session_
+  // disabled on the backend for why that's a fine key despite the UUID
+  // changing on restart) - crossed against a plain Set fetched once at
+  // mount rather than a field threaded through every Signal, since it's
+  // only ever meaningful for claude_session-kind chips.
+  let disabledClaudeSessions = new Set();
+
+  async function toggleSessionCycling(signal) {
+    const sessionId = signal.action?.session_id;
+    if (!sessionId) return;
+    const disabled = !disabledClaudeSessions.has(sessionId);
+    const next = new Set(disabledClaudeSessions);
+    if (disabled) next.add(sessionId); else next.delete(sessionId);
+    disabledClaudeSessions = next;
+    await invoke("set_claude_session_disabled", { sessionId, disabled });
+  }
+
   function dismissOverlay() {
     activeSignal = null;
     // Catch up on any resize that was skipped in refresh() while this
@@ -369,16 +388,30 @@
           <div class="lane-body">
             <div class="lane-head"><span class="lane-name">{lane.name}</span></div>
             {#if signals.length > 0}
-              <div class="signals">
+              <div class="signals" class:is-editing={editMode}>
                 {#each signals as signal}
-                  <button
-                    class="signal urgency-{signal.urgency}"
-                    class:is-active={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.focused_claude_session}
-                    class:is-cyclable={signal.cyclable}
-                    class:is-unreachable={isUnreachable(signal)}
-                    on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
-                    on:click|stopPropagation
-                  ><span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}</button>
+                  <span class="signal-wrap">
+                    <button
+                      class="signal urgency-{signal.urgency}"
+                      class:is-active={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.focused_claude_session}
+                      class:is-cyclable={signal.cyclable}
+                      class:is-unreachable={isUnreachable(signal)}
+                      on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
+                      on:click|stopPropagation
+                    ><span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}</button>
+                    <!-- Only for an active lane - an inactive one is already
+                         excluded from cycling entirely (the lane-level
+                         toggle above), so a per-session cycling toggle here
+                         would be controlling something that's already off. -->
+                    {#if editMode && lane.active && signal.kind === "claude_session"}
+                      <button
+                        class="session-toggle"
+                        class:is-on={!disabledClaudeSessions.has(signal.action.session_id)}
+                        aria-label={disabledClaudeSessions.has(signal.action.session_id) ? "Include in cycling" : "Exclude from cycling"}
+                        on:click|stopPropagation={() => toggleSessionCycling(signal)}
+                      ></button>
+                    {/if}
+                  </span>
                 {/each}
               </div>
             {:else}
@@ -640,6 +673,48 @@
     flex-wrap: wrap;
     gap: 0.3rem;
   }
+  /* Extra breathing room once each chip can grow a session-toggle beside
+     it - without this, adjacent chip+toggle pairs sit close enough to
+     misread as one group. */
+  .signals.is-editing {
+    gap: 0.6rem;
+  }
+  .signal-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.3rem;
+  }
+  /* Edit mode's per-session cycling toggle - only ever rendered next to a
+     claude_session-kind chip (see the template), since that's the only
+     signal kind cycling ever visits in the first place. Same round-switch
+     language as .lane-toggle, just scaled down to sit inline with a chip
+     instead of a whole row. */
+  .session-toggle {
+    flex: none;
+    width: 26px;
+    height: 16px;
+    border-radius: 999px;
+    background: var(--border);
+    position: relative;
+    border: none;
+    padding: 0;
+    cursor: pointer;
+    transition: background 0.15s ease;
+  }
+  .session-toggle::after {
+    content: "";
+    position: absolute;
+    top: 2px;
+    left: 2px;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--panel);
+    box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+    transition: transform 0.15s ease;
+  }
+  .session-toggle.is-on { background: var(--accent); }
+  .session-toggle.is-on::after { transform: translateX(10px); }
   .signal {
     display: inline-flex;
     align-items: center;

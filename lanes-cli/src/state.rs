@@ -209,6 +209,56 @@ pub fn all_wezterm_tab_ids() -> Vec<(String, u64)> {
         .collect()
 }
 
+/// Whether a live Claude session is excluded from `sessions next`/`prev`
+/// cycling - keyed by its own session_id (the UUID from
+/// `~/.claude/active-sessions/*.json`), not the Zellij pane it happens to
+/// be running in. That UUID is regenerated every time `claude` restarts in
+/// that pane, so this exclusion resets on restart rather than surviving it
+/// - a deliberate choice, not a gap: re-excluding a freshly restarted
+/// session is one click, and a stale entry for a session that's gone never
+/// matches anything again, so nothing needs cleaning up either. Absence =
+/// included (the default).
+pub fn is_claude_session_disabled(session_id: &str) -> bool {
+    claude_session_disabled_in(&load_doc(), session_id)
+}
+
+fn claude_session_disabled_in(doc: &KdlDocument, session_id: &str) -> bool {
+    doc.nodes().iter().any(|n| {
+        n.name().value() == "claude-session-disabled"
+            && n.get("id").and_then(|v| v.as_string()) == Some(session_id)
+    })
+}
+
+pub fn set_claude_session_disabled(session_id: &str, disabled: bool) {
+    let mut doc = load_doc();
+    set_claude_session_disabled_in(&mut doc, session_id, disabled);
+    save_doc(&doc);
+}
+
+fn set_claude_session_disabled_in(doc: &mut KdlDocument, session_id: &str, disabled: bool) {
+    doc.nodes_mut().retain(|n| {
+        !(n.name().value() == "claude-session-disabled"
+            && n.get("id").and_then(|v| v.as_string()) == Some(session_id))
+    });
+    if disabled {
+        let mut node = KdlNode::new("claude-session-disabled");
+        node.insert("id", session_id);
+        doc.nodes_mut().push(node);
+    }
+}
+
+/// Every currently-disabled session_id, for the frontend to cross-reference
+/// against each ClaudeSession signal's own session_id when deciding what
+/// edit mode's per-chip toggle should show - cheaper than threading a new
+/// field through the whole Signal/serialization pipeline for something only
+/// ever meaningful on one signal kind.
+pub fn all_disabled_claude_sessions() -> Vec<String> {
+    load_doc().nodes().iter()
+        .filter(|n| n.name().value() == "claude-session-disabled")
+        .filter_map(|n| n.get("id").and_then(|v| v.as_string()).map(str::to_string))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,5 +371,43 @@ mod tests {
         put_scalar(&mut doc, "focused-lane", "infra");
         assert_eq!(wezterm_tab_id_from(&doc, "lanes"), Some(4));
         assert_eq!(wezterm_tab_id_from(&doc, "infra"), Some(3));
+    }
+
+    #[test]
+    fn claude_session_disabled_defaults_false_when_absent() {
+        let doc = KdlDocument::new();
+        assert!(!claude_session_disabled_in(&doc, "abc-123"));
+    }
+
+    #[test]
+    fn set_claude_session_disabled_in_marks_a_session_disabled() {
+        let mut doc = KdlDocument::new();
+        set_claude_session_disabled_in(&mut doc, "abc-123", true);
+        assert!(claude_session_disabled_in(&doc, "abc-123"));
+    }
+
+    #[test]
+    fn set_claude_session_disabled_in_re_enables_without_leaving_a_duplicate() {
+        let mut doc = KdlDocument::new();
+        set_claude_session_disabled_in(&mut doc, "abc-123", true);
+        set_claude_session_disabled_in(&mut doc, "abc-123", false);
+        assert!(!claude_session_disabled_in(&doc, "abc-123"));
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "claude-session-disabled").count(), 0);
+    }
+
+    #[test]
+    fn claude_session_disabled_is_independent_per_session() {
+        let mut doc = KdlDocument::new();
+        set_claude_session_disabled_in(&mut doc, "abc-123", true);
+        assert!(claude_session_disabled_in(&doc, "abc-123"));
+        assert!(!claude_session_disabled_in(&doc, "def-456"));
+    }
+
+    #[test]
+    fn set_claude_session_disabled_in_true_twice_does_not_duplicate() {
+        let mut doc = KdlDocument::new();
+        set_claude_session_disabled_in(&mut doc, "abc-123", true);
+        set_claude_session_disabled_in(&mut doc, "abc-123", true);
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "claude-session-disabled").count(), 1);
     }
 }
