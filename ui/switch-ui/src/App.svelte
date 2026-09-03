@@ -239,6 +239,30 @@
     return lane.facets.flatMap(f => f.signals ?? []);
   }
 
+  // Whether hypo+J/K would actually land on this signal: the backend's
+  // signal.cyclable already means "ClaudeSession-kind, in a cyclable lane,
+  // not individually excluded" (see lib.rs's signal_cyclable), but that
+  // flag only refreshes on the next gather_lanes() round-trip - cross it
+  // against the locally-tracked disabled set too so a just-toggled session
+  // drops out immediately.
+  function isCyclable(signal) {
+    const sid = signal.action?.session_id;
+    if (signal.kind === "claude_session" && sid && disabledClaudeSessions.has(sid)) return false;
+    return signal.cyclable;
+  }
+
+  // Non-edit mode is purely the cycle list: only chips hypo+J/K would land
+  // on. Everything else - disabled Claude sessions, git chips (pending
+  // commit, non-default branch), lanes chips (session missing) - is
+  // detail that only belongs in edit mode, where you're actually managing
+  // what's in the cycle. `editMode` and `disabledClaudeSessions` are passed
+  // in (not just closed over) so Svelte tracks them as reactive deps of the
+  // each block that calls this.
+  function visibleSignals(lane, _editMode, _disabled) {
+    const signals = allSignals(lane);
+    return _editMode ? signals : signals.filter(isCyclable);
+  }
+
   // Kind (which domain a signal is about) and reason (what's true within
   // that domain) are two separate fields on the backend Signal now - kind
   // drives the pill, reason drives the rest of the label. Neither is
@@ -296,12 +320,11 @@
     // Clicking the lane card itself (not a specific chip) routes through
     // whichever signal is first in display order and actually has
     // something to do - purely positional (leftmost/topmost first, same
-    // order the chips render in), with no regard for kind or cyclable.
-    // cyclable answers a different question entirely (would the *global*
-    // hypo+J/K rotation land here, which requires the whole lane to be
-    // active+reachable) - clicking a specific lane directly doesn't care
-    // about that at all, it only cares what's actually sitting in it.
-    const firstActionable = allSignals(lane).find(s => s.action);
+    // order the chips render in). Only signals that are actually rendered
+    // count: in non-edit mode the git/lanes/disabled chips are hidden, so
+    // clicking a lane showing "no signals" falls through to plain focus
+    // rather than silently routing to a chip that isn't on screen.
+    const firstActionable = visibleSignals(lane, editMode, disabledClaudeSessions).find(s => s.action);
     if (firstActionable) {
       await handleSignalClick(lane, firstActionable);
       return;
@@ -393,7 +416,7 @@
   <div class="dashboard" bind:this={dashboardEl} style="width: {panelWidth}px">
     <div class="panel" class:pulse-noop={pulseNoop}>
       {#each visibleLanes as lane}
-        {@const signals = allSignals(lane)}
+        {@const signals = visibleSignals(lane, editMode, disabledClaudeSessions)}
         <div
           class="lane"
           class:is-cyclable={lane.cyclable}
@@ -763,12 +786,12 @@
      the chip via box-shadow rather than replacing its own border, so it
      never has to fight the chip's own urgency-colored background. */
   .signal.is-active { box-shadow: 0 0 0 2px var(--accent); }
-  /* Same "would a cycle land here" question as .lane.is-cyclable, one level
-     down - cycling only ever visits live Claude sessions (signal.cyclable,
-     from lib.rs's signal_cyclable()), so a pending-commit or
-     session-missing chip recedes slightly rather than looking like
-     something hypo+J/K would jump to. Opacity, not a background swap like
-     the lane-level treatment: these chips still need their full
+  /* Only reachable in edit mode now - non-edit mode filters non-cyclable
+     chips out entirely (see visibleSignals). In edit mode, where every
+     signal renders so you can manage the cycle, a pending-commit or
+     session-missing or disabled-session chip recedes rather than looking
+     like something hypo+J/K would jump to. Opacity, not a background swap
+     like the lane-level treatment: these chips still need their full
      urgency color to read (a non-cyclable blocking signal is still
      blocking), just muted enough to read as "not a cycle target." */
   .signal:not(.is-cyclable) { opacity: var(--signal-dim-opacity); }

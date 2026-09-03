@@ -95,6 +95,8 @@ Two rules keep the two paths from fighting each other:
 
 The hypo+J/K window auto-hides on Control-Option release regardless of edit mode (only `switch-pinned` keeps it up). Hammerspoon (`hs-profiles/lanesswitch.lua` in infra) owns that release watcher and always sends `hide-switch`.
 
+**Non-edit mode is the cycle list.** The dashboard only renders signal chips that hypo+J/K would actually land on - i.e. `signal.cyclable` (a live Claude session, in an active + reachable lane, not individually excluded). Git chips (pending commit, non-default branch), lanes chips (session missing), and disabled Claude sessions are hidden until you turn on edit mode, which is where you manage what's in the cycle. An active lane whose chips are all hidden still shows as a row (a valid plain-focus click target), labelled "no signals".
+
 ## Building and installing
 
 ```bash
