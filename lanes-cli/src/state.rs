@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use kdl::{KdlDocument, KdlNode};
 
@@ -19,7 +19,30 @@ fn save_doc(doc: &KdlDocument) {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(path, doc.to_string()).ok();
+    // Write-then-rename rather than a plain `fs::write`: state.kdl is
+    // rewritten in full on every scalar change (a switch touches
+    // claude-cursor + focused-lane together), and Lanes Switch's fs-watcher
+    // reads the file the instant it sees a change event. A non-atomic
+    // truncate-then-write leaves a window where that reader sees a partial
+    // or empty file - load_doc() then parses nothing and every field reads
+    // as its default, which the watcher acts on (e.g. edit-mode flips
+    // false, then true again a few ms later, and apply_edit_mode's window
+    // raise fires on the bounce). rename(2) is atomic on the same
+    // filesystem, so a reader sees either the old file or the new one,
+    // never a torn one.
+    atomic_write(&path, &doc.to_string());
+}
+
+/// Write `contents` to `path` via a sibling `.tmp` file plus `rename(2)`, so
+/// a concurrent reader (Lanes Switch's fs-watcher) sees either the whole old
+/// file or the whole new one, never a torn write. The staging file sits next
+/// to the target so the rename stays on one filesystem; Lanes Switch's
+/// watcher ignores `*.tmp` in the state dir (see is_relevant_change there).
+fn atomic_write(path: &Path, contents: &str) {
+    let tmp = path.with_extension("kdl.tmp");
+    if std::fs::write(&tmp, contents).is_ok() && std::fs::rename(&tmp, path).is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
 }
 
 // state.kdl mostly holds flat scalar nodes (`name value`) - one value per
@@ -262,6 +285,27 @@ pub fn all_disabled_claude_sessions() -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_replaces_contents_and_leaves_no_tmp_behind() {
+        let dir = std::env::temp_dir().join(format!("lanes-state-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("state.kdl");
+
+        atomic_write(&path, "focused-lane infra\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "focused-lane infra\n");
+        // Regression guard: a torn read is exactly what the switcher's
+        // fs-watcher used to act on (edit-mode flickering false->true, its
+        // window raise firing on the bounce) - the staging file must be gone
+        // once the write lands, and never be the thing the watcher sees.
+        assert!(!path.with_extension("kdl.tmp").exists());
+
+        atomic_write(&path, "focused-lane lanes-dev\n");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "focused-lane lanes-dev\n");
+        assert!(!path.with_extension("kdl.tmp").exists());
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn scalar_round_trips_and_overwrites_without_duplicating() {

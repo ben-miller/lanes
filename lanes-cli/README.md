@@ -81,6 +81,20 @@ lanes diagnostics on/off       # toggle logging (on by default)
 lanes diagnostics logs [-f]    # tail perf.log
 ```
 
+## Lanes Switch window state
+
+`~/.local/state/lanes/state.kdl` is the single source of truth for Lanes Switch's window state - `switch-pinned`, `edit-mode`, `show-inactive`, plus the focused lane/session cursor. The CLI only ever writes this file; the running Tauri app reacts to it two ways:
+
+- **Direct socket** (`~/.local/state/lanes/switch.sock`) - the low-latency path for `show`/`hide`/`edit-mode:`/lane-changed, used when the app is already running. `lanes show-switch`/`hide-switch`/`toggle-edit-mode`/`sessions next --show` all ping this.
+- **`state.kdl` fs-watcher** - the fallback for when the app wasn't running to catch the socket message. It syncs the tray checkboxes and the dashboard to whatever the file now says.
+
+Two rules keep the two paths from fighting each other:
+
+1. **Writes are atomic** (`state::atomic_write` - write a sibling `state.kdl.tmp`, then `rename(2)`). The fs-watcher reads the file the instant it sees a change event; a plain truncate-then-write left a window where it read a half-written (or momentarily empty) file, parsed nothing, and acted on every field's default value. That's what made `edit-mode` flicker `false` then `true` again mid-switch, and Lanes Switch's window jump back up on the bounce.
+2. **Only deliberate actions raise the window.** Enabling edit mode from hypo+E or the tray checkbox brings the window to the front (the shortcut is meant to work from anywhere); the fs-watcher path never does. Otherwise a switch - which rewrites `state.kdl` - would drag the window back up right after the Control-Option release hid it.
+
+The hypo+J/K window auto-hides on Control-Option release regardless of edit mode (only `switch-pinned` keeps it up). Hammerspoon (`hs-profiles/lanesswitch.lua` in infra) owns that release watcher and always sends `hide-switch`.
+
 ## Building and installing
 
 ```bash

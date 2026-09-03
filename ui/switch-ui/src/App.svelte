@@ -53,7 +53,15 @@
       // resizing out from under an open modal is bad UX either way; the
       // deferred call in dismissOverlay()/copyErrorReport's flow catches
       // up once the overlay actually closes.
-      if (!activeSignal) await resizeToContent();
+      // Also skip while the window is hidden: a background refresh (10s
+      // timer or a sessions-changed event) landing after the hypo+J/K
+      // window was dismissed on Control-Option release would otherwise call
+      // win.setSize()/setPosition() on a hidden window, which on macOS can
+      // order it back on screen - a second, subtler way the switcher fails
+      // to stay gone. The "switch-shown" listener below re-runs a full
+      // refresh (this one included) the moment it's shown again, so it never
+      // comes back at a stale size.
+      if (!activeSignal && await getCurrentWindow().isVisible()) await resizeToContent();
     } finally {
       invoke("log_ui_event", { event: "ui.refresh.done", detail: `elapsed_ms=${(performance.now() - t0).toFixed(1)}` });
       refreshInFlight = false;
@@ -92,6 +100,7 @@
   let unlistenEditMode;
   let unlistenShowInactive;
   let unlistenShowInactiveNoop;
+  let unlistenShown;
 
   // state.kdl's edit-mode/show-inactive fields are the source of truth (see
   // src-tauri) - these mirror them locally rather than owning them, so the
@@ -168,6 +177,12 @@
     unlistenEditMode = await listen("edit-mode-changed", (event) => applyEditMode(event.payload));
     unlistenShowInactive = await listen("show-inactive-changed", (event) => applyShowInactive(event.payload));
     unlistenShowInactiveNoop = await listen("show-inactive-noop", () => pulseAcknowledge());
+    // Emitted right after the window is shown for a hypo+J/K switch (see
+    // lib.rs's "show" socket handler). refresh() skips its resize while the
+    // window is hidden, so this is what re-measures and re-centers it the
+    // moment it's back - without it the window could reappear at whatever
+    // size it had when it was last hidden.
+    unlistenShown = await listen("switch-shown", () => refresh());
     unlistenSessions = await listen("sessions-changed", () => refresh());
     // Fires immediately on a lane/session change (see lib.rs) - update both
     // highlights right away instead of waiting on the slower full refresh
@@ -217,6 +232,7 @@
     if (unlistenEditMode) unlistenEditMode();
     if (unlistenShowInactive) unlistenShowInactive();
     if (unlistenShowInactiveNoop) unlistenShowInactiveNoop();
+    if (unlistenShown) unlistenShown();
   });
 
   function allSignals(lane) {

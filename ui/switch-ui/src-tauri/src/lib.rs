@@ -46,6 +46,11 @@ fn start_switch_socket(
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.show();
                         let _ = win.set_focus();
+                        // The frontend skips its resize/recenter while the
+                        // window is hidden (see App.svelte's refresh) - tell
+                        // it we're visible again so it re-measures now
+                        // rather than reappearing at a stale size.
+                        handle.emit("switch-shown", ()).ok();
                     }
                 } else if line == "hide" {
                     if let Some(win) = handle.get_webview_window("main") {
@@ -64,7 +69,7 @@ fn start_switch_socket(
                         // redundant second show()/set_focus() call - visible
                         // as a flicker, not just wasted work.
                         if last_applied_edit_mode.swap(enabled, Ordering::SeqCst) != enabled {
-                            apply_edit_mode(&handle, &edit_mode_item, &show_inactive_item, enabled);
+                            apply_edit_mode(&handle, &edit_mode_item, &show_inactive_item, enabled, true);
                         }
                     }
                 } else if line == "show-inactive-noop" {
@@ -239,7 +244,12 @@ fn is_relevant_change(
         if path.starts_with(state_dir.join("cache")) {
             return false;
         }
-        return path.extension().and_then(|e| e.to_str()) != Some("log");
+        // state.kdl.tmp is state::save_doc's write-then-rename staging file
+        // (see there) - the real change arrives as the rename onto
+        // state.kdl itself, so the .tmp write is just noise that would
+        // trigger a redundant refresh.
+        let ext = path.extension().and_then(|e| e.to_str());
+        return ext != Some("log") && ext != Some("tmp");
     }
     for watch in watches {
         if !path.starts_with(&watch.root) {
@@ -300,6 +310,35 @@ mod tests {
     }
 
     #[test]
+    fn state_kdl_tmp_staging_writes_are_never_relevant() {
+        // state::atomic_write stages every state.kdl write in a sibling
+        // state.kdl.tmp before rename(2) - the real change lands as the
+        // rename onto state.kdl itself, so reacting to the .tmp write too
+        // is just a redundant refresh.
+        let state_dir = Path::new("/home/x/.local/state/lanes");
+        assert!(
+            !is_relevant_change(
+                &[],
+                Path::new("/home/x/.claude/active-sessions"),
+                state_dir,
+                Path::new("/home/x/.config/lanes"),
+                Path::new("/home/x/.config/lanes.toml"),
+                &state_dir.join("state.kdl.tmp"),
+            ),
+            "a state.kdl.tmp write should not be treated as relevant"
+        );
+        // ...but the rename target still is.
+        assert!(is_relevant_change(
+            &[],
+            Path::new("/home/x/.claude/active-sessions"),
+            state_dir,
+            Path::new("/home/x/.config/lanes"),
+            Path::new("/home/x/.config/lanes.toml"),
+            &state_dir.join("state.kdl"),
+        ));
+    }
+
+    #[test]
     fn cache_dir_writes_in_state_dir_are_never_relevant() {
         // Same class of regression as the *.log exclusion above:
         // drivers::zellij's list-panes TTL cache lives at
@@ -336,9 +375,21 @@ fn apply_pin(app: &tauri::AppHandle, pin_item: &CheckMenuItem<tauri::Wry>, pinne
 
 /// Unlike apply_pin, turning edit mode off never hides the window - you'd
 /// still want the dashboard visible right after you're done editing it,
-/// just back in its plain read-only form. Turning it on does raise the
-/// window though, same as pin: the hypo+E shortcut is meant to work from
-/// anywhere, not just while Lanes Switch already happens to be visible.
+/// just back in its plain read-only form.
+///
+/// `raise_on_enable` controls whether turning edit mode *on* also brings the
+/// window to the front. That's wanted when the change came from a deliberate
+/// user action - the hypo+E shortcut and the tray checkbox are both meant to
+/// work from anywhere, not just while Lanes Switch already happens to be
+/// visible - so those callers pass `true`. The state.kdl fs-watcher passes
+/// `false`: it's a passive sync path (keep the tray checkbox and the webview
+/// in step with whatever wrote the file), and a raise from there fights the
+/// hypo+J/K show/hide - a switch rewrites state.kdl, the watcher sees it,
+/// and edit mode being on would drag the window back up right after the
+/// Control-Option release hid it. The socket message the deliberate actions
+/// also send is what does the raise; the watcher is only the fallback for
+/// when the app wasn't running to receive that.
+///
 /// Doesn't touch show-inactive's *value* at all - the frontend's own filter
 /// (see App.svelte's visibleLanes) already shows everything while editMode
 /// is on, so there's nothing to force or restore on this side. It does
@@ -352,10 +403,11 @@ fn apply_edit_mode(
     edit_mode_item: &CheckMenuItem<tauri::Wry>,
     show_inactive_item: &CheckMenuItem<tauri::Wry>,
     enabled: bool,
+    raise_on_enable: bool,
 ) {
     let _ = edit_mode_item.set_checked(enabled);
     let _ = show_inactive_item.set_enabled(!enabled);
-    if enabled {
+    if enabled && raise_on_enable {
         if let Some(win) = app.get_webview_window("main") {
             let _ = win.show();
             let _ = win.set_focus();
@@ -428,7 +480,7 @@ fn watch_paths(
                     }
                     let edit_mode = lanes::state::read_edit_mode();
                     if last_applied_edit_mode.swap(edit_mode, Ordering::SeqCst) != edit_mode {
-                        apply_edit_mode(&handle, &edit_mode_item, &show_inactive_item, edit_mode);
+                        apply_edit_mode(&handle, &edit_mode_item, &show_inactive_item, edit_mode, false);
                     }
                     let show_inactive = lanes::state::read_show_inactive();
                     if show_inactive != last_show_inactive {
@@ -526,7 +578,7 @@ pub fn run() {
                         if let Ok(enabled) = edit_mode_item_for_handler.is_checked() {
                             lanes::state::set_edit_mode(enabled);
                             last_applied_edit_mode_for_handler.store(enabled, Ordering::SeqCst);
-                            apply_edit_mode(app, &edit_mode_item_for_handler, &show_inactive_item_for_handler, enabled);
+                            apply_edit_mode(app, &edit_mode_item_for_handler, &show_inactive_item_for_handler, enabled, true);
                         }
                     } else if event.id.0.as_str() == "quit" {
                         app.exit(0);
