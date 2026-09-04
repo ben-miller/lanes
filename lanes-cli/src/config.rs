@@ -75,7 +75,14 @@ pub fn set_lane_active(lane_id: &str, active: bool) -> std::io::Result<()> {
         std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
     })?;
     doc["lane"]["active"] = toml_edit::value(active);
-    std::fs::write(&path, doc.to_string())
+    // Write-then-rename: the Lanes Switch fs-watcher reads this dir the
+    // instant it sees a change, and a torn read makes toml parsing fail,
+    // which drops the lane from that refresh's snapshot entirely (see
+    // load_lanes) - the toggle appears to flicker or not stick. rename(2)
+    // is atomic on one filesystem. Same fix as state::atomic_write.
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    std::fs::rename(&tmp, &path)
 }
 
 impl Default for Config {

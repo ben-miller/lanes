@@ -236,6 +236,12 @@ fn is_relevant_change(
     global_config_path: &Path,
     path: &Path,
 ) -> bool {
+    // `.tmp` staging files from write-then-rename (state::atomic_write,
+    // config::set_lane_active) - the real change lands as the rename onto
+    // the target path, so the staging write is noise.
+    if path.extension().and_then(|e| e.to_str()) == Some("tmp") {
+        return false;
+    }
     if path.starts_with(sessions_dir) || path.starts_with(lanes_config_dir) || path == global_config_path {
         return true;
     }
@@ -255,12 +261,9 @@ fn is_relevant_change(
         if path.starts_with(state_dir.join("cache")) {
             return false;
         }
-        // state.kdl.tmp is state::save_doc's write-then-rename staging file
-        // (see there) - the real change arrives as the rename onto
-        // state.kdl itself, so the .tmp write is just noise that would
-        // trigger a redundant refresh.
-        let ext = path.extension().and_then(|e| e.to_str());
-        return ext != Some("log") && ext != Some("tmp");
+        // (*.tmp already excluded above.) *.log files - perf.log especially,
+        // written on every gather_lanes() - would self-trigger a refresh loop.
+        return path.extension().and_then(|e| e.to_str()) != Some("log");
     }
     for watch in watches {
         if !path.starts_with(&watch.root) {
@@ -347,6 +350,22 @@ mod tests {
             Path::new("/home/x/.config/lanes.toml"),
             &state_dir.join("state.kdl"),
         ));
+    }
+
+    #[test]
+    fn lane_toml_tmp_staging_writes_are_never_relevant() {
+        // config::set_lane_active stages the toggle write the same way.
+        let cfg_dir = Path::new("/home/x/.config/lanes");
+        let args = |p: &Path| is_relevant_change(
+            &[],
+            Path::new("/home/x/.claude/active-sessions"),
+            Path::new("/home/x/.local/state/lanes"),
+            cfg_dir,
+            Path::new("/home/x/.config/lanes.toml"),
+            p,
+        );
+        assert!(!args(&cfg_dir.join("lanes-wm.toml.tmp")));
+        assert!(args(&cfg_dir.join("lanes-wm.toml")));
     }
 
     #[test]

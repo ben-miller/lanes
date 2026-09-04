@@ -232,7 +232,12 @@
         win.setFocus();
         return;
       }
-      if (!e.target.closest(".signal") && !e.target.closest(".overlay")) {
+      // Drag the frameless window by its body - but never when the press
+      // lands on an interactive control. startDragging() hands the pointer
+      // to the OS drag machinery, and any drift before release eats the
+      // click, so a mousedown on a lane/session toggle (or a signal chip,
+      // or the dismiss ×) would intermittently just not register.
+      if (!e.target.closest("button") && !e.target.closest(".overlay")) {
         win.startDragging();
       }
     }, true);

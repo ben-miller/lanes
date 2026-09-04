@@ -12,9 +12,14 @@ hook, the `shell` driver, `Lifecycle` (`Live`/`Latched`), the
 shell-init fish`, and a doctor check. Enable with `drivers = [..., "shell"]`
 and `lanes shell-init fish | source` in config.fish.
 
-**Phase 2 not started**: the live `running` chip (needs the disowned-sleep
-timer), `lane-last-focused` + "focused at completion" courtesy, the
-`claude-session-disabled` → `signal-muted` rename, `bash`/`zsh` hooks.
+**Phase 2 not started, and now blocked on `PLAN-incremental-signals.md`.**
+The live `running` chip, `lane-last-focused` + "focused at completion"
+courtesy, the `claude-session-disabled` → `signal-muted` rename,
+`bash`/`zsh` hooks. Design settled (2026-09-05): the fish hook stays
+fork-free - `fish_preexec` writes a `running` record with a plain `printf`
+redirect; the "3s elapsed, still running" moment is handled Lanes-side by a
+`tokio` task spawned when the fs-watcher first sees the record. See the
+Phasing section and `PLAN-incremental-signals.md`.
 
 ## Principles (settled in design discussion)
 
@@ -142,14 +147,12 @@ function __lanes_preexec --on-event fish_preexec
 end
 ```
 
-**`running` needs a timer** (there is no event at "3 seconds into a
-still-running command"). `fish_preexec` spawns a disowned job that writes
-the `running` record after T; `fish_postexec` kills it. A command that
-finishes before T never writes anything. Worst case: a `sleep` lingers ~T
-seconds and writes a `running` record for a command that already exited;
-the next `preexec` clears it and driver reconciliation is the backstop.
-
-Threshold via `LANES_SHELL_THRESHOLD` env (default 3s), read by the hook.
+**`running` is Phase 2 and does NOT use a hook-side timer** (rejected -
+see Phasing). `fish_preexec` writes a `{"state":"running"}` record with a
+plain `printf >` redirect (no fork); the "3s elapsed" moment is a
+`tokio::time::sleep` task on the Lanes Switch backend, armed when the
+fs-watcher first sees the record. `LANES_SHELL_NOTICE_SECS` (default 3s)
+is checked Lanes-side, not in the hook.
 
 ## Component 2 — `drivers/shell.rs`
 
@@ -166,8 +169,8 @@ Mirrors `drivers/claude.rs`:
 
 ## Component 3 — signal model (`model.rs`)
 
-- `SignalKind::Shell`.
-- `SignalReason::Shell(ShellReason)` with `ShellReason { Running, Done, Failed }`
+- `SignalKind::Command` (driver is `shell`; the kind is domain-named, like `Repo`).
+- `SignalReason::Command(CommandReason)` with `CommandReason { Done, Failed }` (Running is Phase 2)
   (adjacently-tagged, same as the other three domains).
 - `SignalAction::FocusPane { session: String, pane: String }` - new variant
   (existing `FocusRepoPane` takes a path, not a pane id).
@@ -200,7 +203,7 @@ let shell_records = if cfg.driver_enabled("shell") {
 
 Correction pass (extends `signal_cyclable` / adds `signal_visible`):
 
-| ShellReason | lifecycle | visible | cyclable |
+| CommandReason | lifecycle | visible | cyclable |
 |---|---|---|---|
 | Running | Live | true | **false** |
 | Done | Latched | true unless `signal-dismissed` | true |
@@ -247,19 +250,41 @@ Gives a place to look when the feature silently does nothing.
 ## Phasing
 
 **Phase 1 — `done` / `failed` only.** No background process anywhere
-(`$CMD_DURATION` in `postexec`). `shell` driver, `SignalKind::Shell` +
-`ShellReason` + `lifecycle` + `visible`, visible/cyclable split,
+(`$CMD_DURATION` in `postexec`). `shell` driver, `SignalKind::Command` +
+`CommandReason` + `lifecycle` + `visible`, visible/cyclable split,
 `signal-dismissed` + dismiss controls, `FocusPane` action, `driver_enabled`
 wiring + `catch_unwind`, `lanes shell-init fish`, doctor check,
 `LANES_SHELL_LATCH_SECS`. Lowest-risk slice that delivers "your long
 command finished / failed, go look."
 
-**Phase 2 — `running` state.** Adds the disowned-sleep timer to the hook,
-`ShellReason::Running` handling, the live chip with an elapsed counter
-(updates on ambient refresh traffic). Also: rename
-`claude-session-disabled` → `signal-muted` and unify the mute path; add
-`lane-last-focused id=<x> at=<rfc3339>` (updated in `set_focused_lane`) and
-the "focused at completion → no latch" courtesy.
+**Phase 2 — `running` state.** *Blocked on the incremental-signals refactor
+— see `PLAN-incremental-signals.md`.* Design settled in discussion
+(2026-09-05):
+
+- **The fish hook stays fork-free.** No disowned-sleep timer (rejected as
+  absurd - nobody spawns a process per command; every mainstream tool
+  notifies on completion only). `fish_preexec` writes a
+  `{"state":"running", "started_at":…}` record with a plain `printf >`
+  redirect, every command. `fish_postexec` rewrites it to `done`/`failed`,
+  or `rm`s it (signal-killed, or under `LANES_SHELL_LATCH_SECS`).
+- **The "3s elapsed, still running" moment is handled Lanes-side.** No fish
+  event fires then, and no fs event either (the file hasn't changed). When
+  the fs-watcher sees a new `running` record, the Lanes Switch backend
+  `tauri::async_runtime::spawn`s a task (a tokio coroutine, not a thread or
+  process) that captures the record's `started_at`, `tokio::time::sleep`s
+  `LANES_SHELL_NOTICE_SECS`, then re-reads the file. If it's still the same
+  `running` command → emit the chip. If it's gone / `done` / superseded →
+  the task just returns. No cancellation bookkeeping; `ls` arms a task that
+  wakes to find nothing and no-ops.
+- **`done`/`failed` need no timer** - the file rewrite fires its own fs
+  event.
+- The live chip shows an elapsed counter (`vite · running 1m40s`), updated
+  on whatever refresh traffic already exists.
+
+Also in Phase 2: rename `claude-session-disabled` → `signal-muted` and
+unify the mute path; add `lane-last-focused id=<x> at=<rfc3339>` (updated
+in `set_focused_lane`) and the "focused at completion → no latch"
+courtesy.
 
 **Phase 3 — deferred, not committed to.** bash/zsh `shell-init`;
 server/command classification (cosmetic only if ever); Tier-3 inline pane
@@ -274,7 +299,7 @@ tests (project rule).
   reconcile drops records for absent panes.
 - `model.rs`: Shell signal serialization shape (`kind`/`reason`/`lifecycle`/
   `visible` on the wire); `FocusPane` action round-trip.
-- `lib.rs`: record → signal mapping per `ShellReason`; visible/cyclable
+- `lib.rs`: record → signal mapping per `CommandReason`; visible/cyclable
   table above; `signal-dismissed` suppresses a Latched signal; a
   deliberately-panicking stub driver leaves `gather_lanes` returning a
   normal (shell-less) snapshot.
