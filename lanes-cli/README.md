@@ -38,8 +38,41 @@ If `drivers` is omitted, all built-in drivers run.
 | `zellij` | Sessions, tabs, pane commands, cwds | `zellij` on PATH |
 | `claude` | Active Claude Code sessions, AI titles, state | `~/.claude/active-sessions/` registry |
 | `brotab` | Firefox tabs | `bt` CLI + browser extension |
+| `shell` | Long-running commands that finished / failed | shell hook installed (see below) - **opt-in**, not run unless listed |
 
 `lanes doctor` checks each configured driver and reports what's working and what isn't.
+
+### `shell` driver - long-running command signal
+
+Surfaces a chip when a foreground shell command finishes (or fails) after
+running longer than a threshold - "your build/test/deploy is done, go
+look." Opt in by adding `shell` to the `drivers` list.
+
+The detection is a shell hook (the shell-specific half of this driver;
+everything in Rust is shell-agnostic). Install it with one line in
+`~/.config/fish/config.fish`:
+
+```fish
+lanes shell-init fish | source
+```
+
+The hook writes one JSON record per pane to
+`~/.local/state/lanes/shell/<session>--<pane>.json` when a command exits
+after running longer than `LANES_SHELL_LATCH_SECS` (default 30). A
+command killed by a signal (Ctrl-C'd dev server) writes nothing; a fast
+command writes nothing. The `shell` driver reads those records, reconciles
+them against live Zellij panes, and emits a `command` / `done` or
+`command` / `failed` signal - visible in the dashboard, clickable to jump
+to the pane, and one-way dismissable in edit mode (or from the click
+overlay). Running the next command in that pane also clears it.
+
+Failure-isolated: a panic in the driver, a malformed record, or a missing
+state dir degrades to "no command chips this refresh," never a broken
+snapshot. `lanes doctor` reports whether the hook is installed and
+records are landing.
+
+Phase 2 (see `PLAN-shell-signal.md`) will add a live `running` chip and
+`bash`/`zsh` hooks.
 
 ## Snapshot format
 

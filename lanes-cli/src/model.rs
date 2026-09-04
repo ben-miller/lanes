@@ -55,6 +55,11 @@ pub struct WindowPlacement {
 pub enum SignalAction {
     SwitchClaudeSession { session_id: String },
     FocusRepoPane { session: String, path: String },
+    /// Focus a specific Zellij pane by its numeric id (the same id space
+    /// `zellij action list-panes` reports and the shell hook captures from
+    /// `$ZELLIJ_PANE_ID`). Used by Command-kind signals to jump to the pane
+    /// a long-running command finished in.
+    FocusPane { session: String, pane: u32 },
 }
 
 /// Which domain a signal is about. Not just a tag - it's the type that
@@ -73,6 +78,30 @@ pub enum SignalKind {
     ClaudeSession,
     Repo,
     Lanes,
+    /// A foreground shell command that ran long enough to be worth
+    /// surfacing (see the `shell` driver). Distinct from the tool-named
+    /// kinds: the data comes from a shell hook Lanes itself ships, not from
+    /// adapting to an external tool's interface.
+    Command,
+}
+
+/// How a signal's existence is governed - the axis that decides whether a
+/// user can dismiss it and what makes it go away. See PLAN-shell-signal.md.
+///
+/// - `Live`: the signal mirrors a condition that is true *right now*
+///   (a running Claude session, a dirty repo, a missing zellij session). It
+///   clears itself when the condition ends and cannot be dismissed - hiding
+///   it would misreport reality. Every signal was implicitly this before
+///   `Latched` existed.
+/// - `Latched`: the signal marks that something *happened* and hasn't been
+///   dealt with (a command finished or failed). It never auto-clears; it
+///   goes away when the user dismisses it, or when it's superseded (the
+///   next command in that pane). Dismissal is one-way.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Lifecycle {
+    Live,
+    Latched,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -80,6 +109,20 @@ pub struct Signal {
     #[serde(flatten)]
     pub reason: SignalReason,
     pub urgency: Urgency,
+    // Set from `reason` at construction (see `Signal::new`); never a
+    // placeholder the way `cyclable`/`visible` are. `Latched` signals are
+    // the only dismissable ones and the only ones carrying `dismiss_id`.
+    pub lifecycle: Lifecycle,
+    // Whether this signal renders as a chip in the dashboard's normal
+    // (non-edit) view. Not the same question as `cyclable`: a running
+    // command is visible but not a cycle target. Placeholder at
+    // construction, corrected in gather_lanes() alongside `cyclable`.
+    pub visible: bool,
+    // Stable per-occurrence id for a `Latched` signal, echoed back by the
+    // UI's dismiss control (see state::set_signal_dismissed). `None` for
+    // `Live` signals, which can't be dismissed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub dismiss_id: Option<String>,
     // Whether this specific signal is something `sessions next`/`prev`
     // would actually land on - see lib.rs's signal_cyclable(). Not known at
     // construction time (signal_for() builds signals before a lane's
@@ -107,6 +150,23 @@ impl Signal {
     pub fn kind(&self) -> SignalKind {
         self.reason.kind()
     }
+
+    /// Build a signal from its reason plus optional action/detail. `urgency`
+    /// and `lifecycle` follow from the reason; `cyclable`/`visible` are left
+    /// as placeholders for gather_lanes()'s correction pass to set once the
+    /// lane's own facts are known.
+    pub fn new(reason: SignalReason, action: Option<SignalAction>, detail: Option<String>) -> Self {
+        Signal {
+            urgency: reason.urgency(),
+            lifecycle: reason.lifecycle(),
+            reason,
+            cyclable: false,
+            visible: false,
+            dismiss_id: None,
+            action,
+            detail,
+        }
+    }
 }
 
 /// One reason per domain, namespaced so e.g. ClaudeSessionReason::Active and
@@ -128,6 +188,19 @@ pub enum SignalReason {
     ClaudeSession(ClaudeSessionReason),
     Repo(RepoReason),
     Lanes(LanesReason),
+    Command(CommandReason),
+}
+
+/// A long-running foreground shell command, past its finish. `Running` is
+/// deliberately absent for now - Phase 2 (see PLAN-shell-signal.md).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CommandReason {
+    /// Exited 0 after running longer than the latch threshold.
+    Done,
+    /// Exited non-zero (a signal-terminated command - Ctrl-C'd server -
+    /// never produces a record at all, so this is a genuine failure).
+    Failed,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -209,6 +282,16 @@ impl SignalReason {
             SignalReason::ClaudeSession(_) => SignalKind::ClaudeSession,
             SignalReason::Repo(_) => SignalKind::Repo,
             SignalReason::Lanes(_) => SignalKind::Lanes,
+            SignalReason::Command(_) => SignalKind::Command,
+        }
+    }
+
+    /// See `Lifecycle`. Every existing reason is `Live`; only a finished or
+    /// failed command latches.
+    pub fn lifecycle(&self) -> Lifecycle {
+        match self {
+            SignalReason::Command(CommandReason::Done | CommandReason::Failed) => Lifecycle::Latched,
+            _ => Lifecycle::Live,
         }
     }
 
@@ -231,6 +314,12 @@ impl SignalReason {
             SignalReason::Repo(RepoReason::NonDefaultBranch) => Urgency::Warning,
             SignalReason::Lanes(LanesReason::SessionMissing) => Urgency::Blocking,
             SignalReason::Lanes(LanesReason::SessionNotRunning) => Urgency::Warning,
+            // Done is a "ready for you, go look" state, same green tier as a
+            // pending commit or an idle Claude session. A failed command is
+            // "something's off," one tier up but not blocking you the way a
+            // permission prompt is - same tier as a non-default branch.
+            SignalReason::Command(CommandReason::Done) => Urgency::Attention,
+            SignalReason::Command(CommandReason::Failed) => Urgency::Warning,
         }
     }
 }
@@ -359,13 +448,12 @@ mod tests {
         // fields, not a nested {"reason": {"kind": ..., "reason": ...}}
         // object - existing consumers (the frontend) don't see this
         // refactor at all.
-        let signal = Signal {
-            reason: SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting),
-            urgency: Urgency::Attention,
-            cyclable: true,
-            action: None,
-            detail: Some("waiting for your input".to_string()),
-        };
+        let mut signal = Signal::new(
+            SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting),
+            None,
+            Some("waiting for your input".to_string()),
+        );
+        signal.cyclable = true;
         let json = serde_json::to_value(&signal).unwrap();
         assert_eq!(json["kind"], "claude_session");
         assert_eq!(json["reason"], "awaiting");
@@ -377,13 +465,7 @@ mod tests {
 
     #[test]
     fn signal_omits_detail_from_json_when_none() {
-        let signal = Signal {
-            reason: SignalReason::Repo(RepoReason::PendingCommit),
-            urgency: Urgency::Attention,
-            cyclable: false,
-            action: None,
-            detail: None,
-        };
+        let signal = Signal::new(SignalReason::Repo(RepoReason::PendingCommit), None, None);
         let json = serde_json::to_value(&signal).unwrap();
         assert!(json.get("detail").is_none());
     }
@@ -391,27 +473,47 @@ mod tests {
     #[test]
     fn signal_kind_matches_the_reason_it_wraps() {
         assert_eq!(
-            Signal {
-                reason: SignalReason::Repo(RepoReason::PendingCommit),
-                urgency: Urgency::Attention,
-                cyclable: false,
-                action: None,
-                detail: None,
-            }
-            .kind(),
+            Signal::new(SignalReason::Repo(RepoReason::PendingCommit), None, None).kind(),
             SignalKind::Repo
         );
         assert_eq!(
-            Signal {
-                reason: SignalReason::Lanes(LanesReason::SessionNotRunning),
-                urgency: Urgency::Warning,
-                cyclable: false,
-                action: None,
-                detail: None,
-            }
-            .kind(),
+            Signal::new(SignalReason::Lanes(LanesReason::SessionNotRunning), None, None).kind(),
             SignalKind::Lanes
         );
+        assert_eq!(
+            Signal::new(SignalReason::Command(CommandReason::Failed), None, None).kind(),
+            SignalKind::Command
+        );
+    }
+
+    #[test]
+    fn command_done_and_failed_latch_everything_else_is_live() {
+        assert_eq!(SignalReason::Command(CommandReason::Done).lifecycle(), Lifecycle::Latched);
+        assert_eq!(SignalReason::Command(CommandReason::Failed).lifecycle(), Lifecycle::Latched);
+        assert_eq!(SignalReason::Repo(RepoReason::PendingCommit).lifecycle(), Lifecycle::Live);
+        assert_eq!(SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting).lifecycle(), Lifecycle::Live);
+    }
+
+    #[test]
+    fn command_signal_serializes_with_kind_command_and_lifecycle() {
+        let json = serde_json::to_value(
+            Signal::new(SignalReason::Command(CommandReason::Done), None, Some("cargo test · 3m12s".into())),
+        ).unwrap();
+        assert_eq!(json["kind"], "command");
+        assert_eq!(json["reason"], "done");
+        assert_eq!(json["lifecycle"], "latched");
+        assert_eq!(json["urgency"], "attention");
+    }
+
+    #[test]
+    fn focus_pane_action_round_trips() {
+        let action = SignalAction::FocusPane { session: "lanes".into(), pane: 3 };
+        let json = serde_json::to_value(&action).unwrap();
+        assert_eq!(json["kind"], "focus_pane");
+        assert_eq!(json["session"], "lanes");
+        assert_eq!(json["pane"], 3);
+        let back: SignalAction = serde_json::from_value(json).unwrap();
+        assert!(matches!(back, SignalAction::FocusPane { pane: 3, .. }));
     }
 
     #[test]

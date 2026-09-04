@@ -70,4 +70,8 @@ pub fn init_state() {
     ensure_log_file("switch-ui.log");
     ensure_log_file("hammerspoon.log");
     ensure_log_file("perf.log");
+    // The shell hook (`lanes shell-init`) also mkdir -p's this, but
+    // creating it here means the `shell` driver's read never has to
+    // distinguish "dir missing" from "dir empty".
+    let _ = std::fs::create_dir_all(state_dir().join("shell"));
 }

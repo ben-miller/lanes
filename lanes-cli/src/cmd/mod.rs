@@ -4,3 +4,4 @@ pub mod doctor;
 pub mod focus;
 pub mod list;
 pub mod logs;
+pub mod shell_init;

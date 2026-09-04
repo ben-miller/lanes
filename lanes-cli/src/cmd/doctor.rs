@@ -47,6 +47,9 @@ pub fn run() {
     if cfg.driver_enabled("brotab") {
         checks.push(check_brotab());
     };
+    if cfg.driver_enabled("shell") {
+        checks.push(check_shell());
+    }
 
     let mut any_fail = false;
     for c in &checks {
@@ -598,6 +601,54 @@ fn check_lanes_registry() -> Check {
                 hint: None,
             }
         }
+    }
+}
+
+/// The `shell` driver is enabled but silent unless the hook is installed
+/// and writing records. This surfaces the two things that break that: the
+/// state dir, and whether any records are actually landing / are sane.
+fn check_shell() -> Check {
+    let dir = lanes::logging::state_dir().join("shell");
+    if !dir.exists() {
+        return Check {
+            label: "shell driver",
+            status: Status::Warn,
+            message: format!("state dir {} does not exist", dir.display()),
+            hint: Some("run `lanes init`, then add `lanes shell-init fish | source` to config.fish".to_string()),
+        };
+    }
+
+    let records = lanes::drivers::shell::enumerate();
+    if records.is_empty() {
+        return Check {
+            label: "shell driver",
+            status: Status::Warn,
+            message: format!("no command records in {}", dir.display()),
+            hint: Some("add `lanes shell-init fish | source` to config.fish (and reload the shell), then run something longer than LANES_SHELL_LATCH_SECS".to_string()),
+        };
+    }
+
+    let now = chrono::Utc::now();
+    let implausible = records.iter().any(|r| {
+        r.started_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .is_some_and(|t| (t.with_timezone(&chrono::Utc) - now).num_seconds() > 60)
+    });
+    if implausible {
+        return Check {
+            label: "shell driver",
+            status: Status::Warn,
+            message: "a record has a far-future started_at - clock skew or a malformed hook write".to_string(),
+            hint: None,
+        };
+    }
+
+    Check {
+        label: "shell driver",
+        status: Status::Ok,
+        message: format!("{} command record(s) in {}", records.len(), dir.display()),
+        hint: None,
     }
 }
 

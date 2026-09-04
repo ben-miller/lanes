@@ -168,12 +168,28 @@
   let windowFocused = true;
   let suppressNextClick = false;
 
+  // Re-pull the toggle state (edit-mode / show-inactive / disabled
+  // sessions) straight from the backend, which reads state.kdl. Normally
+  // these arrive as socket/fs-watcher events, but those background threads
+  // don't reliably survive a macOS sleep/wake - without a resync, the
+  // frontend can be stuck thinking edit mode is off (no lane toggles, and
+  // the non-edit signal filter hiding chips) while state.kdl says it's on.
+  // applyEditMode/applyShowInactive no-op when the value hasn't changed, so
+  // this is cheap to call on a timer and on focus.
+  async function resyncToggles() {
+    try {
+      await applyEditMode(await invoke("get_edit_mode"));
+      await applyShowInactive(await invoke("get_show_inactive"));
+      disabledClaudeSessions = new Set(await invoke("get_disabled_claude_sessions"));
+    } catch (e) {
+      console.error("resyncToggles failed", e);
+    }
+  }
+
   onMount(async () => {
     refresh();
-    timer = setInterval(refresh, 10000);
-    editMode = await invoke("get_edit_mode");
-    showInactive = await invoke("get_show_inactive");
-    disabledClaudeSessions = new Set(await invoke("get_disabled_claude_sessions"));
+    timer = setInterval(() => { resyncToggles(); refresh(); }, 10000);
+    await resyncToggles();
     unlistenEditMode = await listen("edit-mode-changed", (event) => applyEditMode(event.payload));
     unlistenShowInactive = await listen("show-inactive-changed", (event) => applyShowInactive(event.payload));
     unlistenShowInactiveNoop = await listen("show-inactive-noop", () => pulseAcknowledge());
@@ -200,6 +216,10 @@
     windowFocused = await win.isFocused();
     unlistenFocus = await win.onFocusChanged(({ payload }) => {
       windowFocused = payload;
+      // Regaining focus is the clearest "we might have just woken up"
+      // signal - resync toggle state and pull a fresh snapshot in case
+      // the socket/fs-watcher missed events while asleep.
+      if (payload) { resyncToggles(); refresh(); }
     });
 
     // First click while unfocused should only focus the window - not also
@@ -251,16 +271,20 @@
     return signal.cyclable;
   }
 
-  // Non-edit mode is purely the cycle list: only chips hypo+J/K would land
-  // on. Everything else - disabled Claude sessions, git chips (pending
-  // commit, non-default branch), lanes chips (session missing) - is
-  // detail that only belongs in edit mode, where you're actually managing
-  // what's in the cycle. `editMode` and `disabledClaudeSessions` are passed
-  // in (not just closed over) so Svelte tracks them as reactive deps of the
-  // each block that calls this.
+  // Non-edit mode shows the backend's `visible` set: cycle targets, plus
+  // command chips and lanes-kind problem chips ("session missing" / "no
+  // zellij session") that a cycle wouldn't land on but that you still need
+  // to see. Hidden until edit mode: disabled Claude sessions and git chips.
+  // `editMode`/`disabledClaudeSessions` are passed in (not just closed
+  // over) so Svelte tracks them as reactive deps of the each block.
+  function isVisible(signal) {
+    const sid = signal.action?.session_id;
+    if (signal.kind === "claude_session" && sid && disabledClaudeSessions.has(sid)) return false;
+    return signal.visible;
+  }
   function visibleSignals(lane, _editMode, _disabled) {
     const signals = allSignals(lane);
-    return _editMode ? signals : signals.filter(isCyclable);
+    return _editMode ? signals : signals.filter(isVisible);
   }
 
   // Kind (which domain a signal is about) and reason (what's true within
@@ -271,6 +295,7 @@
     if (signal.kind === "claude_session") return "claude";
     if (signal.kind === "repo") return "git";
     if (signal.kind === "lanes") return "lanes";
+    if (signal.kind === "command") return "shell";
     return signal.kind;
   }
 
@@ -283,7 +308,33 @@
     if (signal.reason === "permission") return "permission";
     if (signal.reason === "session_missing") return "session missing";
     if (signal.reason === "session_not_running") return "no zellij session";
+    if (signal.reason === "done") return "done";
+    if (signal.reason === "failed") return "failed";
     return signal.reason;
+  }
+
+  // A Latched signal (currently only a finished/failed command) carries a
+  // dismiss_id and can be one-way dismissed - the × in edit mode and the
+  // overlay's dismiss button both route here.
+  async function dismissSignal(signal) {
+    if (!signal.dismiss_id) return;
+    // Optimistically drop it from the current snapshot so the chip goes
+    // away immediately, then persist. gather_lanes() won't re-emit it.
+    if (snapshot) {
+      snapshot = {
+        ...snapshot,
+        lanes: snapshot.lanes.map(l => ({
+          ...l,
+          facets: l.facets.map(f => f.signals
+            ? { ...f, signals: f.signals.filter(s => s.dismiss_id !== signal.dismiss_id) }
+            : f),
+        })),
+      };
+    }
+    await invoke("set_signal_dismissed", { id: signal.dismiss_id, dismissed: true });
+    if (activeSignal?.signal?.dismiss_id === signal.dismiss_id) dismissOverlay();
+    await tick();
+    if (!activeSignal) await resizeToContent();
   }
 
   function signalLabel(signal) {
@@ -434,10 +485,11 @@
                       class="signal urgency-{signal.urgency}"
                       class:is-active={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.focused_claude_session}
                       class:is-cyclable={signal.cyclable}
+                      class:is-command={signal.kind === "command"}
                       class:is-unreachable={isUnreachable(signal)}
                       on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
                       on:click|stopPropagation
-                    ><span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}</button>
+                    ><span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}{#if signal.kind === "command" && signal.detail} · {signal.detail}{/if}</button>
                     <!-- Only for an active lane - an inactive one is already
                          excluded from cycling entirely (the lane-level
                          toggle above), so a per-session cycling toggle here
@@ -449,6 +501,17 @@
                         aria-label={disabledClaudeSessions.has(signal.action.session_id) ? "Include in cycling" : "Exclude from cycling"}
                         on:click|stopPropagation={() => toggleSessionCycling(signal)}
                       ></button>
+                    {/if}
+                    <!-- One-way dismiss for a Latched signal (a finished /
+                         failed command). Edit mode only - same "this is
+                         where you manage signals" placement as the toggles. -->
+                    {#if editMode && signal.lifecycle === "latched" && signal.dismiss_id}
+                      <button
+                        class="signal-dismiss"
+                        aria-label="Dismiss"
+                        title="Dismiss"
+                        on:click|stopPropagation={() => dismissSignal(signal)}
+                      >&times;</button>
                     {/if}
                   </span>
                 {/each}
@@ -491,7 +554,10 @@
         {#if activeSignal.status || activeSignal.signal.detail}
           <button class="overlay-copy" title="copy report" on:click={copyErrorReport}>⧉</button>
         {/if}
-        <button class="overlay-dismiss" on:click={dismissOverlay}>dismiss</button>
+        {#if activeSignal.signal.lifecycle === "latched" && activeSignal.signal.dismiss_id}
+          <button class="overlay-dismiss" on:click={() => dismissSignal(activeSignal.signal)}>dismiss</button>
+        {/if}
+        <button class="overlay-dismiss" on:click={dismissOverlay}>close</button>
       </div>
     </div>
   </div>
@@ -754,6 +820,23 @@
   }
   .session-toggle.is-on { background: var(--accent); }
   .session-toggle.is-on::after { transform: translateX(10px); }
+  /* One-way dismiss for a Latched signal, edit mode only. A plain glyph
+     button, not a toggle - dismissal doesn't come back (see
+     PLAN-shell-signal.md), so the round-switch language the toggles use
+     would misrepresent it. */
+  .signal-dismiss {
+    flex: none;
+    border: none;
+    background: none;
+    padding: 0 3px;
+    font: inherit;
+    font-size: 0.9rem;
+    line-height: 1;
+    color: var(--ink-faint);
+    cursor: pointer;
+    transition: color 0.1s ease;
+  }
+  .signal-dismiss:hover { color: var(--block-fg); }
   .signal {
     display: inline-flex;
     align-items: center;
@@ -786,15 +869,14 @@
      the chip via box-shadow rather than replacing its own border, so it
      never has to fight the chip's own urgency-colored background. */
   .signal.is-active { box-shadow: 0 0 0 2px var(--accent); }
-  /* Only reachable in edit mode now - non-edit mode filters non-cyclable
-     chips out entirely (see visibleSignals). In edit mode, where every
-     signal renders so you can manage the cycle, a pending-commit or
-     session-missing or disabled-session chip recedes rather than looking
-     like something hypo+J/K would jump to. Opacity, not a background swap
-     like the lane-level treatment: these chips still need their full
-     urgency color to read (a non-cyclable blocking signal is still
-     blocking), just muted enough to read as "not a cycle target." */
-  .signal:not(.is-cyclable) { opacity: var(--signal-dim-opacity); }
+  /* A non-cyclable chip recedes rather than looking like something hypo+J/K
+     would jump to. Mostly seen in edit mode (non-edit filters most
+     non-cyclable chips out), but Command chips are the exception - they're
+     visible in non-edit mode and must NOT be dimmed: a "failed" chip is a
+     come-look, the opposite of "de-emphasised." Opacity, not a background
+     swap like the lane-level treatment: these chips still need their full
+     urgency color to read. */
+  .signal:not(.is-cyclable):not(.is-command) { opacity: var(--signal-dim-opacity); }
   .signal .kind {
     font-size: 0.6rem;
     font-weight: 700;

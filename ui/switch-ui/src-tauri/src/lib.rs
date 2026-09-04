@@ -170,6 +170,14 @@ fn get_disabled_claude_sessions() -> Vec<String> {
     lanes::state::all_disabled_claude_sessions()
 }
 
+/// Dismiss (or un-dismiss, though the UI only ever dismisses) a Latched
+/// signal by its `dismiss_id`. state.kdl is the source of truth; the next
+/// gather_lanes() drops the signal. See PLAN-shell-signal.md.
+#[tauri::command]
+fn set_signal_dismissed(id: String, dismissed: bool) {
+    lanes::state::set_signal_dismissed(&id, dismissed);
+}
+
 #[tauri::command]
 fn get_show_inactive() -> bool {
     lanes::state::read_show_inactive()
@@ -183,6 +191,9 @@ fn execute_action(action: lanes::model::SignalAction) -> Result<(), String> {
         }
         lanes::model::SignalAction::SwitchClaudeSession { session_id } => {
             lanes::switch_claude_session(&session_id)
+        }
+        lanes::model::SignalAction::FocusPane { session, pane } => {
+            lanes::focus_pane(&session, pane)
         }
     };
     if let Err(ref e) = result {
@@ -599,7 +610,8 @@ pub fn run() {
             set_lane_active,
             get_show_inactive,
             set_claude_session_disabled,
-            get_disabled_claude_sessions
+            get_disabled_claude_sessions,
+            set_signal_dismissed
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

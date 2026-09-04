@@ -347,18 +347,10 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
                 session: session.to_string(),
                 path: path.to_string(),
             });
-            let reason = SignalReason::Repo(RepoReason::PendingCommit);
-            Some(Signal {
-                urgency: reason.urgency(),
-                reason,
-                // Placeholder - gather_lanes() corrects this once the
-                // lane's cyclable fact is known (see Signal::cyclable). A
-                // repo signal is never actually cyclable regardless.
-                cyclable: false,
-                action,
-                // The label already says everything relevant here.
-                detail: None,
-            })
+            // cyclable/visible are placeholders here - gather_lanes()
+            // corrects them once the lane's own facts are known. The label
+            // already says everything relevant, so no detail.
+            Some(Signal::new(SignalReason::Repo(RepoReason::PendingCommit), action, None))
         }
 
         (ScopeElement::Repo { .. }, KIND_GIT_NON_DEFAULT_BRANCH) => {
@@ -369,14 +361,11 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
                 session: session.to_string(),
                 path: path.to_string(),
             });
-            let reason = SignalReason::Repo(RepoReason::NonDefaultBranch);
-            Some(Signal {
-                urgency: reason.urgency(),
-                reason,
-                cyclable: false,
+            Some(Signal::new(
+                SignalReason::Repo(RepoReason::NonDefaultBranch),
                 action,
-                detail: Some(format!("on \"{current}\", default is \"{default}\"")),
-            })
+                Some(format!("on \"{current}\", default is \"{default}\"")),
+            ))
         }
 
         (ScopeElement::ClaudeSession { .. }, KIND_CLAUDE_SESSION_STATE) => {
@@ -387,15 +376,11 @@ fn signal_for(element: &ScopeElement, obs: &Observation, zellij_session: Option<
                 "permission_pending" => ClaudeSessionReason::Permission,
                 _ => ClaudeSessionReason::Active,
             });
-            Some(Signal {
-                urgency: reason.urgency(),
+            Some(Signal::new(
                 reason,
-                // Placeholder - gather_lanes() corrects this once the
-                // lane's cyclable fact is known (see Signal::cyclable).
-                cyclable: false,
-                action: Some(SignalAction::SwitchClaudeSession { session_id: session_id.to_string() }),
-                detail: None,
-            })
+                Some(SignalAction::SwitchClaudeSession { session_id: session_id.to_string() }),
+                None,
+            ))
         }
 
         _ => None,

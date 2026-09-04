@@ -282,6 +282,41 @@ pub fn all_disabled_claude_sessions() -> Vec<String> {
         .collect()
 }
 
+/// Whether a `Latched` signal (see model::Lifecycle) has been dismissed by
+/// the user. Keyed by the signal's own per-occurrence id (e.g.
+/// `command:<session>--<pane>--<started_at>` for a finished shell command)
+/// so dismissing one occurrence never suppresses a future one. Dismissal is
+/// one-way; a stale marker whose id no longer matches any live signal is
+/// harmless and can be GC'd, exactly like `claude-session-disabled`.
+pub fn is_signal_dismissed(id: &str) -> bool {
+    signal_dismissed_in(&load_doc(), id)
+}
+
+fn signal_dismissed_in(doc: &KdlDocument, id: &str) -> bool {
+    doc.nodes().iter().any(|n| {
+        n.name().value() == "signal-dismissed"
+            && n.get("id").and_then(|v| v.as_string()) == Some(id)
+    })
+}
+
+pub fn set_signal_dismissed(id: &str, dismissed: bool) {
+    let mut doc = load_doc();
+    set_signal_dismissed_in(&mut doc, id, dismissed);
+    save_doc(&doc);
+}
+
+fn set_signal_dismissed_in(doc: &mut KdlDocument, id: &str, dismissed: bool) {
+    doc.nodes_mut().retain(|n| {
+        !(n.name().value() == "signal-dismissed"
+            && n.get("id").and_then(|v| v.as_string()) == Some(id))
+    });
+    if dismissed {
+        let mut node = KdlNode::new("signal-dismissed");
+        node.insert("id", id);
+        doc.nodes_mut().push(node);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -453,5 +488,27 @@ mod tests {
         set_claude_session_disabled_in(&mut doc, "abc-123", true);
         set_claude_session_disabled_in(&mut doc, "abc-123", true);
         assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "claude-session-disabled").count(), 1);
+    }
+
+    #[test]
+    fn signal_dismissed_defaults_false_and_round_trips_per_id() {
+        let mut doc = KdlDocument::new();
+        let id = "command:lanes--3--2026-09-04T10:00:00Z";
+        assert!(!signal_dismissed_in(&doc, id));
+        set_signal_dismissed_in(&mut doc, id, true);
+        assert!(signal_dismissed_in(&doc, id));
+        // a different occurrence is untouched
+        assert!(!signal_dismissed_in(&doc, "command:lanes--3--2026-09-04T11:00:00Z"));
+        set_signal_dismissed_in(&mut doc, id, false);
+        assert!(!signal_dismissed_in(&doc, id));
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "signal-dismissed").count(), 0);
+    }
+
+    #[test]
+    fn set_signal_dismissed_in_true_twice_does_not_duplicate() {
+        let mut doc = KdlDocument::new();
+        set_signal_dismissed_in(&mut doc, "x", true);
+        set_signal_dismissed_in(&mut doc, "x", true);
+        assert_eq!(doc.nodes().iter().filter(|n| n.name().value() == "signal-dismissed").count(), 1);
     }
 }

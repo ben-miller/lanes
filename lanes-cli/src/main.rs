@@ -110,6 +110,20 @@ enum Command {
     /// changing pin state. See `IsPinned` for the state.kdl watch mechanism.
     HideSwitch,
 
+    /// Print the shell hook for the long-running-command signal, to be
+    /// sourced from your shell config:
+    ///
+    ///   lanes shell-init fish | source        # fish
+    ///
+    /// The hook writes command-lifecycle records to
+    /// ~/.local/state/lanes/shell/ for the (opt-in) `shell` driver to read.
+    /// See PLAN-shell-signal.md.
+    ShellInit {
+        /// Which shell's hook to emit
+        #[arg(value_enum)]
+        shell: ShellKind,
+    },
+
     /// Manage the Lanes Switch app
     SwitchUi {
         #[command(subcommand)]
@@ -129,6 +143,11 @@ enum Command {
         #[command(subcommand)]
         command: DiagnosticsCommand,
     },
+}
+
+#[derive(Clone, Copy, clap::ValueEnum)]
+enum ShellKind {
+    Fish,
 }
 
 #[derive(Subcommand)]
@@ -372,6 +391,13 @@ fn main() {
                 lanes::state::set_show_inactive(show);
                 println!("{}", show);
             }
+        }
+
+        Command::ShellInit { shell } => {
+            let name = match shell {
+                ShellKind::Fish => "fish",
+            };
+            cmd::shell_init::run(name);
         }
 
         Command::ShowSwitch => {

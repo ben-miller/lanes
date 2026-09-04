@@ -1,5 +1,5 @@
 pub mod config;
-mod drivers;
+pub mod drivers;
 pub mod logging;
 pub mod model;
 pub mod scope;
@@ -21,6 +21,20 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
 
     let running = drivers::zellij::running_sessions();
     let claude = claude_sessions_by_zellij();
+
+    // Opt-in and fully isolated: not in the default `drivers` list, and a
+    // panic in the driver degrades to "no command chips this refresh"
+    // rather than a broken snapshot. Reading files only - no subprocesses -
+    // so this adds negligible cost even when enabled. See
+    // PLAN-shell-signal.md.
+    let shell_records: Vec<drivers::shell::CommandRecord> = if cfg.driver_enabled("shell") {
+        std::panic::catch_unwind(drivers::shell::enumerate).unwrap_or_else(|_| {
+            logging::append_line("switch-ui.log", "error", "shell driver panicked; skipping this refresh");
+            Vec::new()
+        })
+    } else {
+        Vec::new()
+    };
 
     let running_sessions: Vec<&str> = cfg.lanes.iter()
         .flat_map(|lane| lane.scope.iter())
@@ -170,27 +184,35 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             facets.iter_mut().find(|f| matches!(f, model::FacetSnapshot::Terminal { .. }))
         {
             if lane_session_missing(lane.active, reachable) {
-                let reason = model::SignalReason::Lanes(model::LanesReason::SessionMissing);
-                signals.push(model::Signal {
-                    urgency: reason.urgency(),
-                    reason,
-                    // Never actually cyclable (kind != ClaudeSession) - set
-                    // properly below along with everything else, this is
-                    // just the same placeholder every construction site uses.
-                    cyclable: false,
-                    action: None,
-                    detail: Some(format!("no cached WezTerm tab for zellij session \"{session}\"")),
-                });
+                signals.push(model::Signal::new(
+                    model::SignalReason::Lanes(model::LanesReason::SessionMissing),
+                    None,
+                    Some(format!("no cached WezTerm tab for zellij session \"{session}\"")),
+                ));
             }
             if terminal_running == Some(false) {
-                let reason = model::SignalReason::Lanes(model::LanesReason::SessionNotRunning);
-                signals.push(model::Signal {
-                    urgency: reason.urgency(),
-                    reason,
-                    cyclable: false,
-                    action: None,
-                    detail: Some(format!("expected zellij session \"{session}\" to be running")),
-                });
+                signals.push(model::Signal::new(
+                    model::SignalReason::Lanes(model::LanesReason::SessionNotRunning),
+                    None,
+                    Some(format!("expected zellij session \"{session}\" to be running")),
+                ));
+            }
+            // Command-kind signals for long-running commands that finished /
+            // failed in one of this session's panes. Reconciled against the
+            // session's live pane ids (a record for a pane that's since
+            // closed is dropped) and filtered by signal-dismissed. Empty
+            // unless the `shell` driver is enabled.
+            let live_panes = pane_positions.get(session);
+            for rec in shell_records.iter().filter(|r| r.session == *session) {
+                if live_panes.is_none_or(|p| !p.contains_key(&rec.pane)) {
+                    continue;
+                }
+                if state::is_signal_dismissed(&rec.occurrence_id()) {
+                    continue;
+                }
+                if let Some(sig) = command_signal(rec) {
+                    signals.push(sig);
+                }
             }
         }
 
@@ -223,6 +245,8 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
                 s.cyclable = signal_cyclable(s.kind(), cyclable, session_disabled);
                 s.reason = upgrade_awaiting_to_ready(s.reason.clone(), s.cyclable);
                 s.urgency = s.reason.urgency();
+                s.lifecycle = s.reason.lifecycle();
+                s.visible = signal_visible(s.kind(), s.cyclable);
             }
         }
 
@@ -318,6 +342,59 @@ fn lane_cyclable(active: bool, reachable: Option<bool>, has_claude_signal: bool)
 /// per-session check beyond these two facts.
 fn signal_cyclable(kind: model::SignalKind, lane_cyclable: bool, session_disabled: bool) -> bool {
     kind == model::SignalKind::ClaudeSession && lane_cyclable && !session_disabled
+}
+
+/// Whether a signal renders as a chip in the dashboard's normal (non-edit)
+/// view. Distinct from `cyclable`: the non-edit filter used to key on
+/// `cyclable` directly, which conflated "worth showing" with "would a cycle
+/// land here". Two kinds break that conflation and must stay visible even
+/// when a cycle wouldn't land on them:
+///
+///   - `Command` - a finished/failed build is a come-look, and Phase 2's
+///     running chip is visible-but-not-a-cycle-target by design.
+///   - `Lanes` - these are Lanes reporting its *own* tracking is broken
+///     (SessionMissing / SessionNotRunning). Hiding them turns a real
+///     problem ("your zellij session died", e.g. after the laptop slept
+///     and sessions went EXITED) into a silent "no signals" - the exact
+///     opposite of what a status chip is for. They're never noise you
+///     manage away in edit mode.
+///
+/// Everything else (git chips, off-cycle Claude sessions) keeps the old
+/// behaviour: visible iff cyclable.
+fn signal_visible(kind: model::SignalKind, cyclable: bool) -> bool {
+    matches!(kind, model::SignalKind::Command | model::SignalKind::Lanes) || cyclable
+}
+
+/// A `done`/`failed` Command signal from one shell-hook record, or `None`
+/// if the record is a `running` one (Phase 2). Dismissal is checked by the
+/// caller (against `dismiss_id`), kept out of here so this stays a pure
+/// function. The chip is not cyclable - the correction pass leaves it that
+/// way since `signal_cyclable` only ever says yes to ClaudeSession - but it
+/// *is* visible via `signal_visible`.
+fn command_signal(rec: &drivers::shell::CommandRecord) -> Option<model::Signal> {
+    let reason = match rec.state.as_str() {
+        "done" => model::CommandReason::Done,
+        "failed" => model::CommandReason::Failed,
+        _ => return None, // "running" is Phase 2
+    };
+    let id = rec.occurrence_id();
+
+    let cmd = rec.cmd.clone().or_else(|| rec.argv0.clone()).unwrap_or_else(|| "command".to_string());
+    let dur = rec.duration_secs().map(drivers::shell::fmt_duration);
+    let detail = match (reason, rec.exit_code, dur) {
+        (model::CommandReason::Failed, Some(code), Some(d)) => format!("{cmd} · exit {code} · {d}"),
+        (model::CommandReason::Failed, Some(code), None) => format!("{cmd} · exit {code}"),
+        (_, _, Some(d)) => format!("{cmd} · {d}"),
+        (_, _, None) => cmd,
+    };
+
+    let mut sig = model::Signal::new(
+        model::SignalReason::Command(reason),
+        Some(model::SignalAction::FocusPane { session: rec.session.clone(), pane: rec.pane }),
+        Some(detail),
+    );
+    sig.dismiss_id = Some(id);
+    Some(sig)
 }
 
 /// Upgrades an idle-Claude signal to Ready once its lane turns out
@@ -844,6 +921,17 @@ fn find_tab_at_path<'a>(shape: &'a model::TerminalShape, path: &str) -> Option<&
     shape.tabs.iter().find(|tab| tab.panes.iter().any(|p| p.cwd.as_deref() == Some(path)))
 }
 
+/// Jump to a specific Zellij pane by its numeric id: raise the session's
+/// WezTerm tab, then focus the pane. Used by a Command-kind signal's
+/// FocusPane action (the pane a long-running command finished in). Same two
+/// steps as switch_claude_session's own switch, minus the Claude cursor
+/// bookkeeping - a shell command isn't a session to make "current".
+pub fn focus_pane(session: &str, pane: u32) -> Result<(), String> {
+    activate_wezterm_tab(session, true)?;
+    focus_zellij_pane(session, pane as u64)?;
+    Ok(())
+}
+
 pub fn navigate_to_repo_pane(session: &str, path: &str) -> Result<(), String> {
     // Activate the WezTerm tab for this session
     activate_wezterm_tab(session, true)?;
@@ -1122,6 +1210,54 @@ mod tests {
         git(&["add", "f.txt"]);
         git(&["commit", "--quiet", "-m", "init"]);
         dir
+    }
+
+    fn shell_record(state: &str, exit: Option<i32>) -> drivers::shell::CommandRecord {
+        serde_json::from_value(serde_json::json!({
+            "v": 1, "session": "lanes", "pane": 3,
+            "argv0": "cargo", "cmd": "cargo test --workspace",
+            "started_at": "2026-09-04T10:00:00Z", "state": state,
+            "ended_at": "2026-09-04T10:03:12Z", "exit_code": exit,
+        })).unwrap()
+    }
+
+    #[test]
+    fn command_signal_maps_state_and_exit_to_reason_and_detail() {
+        let done = command_signal(&shell_record("done", Some(0))).unwrap();
+        assert!(matches!(done.reason, model::SignalReason::Command(model::CommandReason::Done)));
+        assert_eq!(done.detail.as_deref(), Some("cargo test --workspace · 3m12s"));
+        assert_eq!(done.lifecycle, model::Lifecycle::Latched);
+        assert_eq!(done.dismiss_id.as_deref(), Some("command:lanes--3--2026-09-04T10:00:00Z"));
+        assert!(matches!(done.action, Some(model::SignalAction::FocusPane { pane: 3, .. })));
+
+        let failed = command_signal(&shell_record("failed", Some(1))).unwrap();
+        assert!(matches!(failed.reason, model::SignalReason::Command(model::CommandReason::Failed)));
+        assert_eq!(failed.detail.as_deref(), Some("cargo test --workspace · exit 1 · 3m12s"));
+
+        // "running" is Phase 2 - no signal yet.
+        assert!(command_signal(&shell_record("running", None)).is_none());
+    }
+
+    #[test]
+    fn signal_visible_keeps_command_and_lanes_chips_but_gates_the_rest_on_cyclable() {
+        // Command + Lanes stay visible even off-cycle - a finished build,
+        // or "your zellij session died", must not vanish into "no signals".
+        assert!(signal_visible(model::SignalKind::Command, false));
+        assert!(signal_visible(model::SignalKind::Lanes, false));
+        // Everything else: visible iff a cycle would land on it.
+        assert!(signal_visible(model::SignalKind::ClaudeSession, true));
+        assert!(!signal_visible(model::SignalKind::ClaudeSession, false));
+        assert!(!signal_visible(model::SignalKind::Repo, false));
+    }
+
+    #[test]
+    fn command_signals_are_visible_but_not_cyclable_after_the_correction_pass() {
+        // mirrors the per-signal correction gather_lanes() runs
+        let mut s = command_signal(&shell_record("failed", Some(2))).unwrap();
+        s.cyclable = signal_cyclable(s.kind(), true /* lane cyclable */, false);
+        s.visible = signal_visible(s.kind(), s.cyclable);
+        assert!(!s.cyclable, "a finished command is never a cycle target");
+        assert!(s.visible, "but it still shows in the normal view");
     }
 
     #[test]
