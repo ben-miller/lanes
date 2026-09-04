@@ -259,22 +259,12 @@
     return lane.facets.flatMap(f => f.signals ?? []);
   }
 
-  // Whether hypo+J/K would actually land on this signal: the backend's
-  // signal.cyclable already means "ClaudeSession-kind, in a cyclable lane,
-  // not individually excluded" (see lib.rs's signal_cyclable), but that
-  // flag only refreshes on the next gather_lanes() round-trip - cross it
-  // against the locally-tracked disabled set too so a just-toggled session
-  // drops out immediately.
-  function isCyclable(signal) {
-    const sid = signal.action?.session_id;
-    if (signal.kind === "claude_session" && sid && disabledClaudeSessions.has(sid)) return false;
-    return signal.cyclable;
-  }
-
   // Non-edit mode shows the backend's `visible` set: cycle targets, plus
   // command chips and lanes-kind problem chips ("session missing" / "no
   // zellij session") that a cycle wouldn't land on but that you still need
   // to see. Hidden until edit mode: disabled Claude sessions and git chips.
+  // The disabled-session cross-check is local so a just-toggled session
+  // drops immediately, before the next gather_lanes() round-trip.
   // `editMode`/`disabledClaudeSessions` are passed in (not just closed
   // over) so Svelte tracks them as reactive deps of the each block.
   function isVisible(signal) {

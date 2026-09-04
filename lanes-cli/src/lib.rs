@@ -427,56 +427,134 @@ fn claude_sessions_by_zellij() -> HashMap<String, Vec<drivers::claude::ClaudeSes
     map
 }
 
+/// The recorded pid can't be the process that wrote a file older than it: a
+/// live Claude session rewrites its registry file on start and on every
+/// state change, so the file's last-modified time is always at or after the
+/// writing process's start. If `ps` says the process is meaningfully
+/// *younger* than the file, the pid was recycled to some unrelated `claude`
+/// after the real session died - common after a laptop sleep churns pids.
+/// Slack covers the gap between a process starting and its first file write
+/// plus `etimes`' whole-second truncation.
+const PID_REUSE_SLACK_SECS: u64 = 15;
+
+/// What `ps` tells us about a pid: its `comm` (verified to be `claude`) and
+/// its age in whole seconds (`etimes`), used for the reuse check above.
+#[derive(Debug, Clone)]
+pub(crate) struct ProcInfo {
+    pub comm: String,
+    pub age_secs: u64,
+}
+
 /// Whether a registry entry for a Claude session still refers to something actually
 /// running, rather than a file orphaned by a session that ended without firing
 /// `SessionEnd` (crash, force-quit, killed pane).
 ///
 /// Sessions living in a Zellij pane are first checked against currently running
-/// Zellij sessions - reliable, no guessing. But the Zellij session outliving the
-/// pane's original occupant is exactly how stale entries accumulate (a resumed or
-/// restarted `claude` process leaves the old registry file behind), so when a PID
-/// is also recorded we additionally verify it's still alive and is actually a
-/// `claude` process - a bare `kill -0` isn't enough since PIDs get reused, so a
-/// dead session's orphaned PID could later collide with an unrelated process.
-/// Sessions started outside Zellij have no session-name anchor at all, so they
-/// rely on the PID check alone.
-pub(crate) fn session_is_live(zellij_session: &str, live_zellij_sessions: &HashSet<String>, pid: Option<u32>) -> bool {
-    session_is_live_with(zellij_session, live_zellij_sessions, pid, process_command)
+/// Zellij sessions - reliable, no guessing. When a PID is also recorded we
+/// additionally verify it's (a) still alive and a `claude` process and (b) not
+/// older-file-than-process (see `PID_REUSE_SLACK_SECS`) - `kill -0` alone isn't
+/// enough since PIDs get reused. Sessions started outside Zellij have no
+/// session-name anchor at all, so they rely on the PID check alone.
+///
+/// `file_age_secs` is how long ago the registry file was last written (`None`
+/// if that couldn't be read - then the reuse check is skipped, not failed).
+pub(crate) fn session_is_live(
+    zellij_session: &str,
+    live_zellij_sessions: &HashSet<String>,
+    pid: Option<u32>,
+    file_age_secs: Option<u64>,
+) -> bool {
+    session_is_live_with(zellij_session, live_zellij_sessions, pid, file_age_secs, process_info)
 }
 
 fn session_is_live_with(
     zellij_session: &str,
     live_zellij_sessions: &HashSet<String>,
     pid: Option<u32>,
-    lookup: impl Fn(u32) -> Option<String>,
+    file_age_secs: Option<u64>,
+    lookup: impl Fn(u32) -> Option<ProcInfo>,
 ) -> bool {
+    let pid_ok = |p: u32| pid_is_this_session_with(p, file_age_secs, &lookup);
     if !zellij_session.is_empty() {
         if !live_zellij_sessions.contains(zellij_session) {
             return false;
         }
         return match pid {
-            Some(p) => lookup(p).map_or(false, |cmd| is_claude_command(&cmd)),
+            Some(p) => pid_ok(p),
             None => true,
         };
     }
     match pid {
-        Some(p) => lookup(p).map_or(false, |cmd| is_claude_command(&cmd)),
+        Some(p) => pid_ok(p),
         None => false,
     }
+}
+
+/// The pid is a live `claude` process AND isn't a recycled one pointing at a
+/// different session (older file than process - see `PID_REUSE_SLACK_SECS`).
+pub(crate) fn pid_is_this_session(pid: u32, file_age_secs: Option<u64>) -> bool {
+    pid_is_this_session_with(pid, file_age_secs, &process_info)
+}
+
+fn pid_is_this_session_with(
+    pid: u32,
+    file_age_secs: Option<u64>,
+    lookup: &impl Fn(u32) -> Option<ProcInfo>,
+) -> bool {
+    let Some(info) = lookup(pid) else { return false };
+    if !is_claude_command(&info.comm) {
+        return false;
+    }
+    match file_age_secs {
+        // Process is meaningfully younger than the file it supposedly wrote.
+        Some(file_age) => info.age_secs + PID_REUSE_SLACK_SECS >= file_age,
+        None => true,
+    }
+}
+
+/// Seconds since `path` was last modified, or `None` if that can't be read
+/// (or the clock is behind the file's mtime).
+pub(crate) fn file_age_secs(path: &std::path::Path) -> Option<u64> {
+    let mtime = std::fs::metadata(path).ok()?.modified().ok()?;
+    std::time::SystemTime::now().duration_since(mtime).ok().map(|d| d.as_secs())
 }
 
 fn is_claude_command(cmd: &str) -> bool {
     cmd.trim().rsplit('/').next().unwrap_or("") == "claude"
 }
 
-fn process_command(pid: u32) -> Option<String> {
+fn process_info(pid: u32) -> Option<ProcInfo> {
+    // `etime` not `etimes`: the latter is a GNU/Linux keyword, absent from
+    // BSD/macOS `ps`. `etime` is the same value, just formatted.
     let out = std::process::Command::new("ps")
-        .args(["-p", &pid.to_string(), "-o", "comm="])
+        .args(["-p", &pid.to_string(), "-o", "etime=,comm="])
         .output()
         .ok()?;
     if !out.status.success() { return None; }
-    let cmd = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if cmd.is_empty() { None } else { Some(cmd) }
+    parse_ps_line(&String::from_utf8_lossy(&out.stdout))
+}
+
+/// One `ps -o etime=,comm=` line: elapsed time `[[DD-]HH:]MM:SS`, then the
+/// command (which may itself contain spaces, e.g. "claude bg-spare").
+fn parse_ps_line(line: &str) -> Option<ProcInfo> {
+    let (etime, comm) = line.trim().split_once(char::is_whitespace)?;
+    Some(ProcInfo {
+        age_secs: parse_etime(etime)?,
+        comm: comm.trim().to_string(),
+    })
+}
+
+/// `ps` elapsed-time format: `MM:SS`, `HH:MM:SS`, or `DD-HH:MM:SS`.
+fn parse_etime(s: &str) -> Option<u64> {
+    let (days, hms) = match s.split_once('-') {
+        Some((d, rest)) => (d.parse::<u64>().ok()?, rest),
+        None => (0, s),
+    };
+    let mut it = hms.split(':').rev();
+    let secs: u64 = it.next()?.parse().ok()?;
+    let mins: u64 = it.next()?.parse().ok()?;
+    let hours: u64 = it.next().map_or(Some(0), |h| h.parse().ok())?;
+    Some(days * 86_400 + hours * 3_600 + mins * 60 + secs)
 }
 
 /// Signals are computed separately now (see gather_lanes(), via
@@ -1631,61 +1709,101 @@ mod tests {
         assert!(lane_session_missing_decision(true, false));
     }
 
+    fn proc(comm: &str, age_secs: u64) -> Option<ProcInfo> {
+        Some(ProcInfo { comm: comm.to_string(), age_secs })
+    }
+
     #[test]
     fn zellij_backed_session_live_iff_session_running() {
         let live: HashSet<String> = ["lanes".to_string()].into_iter().collect();
-        assert!(session_is_live_with("lanes", &live, None, |_| unreachable!("should not need pid lookup")));
-        assert!(!session_is_live_with("job-hunting", &live, None, |_| unreachable!("should not need pid lookup")));
+        assert!(session_is_live_with("lanes", &live, None, None, |_| unreachable!("should not need pid lookup")));
+        assert!(!session_is_live_with("job-hunting", &live, None, None, |_| unreachable!("should not need pid lookup")));
     }
 
     #[test]
     fn zellij_backed_session_dead_if_session_itself_is_gone_regardless_of_pid() {
-        // Even a "live" pid shouldn't matter once the Zellij session itself is gone -
-        // the session is checked first and short-circuits to dead.
         let live: HashSet<String> = HashSet::new();
-        assert!(!session_is_live_with("lanes", &live, Some(123), |_| Some("claude".to_string())));
+        assert!(!session_is_live_with("lanes", &live, Some(123), None, |_| proc("claude", 10)));
     }
 
     #[test]
     fn zellij_backed_session_dead_if_pid_no_longer_a_claude_process() {
-        // Regression test: a Zellij session can outlive the Claude process that
-        // originally occupied its pane (resume, restart, pid reused by the shell).
-        // The session name alone isn't enough - the recorded pid must still resolve
-        // to `claude`, or the registry entry is a stale leftover.
         let live: HashSet<String> = ["infra".to_string()].into_iter().collect();
-        assert!(!session_is_live_with("infra", &live, Some(8547), |_| Some("fish".to_string())));
-        assert!(!session_is_live_with("infra", &live, Some(4393), |_| None));
+        assert!(!session_is_live_with("infra", &live, Some(8547), None, |_| proc("fish", 10)));
+        assert!(!session_is_live_with("infra", &live, Some(4393), None, |_| None));
     }
 
     #[test]
     fn zellij_backed_session_live_if_pid_still_a_claude_process() {
         let live: HashSet<String> = ["infra".to_string()].into_iter().collect();
-        assert!(session_is_live_with("infra", &live, Some(89568), |_| Some("claude".to_string())));
+        assert!(session_is_live_with("infra", &live, Some(89568), None, |_| proc("claude", 10)));
+    }
+
+    #[test]
+    fn zellij_backed_session_dead_if_pid_recycled_to_a_newer_claude() {
+        // The real post-sleep bug: the registry file was last written 2h ago
+        // (7200s), but the claude at the recorded pid only started 90s ago -
+        // it's a different session that happened to get this pid.
+        let live: HashSet<String> = ["japanese".to_string()].into_iter().collect();
+        assert!(!session_is_live_with("japanese", &live, Some(33544), Some(7200), |_| proc("claude", 90)));
+        // Real live (idle) session: claude wrote the file at startup and
+        // hasn't since, so the process is at least as old as the file.
+        assert!(session_is_live_with("japanese", &live, Some(33544), Some(7200), |_| proc("claude", 7210)));
+        // A resume: file rewritten seconds ago, process seconds old, within
+        // slack - still live.
+        assert!(session_is_live_with("japanese", &live, Some(33544), Some(3), |_| proc("claude", 1)));
+    }
+
+    #[test]
+    fn pid_reuse_check_is_skipped_when_file_age_is_unknown() {
+        let live: HashSet<String> = ["japanese".to_string()].into_iter().collect();
+        assert!(session_is_live_with("japanese", &live, Some(1), None, |_| proc("claude", 5)));
     }
 
     #[test]
     fn paneless_session_live_only_if_pid_is_a_claude_process() {
         let live: HashSet<String> = HashSet::new();
-        assert!(session_is_live_with("", &live, Some(123), |_| Some("claude".to_string())));
-        assert!(session_is_live_with("", &live, Some(123), |_| Some("/opt/homebrew/bin/claude".to_string())));
+        assert!(session_is_live_with("", &live, Some(123), None, |_| proc("claude", 10)));
+        assert!(session_is_live_with("", &live, Some(123), None, |_| proc("/opt/homebrew/bin/claude", 10)));
     }
 
     #[test]
     fn paneless_session_dead_if_pid_reused_by_other_process() {
         let live: HashSet<String> = HashSet::new();
-        assert!(!session_is_live_with("", &live, Some(123), |_| Some("Slack".to_string())));
+        assert!(!session_is_live_with("", &live, Some(123), None, |_| proc("Slack", 10)));
     }
 
     #[test]
     fn paneless_session_dead_if_pid_no_longer_exists() {
         let live: HashSet<String> = HashSet::new();
-        assert!(!session_is_live_with("", &live, Some(123), |_| None));
+        assert!(!session_is_live_with("", &live, Some(123), None, |_| None));
     }
 
     #[test]
     fn paneless_session_dead_if_no_pid_recorded() {
         let live: HashSet<String> = HashSet::new();
-        assert!(!session_is_live_with("", &live, None, |_| unreachable!("no pid to look up")));
+        assert!(!session_is_live_with("", &live, None, None, |_| unreachable!("no pid to look up")));
+    }
+
+    #[test]
+    fn parse_etime_handles_every_ps_shape() {
+        assert_eq!(parse_etime("05:32"), Some(332));
+        assert_eq!(parse_etime("01:05:32"), Some(3932));
+        assert_eq!(parse_etime("3-01:05:32"), Some(263_132));
+        assert_eq!(parse_etime("00:00"), Some(0));
+        assert_eq!(parse_etime("garbage"), None);
+    }
+
+    #[test]
+    fn parse_ps_line_splits_etime_from_command() {
+        let c = parse_ps_line("      15:57:57 claude").unwrap();
+        assert_eq!(c.age_secs, 57477);
+        assert_eq!(c.comm, "claude");
+        // command can contain spaces
+        let bg = parse_ps_line("02:00 claude bg-spare").unwrap();
+        assert_eq!(bg.age_secs, 120);
+        assert_eq!(bg.comm, "claude bg-spare");
+        assert!(parse_ps_line("").is_none());
     }
 
     #[test]

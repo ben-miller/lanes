@@ -55,7 +55,8 @@ fn load_session(path: &Path, live_zellij_sessions: &std::collections::HashSet<St
     let s: ActiveSession = serde_json::from_str(&data).ok()?;
 
     let zellij_session = s.zellij_session.clone().unwrap_or_default();
-    if !crate::session_is_live(&zellij_session, live_zellij_sessions, s.pid) {
+    let age = crate::file_age_secs(path);
+    if !crate::session_is_live(&zellij_session, live_zellij_sessions, s.pid, age) {
         return None;
     }
 
@@ -112,8 +113,9 @@ fn check_renamed(path: &Path, live_zellij_sessions: &std::collections::HashSet<S
     }
 
     let pid = s.pid?;
-    let cmd = crate::process_command(pid)?;
-    if !crate::is_claude_command(&cmd) {
+    // Same pid-reuse guard as session_is_live: a recycled pid pointing at an
+    // unrelated claude shouldn't get reported as "your session was renamed".
+    if !crate::pid_is_this_session(pid, crate::file_age_secs(path)) {
         return None;
     }
 
