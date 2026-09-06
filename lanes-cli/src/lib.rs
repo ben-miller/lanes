@@ -4,7 +4,6 @@ pub mod logging;
 pub mod model;
 pub mod scope;
 pub mod state;
-pub mod zone;
 
 pub use drivers::claude::RenamedCandidate;
 
@@ -166,9 +165,8 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             }
         }).collect();
 
-        facets.extend(lane.windows.iter().map(|w| model::FacetSnapshot::Window {
-            path: w.path.clone(),
-            zone: w.zone.clone(),
+        facets.extend(lane.targets.iter().map(|t| model::FacetSnapshot::Target {
+            driver: t.driver.name().to_string(),
         }));
 
         let reachable = lane_reachable(&facets);
@@ -233,7 +231,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             let signals = match facet {
                 model::FacetSnapshot::Terminal { signals, .. } => signals,
                 model::FacetSnapshot::Repo { signals, .. } => signals,
-                model::FacetSnapshot::Window { .. } => continue,
+                model::FacetSnapshot::Target { .. } => continue,
             };
             for s in signals.iter_mut() {
                 let session_disabled = match &s.action {
@@ -1117,53 +1115,205 @@ fn activate_wezterm_tab(session: &str, focus: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn activate_window_facet(path: &str, zone: &str, cfg: &config::Config) -> Result<(), String> {
-    let bundle_id = parse_bundle_id(path)
-        .ok_or_else(|| format!("could not parse bundle id from path '{}'", path))?;
-
-    let rect = zone::parse(zone)?;
-
-    let uuid = cfg.monitor_uuid(&rect.monitor_handle)
-        .ok_or_else(|| format!("monitor handle '{}' not found in config", rect.monitor_handle))?
-        .to_string();
-
-    let lua = format!(
-        "local s=nil; \
-         for _,sc in ipairs(hs.screen.allScreens()) do \
-           if sc:getUUID()=='{uuid}' then s=sc; break end \
-         end; \
-         if s then \
-           local apps=hs.application.applicationsForBundleID('{bundle}'); \
-           local a=apps and apps[1]; \
-           if a then \
-             local w=a:mainWindow(); \
-             if w then \
-               local f=s:frame(); \
-               w:setFrame({{x=f.x+{x}*f.w, y=f.y+{y}*f.h, w={ww}*f.w, h={h}*f.h}}) \
-             end \
-           end \
-         end",
-        uuid = uuid,
-        bundle = bundle_id,
-        x = rect.x,
-        y = rect.y,
-        ww = rect.w,
-        h = rect.h,
-    );
-
-    match std::process::Command::new("/opt/homebrew/bin/hs").args(["-c", &lua]).output() {
-        Err(e) => Err(format!("hs call failed for '{}': {}", bundle_id, e)),
-        Ok(o) if !o.status.success() => {
-            Err(format!("hs returned error for '{}':\n{}", bundle_id, String::from_utf8_lossy(&o.stderr)))
-        }
-        _ => Ok(())
+/// Bundle ID a driver's app is addressed by, when placement (`monitor` +
+/// `position`) is requested for a target using it. WezTerm has a real OS
+/// window of its own and is placeable like any other app - only `zellij`
+/// (a multiplexer running inside whatever terminal hosts it, no window of
+/// its own) and `app` (no fixed identity beyond its display name) can't be.
+/// A target using either of those with `monitor`/`position` set is rejected
+/// in `apply_targets`.
+fn target_bundle_id(driver: &model::TargetDriver) -> Option<&'static str> {
+    match driver {
+        model::TargetDriver::Wezterm { .. } => Some("com.github.wez.wezterm"),
+        model::TargetDriver::Obsidian { .. } => Some("md.obsidian"),
+        model::TargetDriver::Sourcetree { .. } => Some("com.torusknot.SourceTreeNotMAS"),
+        model::TargetDriver::Vscode { .. } => Some("com.microsoft.VSCode"),
+        model::TargetDriver::Zellij { .. } | model::TargetDriver::App { .. } => None,
     }
 }
 
-fn parse_bundle_id(path: &str) -> Option<String> {
-    let first = path.split(" / ").next()?;
-    let bundle = first.strip_prefix("app:")?;
-    Some(bundle.trim().to_string())
+/// Percent-encode everything but RFC 3986's unreserved characters. Minimal,
+/// dependency-free - the only user right now is the Obsidian vault URI,
+/// where vault names are typically just letters/digits/spaces.
+fn percent_encode(s: &str) -> String {
+    s.bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'_' | b'.' | b'~') {
+                (b as char).to_string()
+            } else {
+                format!("%{:02X}", b)
+            }
+        })
+        .collect()
+}
+
+fn run_command_checked(cmd: &mut std::process::Command, label: &str) -> Result<(), String> {
+    let output = cmd.output().map_err(|e| format!("{label}: {e}"))?;
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return Err(format!("{label} failed: {}", stderr.trim()));
+    }
+    Ok(())
+}
+
+/// Run a target's activation step - whatever app-specific mechanism makes
+/// the right window/pane/vault frontmost. Doesn't place anything itself;
+/// placement is a separate, batched step in `apply_targets` (every
+/// placement in a lane goes through one `lanes-wm apply` call, not one per
+/// target - see PLAN-window-targets.md).
+fn activate_target(driver: &model::TargetDriver, focus: bool) -> Result<(), String> {
+    match driver {
+        model::TargetDriver::Wezterm { session } => activate_wezterm_tab(session, focus),
+        model::TargetDriver::Zellij { session, pane } => {
+            let pane_id = match pane {
+                Some(p) => *p as u64,
+                None => first_pane_id(session)
+                    .ok_or_else(|| format!("no panes found in zellij session '{session}'"))?
+                    as u64,
+            };
+            focus_zellij_pane(session, pane_id)
+        }
+        model::TargetDriver::Obsidian { vault } => {
+            let uri = format!("obsidian://open?vault={}", percent_encode(vault));
+            run_command_checked(std::process::Command::new("open").arg(uri), "open obsidian:// URI")
+        }
+        model::TargetDriver::Sourcetree { repo } => {
+            let path = expand_tilde(repo);
+            run_command_checked(
+                std::process::Command::new("/opt/homebrew/bin/stree").current_dir(&path).arg("."),
+                "stree",
+            )
+        }
+        model::TargetDriver::Vscode { folder } => {
+            let path = expand_tilde(folder);
+            run_command_checked(
+                std::process::Command::new("code").args(["-r", &path]),
+                "code -r (is the 'code' shell command installed? VS Code > Cmd+Shift+P > \"Shell Command: Install 'code' command in PATH\")",
+            )
+        }
+        model::TargetDriver::App { name } => {
+            run_command_checked(std::process::Command::new("open").args(["-a", name]), "open -a")
+        }
+    }
+}
+
+/// Activate every target in a lane, then place all of them that asked for
+/// placement in a single `lanes-wm apply` call - never one `lanes-wm place`
+/// per target, since a lane switch always moves several windows at once and
+/// should do it in one shot (see PLAN-window-targets.md). Best-effort like
+/// the scope loop above: one broken target doesn't block the rest.
+fn apply_targets(targets: &[model::Target], cfg: &config::Config, focus: bool) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let mut placements = Vec::new();
+
+    for target in targets {
+        if target.launch {
+            if let model::TargetDriver::App { name } = &target.driver {
+                std::process::Command::new("open").args(["-a", name]).spawn().ok();
+            } else if let Some(bundle_id) = target_bundle_id(&target.driver) {
+                std::process::Command::new("open").args(["-b", bundle_id]).spawn().ok();
+            }
+        }
+
+        if let Err(e) = activate_target(&target.driver, focus) {
+            let e = format!("target '{}': {e}", target.driver.name());
+            eprintln!("warning: {e}");
+            warnings.push(e);
+            continue;
+        }
+
+        let Some(monitor) = &target.monitor else { continue };
+        let Some(bundle_id) = target_bundle_id(&target.driver) else {
+            let e = format!(
+                "target '{}' has monitor/position set but its driver can't be placed",
+                target.driver.name()
+            );
+            eprintln!("warning: {e}");
+            warnings.push(e);
+            continue;
+        };
+        let Some(uuid) = cfg.monitor_uuid(monitor) else {
+            let e = format!("monitor handle '{monitor}' not found in config");
+            eprintln!("warning: {e}");
+            warnings.push(e);
+            continue;
+        };
+        let position = target.position.clone().unwrap_or_else(|| toml::Value::String("full".to_string()));
+        let position_json = match serde_json::to_value(&position) {
+            Ok(v) => v,
+            Err(e) => {
+                let e = format!("target '{}': invalid position: {e}", target.driver.name());
+                eprintln!("warning: {e}");
+                warnings.push(e);
+                continue;
+            }
+        };
+        // `focused: true`, never `title` - the whole point of the activate
+        // step above was to deterministically make the right window
+        // frontmost first, so placement just acts on whatever that left
+        // focused (lanes-wm's `--focused` selector).
+        placements.push(serde_json::json!({
+            "app": bundle_id,
+            "monitor": uuid,
+            "position": position_json,
+            "focused": true,
+        }));
+    }
+
+    if !placements.is_empty() {
+        warnings.extend(run_lanes_wm_apply(&placements));
+    }
+
+    warnings
+}
+
+/// One `lanes-wm apply` call for a whole batch of placements. Returns a
+/// warning string per placement lanes-wm reported as failed - never panics
+/// or aborts on a single bad placement, same partial-failure contract
+/// `lanes-wm apply` itself has.
+fn run_lanes_wm_apply(placements: &[serde_json::Value]) -> Vec<String> {
+    use std::io::Write;
+
+    let payload = serde_json::to_string(placements).unwrap_or_default();
+    let mut child = match std::process::Command::new("lanes-wm")
+        .arg("apply")
+        .arg("--compact")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(e) => return vec![format!("lanes-wm apply: could not start lanes-wm: {e}")],
+    };
+    if let Some(stdin) = child.stdin.as_mut() {
+        let _ = stdin.write_all(payload.as_bytes());
+    }
+    let output = match child.wait_with_output() {
+        Ok(o) => o,
+        Err(e) => return vec![format!("lanes-wm apply: {e}")],
+    };
+    if !output.status.success() {
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        return vec![format!("lanes-wm apply exited with an error: {}", stderr.trim())];
+    }
+
+    #[derive(serde::Deserialize)]
+    struct PlacementResult {
+        app: String,
+        ok: bool,
+        #[serde(default)]
+        error: Option<String>,
+    }
+    let results: Vec<PlacementResult> = match serde_json::from_slice(&output.stdout) {
+        Ok(r) => r,
+        Err(e) => return vec![format!("lanes-wm apply: could not parse its output: {e}")],
+    };
+    results
+        .into_iter()
+        .filter(|r| !r.ok)
+        .map(|r| format!("placement failed for {}: {}", r.app, r.error.unwrap_or_default()))
+        .collect()
 }
 
 /// Resolve a lane id: use `explicit` if given, otherwise fall back to
@@ -1221,12 +1371,7 @@ pub fn focus_lane(lane_id: &str, focus: bool) -> Result<(), String> {
             }
         }
     }
-    for w in &lane.windows {
-        if let Err(e) = activate_window_facet(&w.path, &w.zone, &cfg) {
-            eprintln!("warning: {}", e);
-            warnings.push(e);
-        }
-    }
+    warnings.extend(apply_targets(&lane.targets, &cfg, focus));
 
     state::set_focused_lane(lane_id);
 
@@ -1442,11 +1587,33 @@ mod tests {
     }
 
     #[test]
-    fn parses_bundle_id() {
+    fn target_bundle_id_known_for_placeable_drivers() {
         assert_eq!(
-            parse_bundle_id("app:com.github.wez.wezterm / window"),
-            Some("com.github.wez.wezterm".to_string())
+            target_bundle_id(&model::TargetDriver::Wezterm { session: "x".into() }),
+            Some("com.github.wez.wezterm")
         );
+        assert_eq!(
+            target_bundle_id(&model::TargetDriver::Obsidian { vault: "x".into() }),
+            Some("md.obsidian")
+        );
+        assert_eq!(
+            target_bundle_id(&model::TargetDriver::Vscode { folder: "x".into() }),
+            Some("com.microsoft.VSCode")
+        );
+    }
+
+    #[test]
+    fn target_bundle_id_none_for_activate_only_drivers() {
+        // zellij is a multiplexer running inside whatever terminal hosts
+        // it, no window of its own - and `app` has no fixed identity beyond
+        // its display name. Either used with monitor/position set should be
+        // rejected upstream (apply_targets), not silently resolved to some
+        // bundle id.
+        assert_eq!(
+            target_bundle_id(&model::TargetDriver::Zellij { session: "x".into(), pane: None }),
+            None
+        );
+        assert_eq!(target_bundle_id(&model::TargetDriver::App { name: "x".into() }), None);
     }
 
     #[test]
@@ -1511,7 +1678,7 @@ mod tests {
             name: id.to_string(),
             active: true,
             scope: vec![crate::scope::ScopeElement::zellij_session(session)],
-            windows: vec![],
+            targets: vec![],
         }
     }
 
@@ -1580,7 +1747,7 @@ mod tests {
             name: "Infra".to_string(),
             active: false,
             scope: vec![scope::ScopeElement::zellij_session("infra")],
-            windows: vec![],
+            targets: vec![],
         }]);
         assert!(session_belongs_to_reachable_lane(Some("some-other-session"), &cfg));
         assert!(session_belongs_to_reachable_lane(None, &cfg));
@@ -1816,11 +1983,14 @@ mod tests {
     }
 
     #[test]
-    fn parses_bundle_id_bare() {
-        assert_eq!(
-            parse_bundle_id("app:org.mozilla.firefox / window"),
-            Some("org.mozilla.firefox".to_string())
-        );
+    fn percent_encode_leaves_unreserved_chars_alone() {
+        assert_eq!(percent_encode("Formation-2026_v1.0~x"), "Formation-2026_v1.0~x");
+    }
+
+    #[test]
+    fn percent_encode_escapes_spaces_and_other_bytes() {
+        assert_eq!(percent_encode("My Vault"), "My%20Vault");
+        assert_eq!(percent_encode("a&b"), "a%26b");
     }
 
 }

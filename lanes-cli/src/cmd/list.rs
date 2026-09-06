@@ -34,8 +34,13 @@ pub fn run(lanes: &[Lane], json: bool) {
                 }
             }
         }
-        for w in &lane.windows {
-            println!("  window          {} -> {}", w.path, w.zone);
+        for t in &lane.targets {
+            let placement = match (&t.monitor, &t.position) {
+                (Some(m), Some(p)) => format!(" -> {m} ({})", serde_json::to_string(p).unwrap_or_default()),
+                (Some(m), None) => format!(" -> {m}"),
+                (None, _) => String::new(),
+            };
+            println!("  target          {}{placement}", t.driver.name());
         }
     }
 }

@@ -670,7 +670,7 @@ mod tests {
             name: name.to_string(),
             active,
             scope: vec![ScopeElement::zellij_session(session)],
-            windows: vec![],
+            targets: vec![],
         }
     }
 

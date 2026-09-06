@@ -18,14 +18,14 @@ pub struct Lane {
     pub active: bool,
     #[serde(default)]
     pub scope: Vec<ScopeElement>,
-    // Window placement isn't part of scope - unlike everything else here,
-    // it has no observable state and nothing to navigate to, it's a pure
-    // imperative action ("move this app to this screen zone") triggered on
+    // Targets aren't part of scope - unlike everything else here, they have
+    // no observable state and nothing to navigate to, they're a pure
+    // imperative action ("activate this, optionally place it") triggered on
     // lane focus. Doesn't fit the scope/observation model, so it stays its
     // own thing rather than being forced into a ScopeElement kind with no
-    // observations and no real locator identity.
+    // observations and no real locator identity. See PLAN-window-targets.md.
     #[serde(default)]
-    pub windows: Vec<WindowPlacement>,
+    pub targets: Vec<Target>,
 }
 
 fn default_true() -> bool {
@@ -42,10 +42,77 @@ impl Lane {
     }
 }
 
+/// One thing a lane wants activated (made frontmost/focused) on lane focus,
+/// and optionally placed on a monitor afterward. Every driver is the same
+/// shape - a name plus that driver's own fields - so adding a new app means
+/// adding one driver, never new config syntax. See PLAN-window-targets.md
+/// (in the lanes repo root) for the full design rationale.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct WindowPlacement {
-    pub path: String,
-    pub zone: String,
+pub struct Target {
+    #[serde(flatten)]
+    pub driver: TargetDriver,
+    /// Monitor handle, resolved against `[monitors.*]` in `~/.config/lanes.toml`.
+    /// None if this target only activates, no placement.
+    #[serde(default)]
+    pub monitor: Option<String>,
+    /// Passed straight through to lanes-wm's `apply` as the `position`
+    /// field, unexamined - a preset string or a `{cols, col, ...}` grid
+    /// span (see lanes-wm's README). lanes-cli has no opinion on what a
+    /// position means, only lanes-wm does.
+    #[serde(default)]
+    pub position: Option<toml::Value>,
+    /// Whether to launch the app first if it isn't already running.
+    /// Deliberately opt-in, not automatic - see PLAN-window-targets.md's
+    /// "App-not-running behavior".
+    #[serde(default)]
+    pub launch: bool,
+}
+
+/// Which app-specific mechanism activates this target, and that
+/// mechanism's own identifying fields. Adding an app means adding one
+/// variant here, never inventing new top-level config syntax.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "driver", rename_all = "kebab-case")]
+pub enum TargetDriver {
+    /// Activate a cached WezTerm tab by Zellij session name - same
+    /// mechanism `[[scope]]`'s Terminal facet already uses.
+    Wezterm { session: String },
+    /// Focus a specific pane in a Zellij session (defaults to the
+    /// leftmost/topmost pane if `pane` is omitted).
+    Zellij {
+        session: String,
+        #[serde(default)]
+        pane: Option<u32>,
+    },
+    /// Open a specific Obsidian vault via its `obsidian://` URI.
+    Obsidian { vault: String },
+    /// Open a repo's working copy in SourceTree (`stree`, run from the
+    /// repo's own directory).
+    Sourcetree { repo: String },
+    /// Open (or reuse the existing window for) a folder in VS Code.
+    Vscode { folder: String },
+    /// Fallback for anything without a real driver yet: just bring the
+    /// named app forward (`open -a <name>`), whichever window it last had
+    /// focused. No window/tab addressing - see PLAN-window-targets.md for
+    /// why this is deliberately the ceiling for apps without one of the
+    /// drivers above.
+    App { name: String },
+}
+
+impl TargetDriver {
+    /// The `driver` string as written in config - used for display
+    /// (`FacetSnapshot::Target`) rather than re-deriving it from the enum
+    /// variant's Debug output.
+    pub fn name(&self) -> &'static str {
+        match self {
+            TargetDriver::Wezterm { .. } => "wezterm",
+            TargetDriver::Zellij { .. } => "zellij",
+            TargetDriver::Obsidian { .. } => "obsidian",
+            TargetDriver::Sourcetree { .. } => "sourcetree",
+            TargetDriver::Vscode { .. } => "vscode",
+            TargetDriver::App { .. } => "app",
+        }
+    }
 }
 
 // --- Signals ---
@@ -368,7 +435,7 @@ pub enum FacetSnapshot {
         #[serde(skip_serializing_if = "Vec::is_empty", default)]
         signals: Vec<Signal>,
     },
-    Window { path: String, zone: String },
+    Target { driver: String },
     Repo { path: String, signals: Vec<Signal> },
 }
 

@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::model::{Lane, WindowPlacement};
+use crate::model::{Lane, Target};
 use crate::scope::ScopeElement;
 
 #[derive(Clone)]
@@ -134,7 +134,7 @@ struct LaneFile {
     #[serde(default)]
     scope: Vec<ScopeElementRaw>,
     #[serde(default)]
-    windows: Vec<WindowPlacement>,
+    targets: Vec<Target>,
 }
 
 #[derive(Deserialize)]
@@ -231,7 +231,7 @@ fn load_lanes() -> Vec<Lane> {
                 name: file.lane.name,
                 active: file.lane.active,
                 scope: file.scope.into_iter().map(ScopeElement::from).collect(),
-                windows: file.windows,
+                targets: file.targets,
             })
         })
         .collect();
@@ -250,7 +250,7 @@ mod tests {
             name: id.to_string(),
             active: true,
             scope: Vec::new(),
-            windows: Vec::new(),
+            targets: Vec::new(),
         }
     }
 
@@ -369,7 +369,7 @@ session = "sheetwork"
     }
 
     #[test]
-    fn parses_lane_file_with_name_and_window_placement() {
+    fn parses_lane_file_with_name_and_target() {
         let content = r#"
 [lane]
 id = "lanes-dev"
@@ -379,17 +379,52 @@ name = "lanes dev"
 kind = "zellij_session"
 session = "lanes"
 
-[[windows]]
-path = "app:com.jetbrains.intellij / window"
-zone = "main:1-2/3"
+[[targets]]
+driver = "wezterm"
+session = "lanes"
+monitor = "lg-right"
+position = "full"
 "#;
         let file: LaneFile = toml::from_str(content).unwrap();
         assert_eq!(file.lane.id, "lanes-dev");
         assert_eq!(file.lane.name, "lanes dev");
         assert_eq!(file.scope.len(), 1);
-        assert_eq!(file.windows.len(), 1);
-        assert!(file.windows[0].path.contains("intellij"));
-        assert_eq!(file.windows[0].zone, "main:1-2/3");
+        assert_eq!(file.targets.len(), 1);
+        assert_eq!(file.targets[0].driver.name(), "wezterm");
+        assert_eq!(file.targets[0].monitor.as_deref(), Some("lg-right"));
+        assert!(matches!(&file.targets[0].driver, crate::model::TargetDriver::Wezterm { session } if session == "lanes"));
+    }
+
+    #[test]
+    fn parses_target_with_grid_position_and_no_monitor() {
+        // A target can activate-only (no monitor/position at all - e.g.
+        // wezterm/zellij, which never place a window) or carry a raw grid
+        // span instead of a preset - lanes-cli doesn't interpret `position`,
+        // just forwards it to lanes-wm, so it only needs to parse as TOML.
+        let content = r#"
+[lane]
+id = "formation"
+name = "Formation"
+
+[[targets]]
+driver = "obsidian"
+vault = "Formation"
+monitor = "main"
+
+[targets.position]
+cols = 3
+col = [1, 2]
+
+[[targets]]
+driver = "zellij"
+session = "formation"
+"#;
+        let file: LaneFile = toml::from_str(content).unwrap();
+        assert_eq!(file.targets.len(), 2);
+        assert!(matches!(&file.targets[0].driver, crate::model::TargetDriver::Obsidian { vault } if vault == "Formation"));
+        assert!(file.targets[0].position.is_some());
+        assert!(file.targets[1].monitor.is_none());
+        assert!(matches!(&file.targets[1].driver, crate::model::TargetDriver::Zellij { session, pane: None } if session == "formation"));
     }
 
     #[test]
@@ -433,14 +468,14 @@ zone = "main:1-2/3"
                     name: "Sheetwork".to_string(),
                     active: true,
                     scope: vec![ScopeElement::zellij_session("sheetwork")],
-                    windows: vec![],
+                    targets: vec![],
                 },
                 Lane {
                     id: "lanes-dev".to_string(),
                     name: "lanes dev".to_string(),
                     active: true,
                     scope: vec![ScopeElement::zellij_session("lanes")],
-                    windows: vec![],
+                    targets: vec![],
                 },
             ],
         };
@@ -461,14 +496,14 @@ zone = "main:1-2/3"
                     name: "Sheetwork 1".to_string(),
                     active: true,
                     scope: vec![ScopeElement::zellij_session("sheetwork1")],
-                    windows: vec![],
+                    targets: vec![],
                 },
                 Lane {
                     id: "lanes-dev".to_string(),
                     name: "lanes dev".to_string(),
                     active: true,
                     scope: vec![ScopeElement::zellij_session("lanes")],
-                    windows: vec![],
+                    targets: vec![],
                 },
             ],
         };
