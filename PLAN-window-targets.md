@@ -65,7 +65,8 @@ runtime-only ID (tab ID, window number, chat UUID) by hand.
 | `obsidian` | `vault` | `open 'obsidian://open?vault=<vault>'`, then place via lanes-wm's focused-window selector (see below) |
 | `sourcetree` | `repo` | `cd <repo> && stree` |
 | `vscode` | `folder` | `code -r <folder>` (reuse window) |
-| `app` | `name` | fallback for anything else: `open -a <name>`, no window/tab addressing - brings forward whichever window the app last had focused. Good enough for apps with no real driver yet. |
+| `app` | `name`, `bundle_id` (optional) | fallback for anything else: `open -a <name>`, no window/tab addressing - brings forward whichever window the app last had focused. `bundle_id` unlocks placement (`monitor`/`position`); without it, activate-only. |
+| `firefox-profile` | `profile` | switches which Firefox profile occupies a target, added after v1 - see its own section below |
 
 Explicitly not in v1, and why:
 - **brotab** (browser tabs) - blocked on a macOS install bug (`bt install`
@@ -168,6 +169,115 @@ monitor = "main"
 position = "right-half"
 ```
 
+## Cascading defaults
+
+`[[targets]]` in the global `~/.config/lanes.toml` apply to every lane,
+merged with (and overridable by) that lane's own `[[targets]]` - same idea
+as CSS: a default applies everywhere until something more specific
+overrides it. A lane's own target overrides a default of the same identity
+(driver kind, plus app name for the `app` driver) rather than duplicating
+it; anything else from both lists is kept (`merge_targets` in `config.rs`).
+
+```toml
+# ~/.config/lanes.toml
+[[targets]]
+driver = "wezterm"
+monitor = "lg-right"
+position = "full"
+
+[[targets]]
+driver = "app"
+name = "Firefox"
+bundle_id = "org.mozilla.firefox"
+monitor = "lg-left"
+position = "full"
+```
+
+For this to mean the same thing across lanes with different Zellij session
+names, `wezterm`/`zellij`'s `session` field is optional - omitted, it
+defaults to the owning lane's own terminal session at apply time.
+
+`app` targets also gained an optional `bundle_id`, needed for placement:
+`target_bundle_id` only knows a bundle id for an `app` target that supplies
+one (Firefox does; a Trello peek app with no placement doesn't need to).
+
+Note: the global default above was later replaced by `firefox-profile` (see
+below) - Firefox itself is now switched per profile, not just placed once.
+
+## Firefox profiles
+
+Firefox's newer built-in "Profiles" feature (distinct from the legacy
+`-P`/`profiles.ini` system, which it doesn't touch at all) lets multiple
+profiles run simultaneously, each as a genuinely separate process - but
+every one of them shares the same bundle ID (`org.mozilla.firefox`), which
+none of the existing drivers could disambiguate.
+
+```toml
+[[targets]]
+driver = "firefox-profile"
+profile = "Development"
+monitor = "lg-left"
+position = "full"
+```
+
+`profile` is the name you gave it in Firefox's own profile switcher.
+Resolution (`lanes-cli/src/lib.rs`):
+1. Look up the profile's on-disk path by name, from the per-install SQLite
+   database under `~/Library/Application Support/Firefox/Profile Groups/`
+   (queried via the `sqlite3` CLI - not `profiles.ini`, which the new
+   Profiles feature doesn't write to at all).
+2. Match a running process's `--profile <path>` launch argument via `ps`,
+   filtered to the main `firefox` binary specifically - its helper
+   processes (plugin-container, gpu-helper, crashhelper) all inherit and
+   echo the same `-profile <path>` argument, so a plain substring match
+   without that filter finds those instead (caught by a test, not by
+   inspection - worth remembering for the next process-scanning driver).
+   Falls back to matching a bare `firefox` process with no `--profile` flag
+   for the *default* profile specifically, since that's how it normally
+   launches.
+3. Launch it (`firefox --profile <path>`) only if `launch = true` - same
+   opt-in default-off behavior every other driver has.
+
+This is what motivated **lanes-wm's `--pid`**: an alternative to `--app`
+that targets one specific process directly, since bundle-ID resolution
+can't tell multiple Firefox profiles apart. `apply_targets` uses whichever
+identity a driver actually resolved (a bundle ID for everything else, the
+PID `firefox-profile` resolved as a byproduct of its own activation step).
+
+It also motivated **lanes-wm's `--raise`**: placement (`setFrame`) doesn't
+touch z-order, so an app placed at the same coordinates on every call - the
+whole point of "whichever profile is active occupies this exact screen
+region" - leaves whichever instance was already on top still on top,
+hiding the newly-placed one underneath. `--raise` activates the exact PID a
+window was resolved from (`NSRunningApplication`, not `open`, which can't
+target one instance among several sharing a bundle ID either). Every
+PID-resolved target gets `raise: true` automatically in `apply_targets` -
+that's currently synonymous with "needs raising," since PID resolution
+only exists for the same-screen-slot-competition problem in the first
+place. Note: `NSApplicationActivationOptions::ActivateIgnoringOtherApps` is
+deprecated on macOS 14+ and documented as having no effect - empty options
+is what actually works now.
+
+## Two bugs found by actually using this on real lane switches
+
+Both only showed up once tested through the real hotkey-driven switch path
+(`sessions switch`/`next`/`prev`), not through `lanes focus` alone - worth
+remembering for the next feature like this.
+
+1. **Every target's activation step raised its app unconditionally**, even
+   one that was only being placed. `lanes-wm`'s `--focused` placement
+   resolves and repositions a window correctly whether or not its app is
+   frontmost, so a placement-only target never needed to steal focus in the
+   first place. Fixed: `activate_target` only raises an `app` target when
+   it has *no* placement at all (a Trello peek app, whose whole purpose is
+   to be seen) - this is what was causing a visible flicker through every
+   app in a lane on every switch.
+2. **Targets were applied before the terminal/Claude session's own focus
+   step**, so whichever target happened to run last stole final focus - the
+   terminal never reliably ended up frontmost. Fixed by reordering: targets
+   first, terminal focus (WezTerm tab + Zellij pane) always last, in both
+   `focus_lane` and `switch_claude_session`.
+
 ## Open items before implementation
 
 - ~~Populate `[monitors.*]`~~ Done: `~/.config/lanes.toml` already had
@@ -176,12 +286,9 @@ position = "right-half"
   `~/.config/lanes/lanes.toml`). `lg-left`'s UUID was stale (didn't match
   either currently-attached external) and has been corrected; `main` (the
   built-in display) was missing and has been added.
-- Decide whether `[[windows]]`/`WindowPlacement`/`zone.rs` get deleted
-  outright or kept temporarily during migration. Note: since `[monitors]`
-  already existed with a valid `lg-right` entry, `activate_window_facet` may
-  actually have been reachable for lanes using that handle - unconfirmed,
-  don't assume it was always dead the way an earlier draft of this doc
-  claimed.
-- `focus_lane()` needs a loop over `lane.targets` that dispatches by
-  `driver`, replacing today's separate Terminal-facet WezTerm/Zellij handling
-  and the dead `[[windows]]` loop.
+- ~~Decide whether `[[windows]]`/`WindowPlacement`/`zone.rs` get deleted~~
+  Done: deleted outright, confirmed fully dead once `activate_window_facet`
+  was removed.
+- ~~`focus_lane()` needs a loop over `lane.targets`~~ Done, and extended to
+  `switch_claude_session` too - see above, that was the actual real-switch
+  entry point and initially didn't call `apply_targets` at all.

@@ -75,12 +75,20 @@ pub struct Target {
 #[serde(tag = "driver", rename_all = "kebab-case")]
 pub enum TargetDriver {
     /// Activate a cached WezTerm tab by Zellij session name - same
-    /// mechanism `[[scope]]`'s Terminal facet already uses.
-    Wezterm { session: String },
+    /// mechanism `[[scope]]`'s Terminal facet already uses. `session`
+    /// defaults to the owning lane's own terminal session when omitted -
+    /// what makes a single global default target (e.g. "WezTerm always
+    /// goes to lg-right") meaningful across lanes with different sessions.
+    Wezterm {
+        #[serde(default)]
+        session: Option<String>,
+    },
     /// Focus a specific pane in a Zellij session (defaults to the
-    /// leftmost/topmost pane if `pane` is omitted).
+    /// leftmost/topmost pane if `pane` is omitted). `session` defaults the
+    /// same way `Wezterm`'s does.
     Zellij {
-        session: String,
+        #[serde(default)]
+        session: Option<String>,
         #[serde(default)]
         pane: Option<u32>,
     },
@@ -91,12 +99,24 @@ pub enum TargetDriver {
     Sourcetree { repo: String },
     /// Open (or reuse the existing window for) a folder in VS Code.
     Vscode { folder: String },
-    /// Fallback for anything without a real driver yet: just bring the
-    /// named app forward (`open -a <name>`), whichever window it last had
-    /// focused. No window/tab addressing - see PLAN-window-targets.md for
-    /// why this is deliberately the ceiling for apps without one of the
-    /// drivers above.
-    App { name: String },
+    /// Bring the named app forward (`open -a <name>`). `bundle_id` is
+    /// optional and only needed if this target also wants placement
+    /// (`monitor`/`position`) - without it, this is activate-only, no
+    /// window/tab addressing at all, deliberately the ceiling for apps
+    /// without one of the drivers above (see PLAN-window-targets.md).
+    App {
+        name: String,
+        #[serde(default)]
+        bundle_id: Option<String>,
+    },
+    /// Switch to a specific Firefox profile - addressed by the name you
+    /// gave it in Firefox's own profile switcher (Firefox's newer built-in
+    /// "Profiles" feature, not the legacy -P/profiles.ini system). Since
+    /// every profile shares the same bundle ID, this resolves to a
+    /// specific PID (matching a running process's `--profile <path>`
+    /// launch argument, or launching one if none is running) rather than
+    /// going through the bundle-ID-based drivers above.
+    FirefoxProfile { profile: String },
 }
 
 impl TargetDriver {
@@ -111,6 +131,7 @@ impl TargetDriver {
             TargetDriver::Sourcetree { .. } => "sourcetree",
             TargetDriver::Vscode { .. } => "vscode",
             TargetDriver::App { .. } => "app",
+            TargetDriver::FirefoxProfile { .. } => "firefox-profile",
         }
     }
 }

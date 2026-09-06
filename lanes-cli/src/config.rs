@@ -3,7 +3,7 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
-use crate::model::{Lane, Target};
+use crate::model::{Lane, Target, TargetDriver};
 use crate::scope::ScopeElement;
 
 #[derive(Clone)]
@@ -26,8 +26,8 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        let (drivers, monitors, order) = load_global_config();
-        let mut lanes = load_lanes();
+        let (drivers, monitors, order, default_targets) = load_global_config();
+        let mut lanes = load_lanes(&default_targets);
         if let Some(order) = &order {
             sort_by_order(&mut lanes, order);
         }
@@ -120,6 +120,10 @@ struct GlobalConfig {
     monitors: HashMap<String, MonitorConfigRaw>,
     #[serde(default)]
     order: Option<Vec<String>>,
+    /// Targets applied to every lane, cascading with (and overridable by)
+    /// each lane's own `[[targets]]` - see `merge_targets`.
+    #[serde(default)]
+    targets: Vec<Target>,
 }
 
 #[derive(Deserialize)]
@@ -177,24 +181,54 @@ impl From<ScopeElementRaw> for ScopeElement {
 
 // --- Loaders ---
 
-fn load_global_config() -> (Option<Vec<String>>, HashMap<String, MonitorConfig>, Option<Vec<String>>) {
+type GlobalConfigLoaded = (Option<Vec<String>>, HashMap<String, MonitorConfig>, Option<Vec<String>>, Vec<Target>);
+
+fn load_global_config() -> GlobalConfigLoaded {
     let home = std::env::var("HOME").unwrap_or_default();
     let path = PathBuf::from(home).join(".config").join("lanes.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return (None, HashMap::new(), None),
+        Err(_) => return (None, HashMap::new(), None, Vec::new()),
     };
     let cfg: GlobalConfig = match toml::from_str(&content) {
         Ok(c) => c,
-        Err(_) => return (None, HashMap::new(), None),
+        Err(_) => return (None, HashMap::new(), None, Vec::new()),
     };
     let monitors = cfg.monitors.into_iter()
         .map(|(k, v)| (k, MonitorConfig { uuid: v.uuid, name: v.name }))
         .collect();
-    (cfg.drivers, monitors, cfg.order)
+    (cfg.drivers, monitors, cfg.order, cfg.targets)
 }
 
-fn load_lanes() -> Vec<Lane> {
+/// A target's identity for cascade purposes: a lane's own target overrides
+/// a default of the same identity (dropped from the merged result) rather
+/// than duplicating it. Driver kind alone is the identity for everything
+/// except `app`, which also needs the app name - a lane might reasonably
+/// want more than one `app` target, or override just one of several
+/// defaults sharing that driver.
+fn target_identity(t: &Target) -> (&'static str, Option<&str>) {
+    match &t.driver {
+        TargetDriver::App { name, .. } => ("app", Some(name.as_str())),
+        other => (other.name(), None),
+    }
+}
+
+/// Cascade a lane's own targets on top of the global defaults - same idea
+/// as CSS: defaults apply everywhere, a lane's own target of the same
+/// identity overrides the matching default instead of duplicating it,
+/// anything else from both lists is kept.
+fn merge_targets(defaults: &[Target], lane_targets: Vec<Target>) -> Vec<Target> {
+    let overridden: Vec<_> = lane_targets.iter().map(target_identity).collect();
+    let mut merged: Vec<Target> = defaults
+        .iter()
+        .filter(|d| !overridden.contains(&target_identity(d)))
+        .cloned()
+        .collect();
+    merged.extend(lane_targets);
+    merged
+}
+
+fn load_lanes(default_targets: &[Target]) -> Vec<Lane> {
     let dir = config_dir();
     let entries = match std::fs::read_dir(&dir) {
         Ok(e) => e,
@@ -231,7 +265,7 @@ fn load_lanes() -> Vec<Lane> {
                 name: file.lane.name,
                 active: file.lane.active,
                 scope: file.scope.into_iter().map(ScopeElement::from).collect(),
-                targets: file.targets,
+                targets: merge_targets(default_targets, file.targets),
             })
         })
         .collect();
@@ -252,6 +286,48 @@ mod tests {
             scope: Vec::new(),
             targets: Vec::new(),
         }
+    }
+
+    fn wezterm_target(monitor: &str) -> Target {
+        Target {
+            driver: TargetDriver::Wezterm { session: None },
+            monitor: Some(monitor.to_string()),
+            position: Some(toml::Value::String("full".to_string())),
+            launch: false,
+        }
+    }
+
+    fn app_target(name: &str) -> Target {
+        Target {
+            driver: TargetDriver::App { name: name.to_string(), bundle_id: None },
+            monitor: None,
+            position: None,
+            launch: false,
+        }
+    }
+
+    #[test]
+    fn merge_targets_appends_defaults_a_lane_has_no_override_for() {
+        let defaults = vec![wezterm_target("lg-right")];
+        let merged = merge_targets(&defaults, vec![app_target("Japanese")]);
+        assert_eq!(merged.len(), 2);
+        assert_eq!(merged[0].driver.name(), "wezterm");
+        assert_eq!(merged[1].driver.name(), "app");
+    }
+
+    #[test]
+    fn merge_targets_lane_override_replaces_the_matching_default_not_duplicates_it() {
+        let defaults = vec![wezterm_target("lg-right")];
+        let merged = merge_targets(&defaults, vec![wezterm_target("main")]);
+        assert_eq!(merged.len(), 1);
+        assert_eq!(merged[0].monitor.as_deref(), Some("main"));
+    }
+
+    #[test]
+    fn merge_targets_app_identity_includes_name_so_different_apps_coexist() {
+        let defaults = vec![app_target("Firefox")];
+        let merged = merge_targets(&defaults, vec![app_target("Japanese")]);
+        assert_eq!(merged.len(), 2);
     }
 
     #[test]
@@ -392,7 +468,7 @@ position = "full"
         assert_eq!(file.targets.len(), 1);
         assert_eq!(file.targets[0].driver.name(), "wezterm");
         assert_eq!(file.targets[0].monitor.as_deref(), Some("lg-right"));
-        assert!(matches!(&file.targets[0].driver, crate::model::TargetDriver::Wezterm { session } if session == "lanes"));
+        assert!(matches!(&file.targets[0].driver, crate::model::TargetDriver::Wezterm { session } if session.as_deref() == Some("lanes")));
     }
 
     #[test]
@@ -424,7 +500,7 @@ session = "formation"
         assert!(matches!(&file.targets[0].driver, crate::model::TargetDriver::Obsidian { vault } if vault == "Formation"));
         assert!(file.targets[0].position.is_some());
         assert!(file.targets[1].monitor.is_none());
-        assert!(matches!(&file.targets[1].driver, crate::model::TargetDriver::Zellij { session, pane: None } if session == "formation"));
+        assert!(matches!(&file.targets[1].driver, crate::model::TargetDriver::Zellij { session, pane: None } if session.as_deref() == Some("formation")));
     }
 
     #[test]
