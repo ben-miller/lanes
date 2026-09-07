@@ -35,7 +35,15 @@ pub fn run() {
         check_lane_order(&cfg),
         check_lane_order_vs_ztabs(&cfg),
         check_git_default_branches(&cfg),
+        check_lanes_wm(),
+        check_monitor_config(&cfg),
+        check_target_binaries(&cfg),
     ];
+
+    if has_firefox_profile_target(&cfg) {
+        checks.push(check_firefox_profile_schema());
+        checks.push(check_firefox_profiles_resolve(&cfg));
+    }
 
     if cfg.driver_enabled("zellij") {
         checks.push(check_zellij());
@@ -652,6 +660,259 @@ fn check_shell() -> Check {
     }
 }
 
+/// Checks lanes-wm itself: that it resolves on PATH at all (everything
+/// window-placement-related shells out to it by bare name - if the symlink
+/// ever points somewhere stale or gets removed, every placement fails),
+/// and - if it does resolve - whether it currently reports itself trusted
+/// for Accessibility. Uses `lanes-wm trusted`, not `request-access`: the
+/// latter can pop the system permission dialog, which a passive health
+/// check should never do just by running.
+fn check_lanes_wm() -> Check {
+    let status = Command::new("lanes-wm").arg("trusted").status();
+    match status {
+        Err(_) => Check {
+            label: "lanes-wm",
+            status: Status::Fail,
+            message: "lanes-wm not found on PATH".to_string(),
+            hint: Some("window placement on lane switch will silently do nothing until this is fixed - see lanes-wm's README".to_string()),
+        },
+        Ok(s) if s.success() => Check {
+            label: "lanes-wm",
+            status: Status::Ok,
+            message: "found on PATH, trusted for Accessibility".to_string(),
+            hint: None,
+        },
+        Ok(_) => Check {
+            label: "lanes-wm",
+            status: Status::Fail,
+            message: "found on PATH, but not trusted for Accessibility".to_string(),
+            hint: Some("run `lanes-wm request-access` and click Allow - see lanes-wm's README for why this can silently drop after a rebuild".to_string()),
+        },
+    }
+}
+
+/// Cross-checks every `[monitors.*]` UUID in lanes.toml against what's
+/// actually attached right now (`lanes-wm monitors`), the same staleness
+/// that had lg-left pointing at a UUID matching no currently-attached
+/// display earlier this project - caught then by accident, this catches
+/// it proactively.
+/// Which configured monitor handles' UUIDs don't match any currently-live
+/// one - pulled out of `check_monitor_config` so the comparison itself is
+/// testable without an actual `lanes-wm monitors` call. `live_uuids` is
+/// expected pre-uppercased; handle UUIDs are compared case-insensitively.
+fn stale_monitor_handles(
+    monitors: &std::collections::HashMap<String, lanes::config::MonitorConfig>,
+    live_uuids: &std::collections::HashSet<String>,
+) -> Vec<String> {
+    let mut stale: Vec<String> = monitors
+        .iter()
+        .filter_map(|(handle, mc)| {
+            let uuid = mc.uuid.as_ref()?;
+            (!live_uuids.contains(&uuid.to_uppercase())).then(|| format!("{handle} ({uuid})"))
+        })
+        .collect();
+    stale.sort();
+    stale
+}
+
+fn check_monitor_config(cfg: &lanes::config::Config) -> Check {
+    let output = match Command::new("lanes-wm").args(["monitors", "--compact"]).output() {
+        Ok(o) if o.status.success() => o,
+        _ => {
+            return Check {
+                label: "monitor config",
+                status: Status::Warn,
+                message: "could not run `lanes-wm monitors` - skipping".to_string(),
+                hint: None,
+            };
+        }
+    };
+    let Ok(live) = serde_json::from_slice::<Vec<serde_json::Value>>(&output.stdout) else {
+        return Check {
+            label: "monitor config",
+            status: Status::Warn,
+            message: "could not parse `lanes-wm monitors` output - skipping".to_string(),
+            hint: None,
+        };
+    };
+    let live_uuids: std::collections::HashSet<String> = live
+        .iter()
+        .filter_map(|m| m.get("uuid").and_then(|u| u.as_str()).map(|s| s.to_uppercase()))
+        .collect();
+
+    let stale = stale_monitor_handles(&cfg.monitors, &live_uuids);
+
+    if stale.is_empty() {
+        Check {
+            label: "monitor config",
+            status: Status::Ok,
+            message: format!("{} monitor handle(s), all match a currently-attached display", cfg.monitors.len()),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "monitor config",
+            status: Status::Warn,
+            message: format!("handle(s) not matching any currently-attached display: {}", stale.join(", ")),
+            hint: Some("reconnect the display, or update the UUID in ~/.config/lanes.toml (see `lanes-wm monitors` for current UUIDs)".to_string()),
+        }
+    }
+}
+
+/// Every `firefox-profile` target across every lane, driver fields intact -
+/// used by both the schema check (does this feature even apply here) and
+/// the per-profile resolution check below.
+fn firefox_profile_targets(cfg: &lanes::config::Config) -> Vec<&str> {
+    cfg.lanes
+        .iter()
+        .flat_map(|l| &l.targets)
+        .filter_map(|t| match &t.driver {
+            lanes::model::TargetDriver::FirefoxProfile { profile } => Some(profile.as_str()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn has_firefox_profile_target(cfg: &lanes::config::Config) -> bool {
+    !firefox_profile_targets(cfg).is_empty()
+}
+
+/// Verifies the undocumented assumptions the `firefox-profile` driver
+/// depends on: `sqlite3` is on PATH (it's shelled out to, not linked
+/// against), and Firefox's Profile Groups database actually has the
+/// `Profiles` table with a `name`/`path` we can query. Firefox's newer
+/// Profiles feature has no public schema spec - this is the thing that
+/// would silently break if Mozilla ever changes it, so it gets checked
+/// directly rather than only discovered the next time a lane switch fails.
+fn check_firefox_profile_schema() -> Check {
+    if Command::new("sqlite3").arg("-version").output().is_err() {
+        return Check {
+            label: "firefox-profile schema",
+            status: Status::Fail,
+            message: "sqlite3 not found on PATH".to_string(),
+            hint: Some("install sqlite3 (e.g. `brew install sqlite`) - every firefox-profile target depends on it".to_string()),
+        };
+    }
+
+    let groups_dir = lanes::expand_tilde("~/Library/Application Support/Firefox/Profile Groups");
+    let entries = match std::fs::read_dir(&groups_dir) {
+        Ok(e) => e,
+        Err(_) => {
+            return Check {
+                label: "firefox-profile schema",
+                status: Status::Fail,
+                message: format!("could not read {groups_dir}"),
+                hint: Some("has Firefox's Profiles feature ever been used on this machine?".to_string()),
+            };
+        }
+    };
+    let db = entries
+        .filter_map(|e| e.ok())
+        .find(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sqlite"));
+    let Some(db) = db else {
+        return Check {
+            label: "firefox-profile schema",
+            status: Status::Fail,
+            message: format!("no .sqlite database found in {groups_dir}"),
+            hint: None,
+        };
+    };
+
+    let output = Command::new("sqlite3")
+        .arg(db.path())
+        .arg("SELECT name, path FROM Profiles LIMIT 1")
+        .output();
+    match output {
+        Ok(o) if o.status.success() => Check {
+            label: "firefox-profile schema",
+            status: Status::Ok,
+            message: "Profiles table has the name/path columns we query".to_string(),
+            hint: None,
+        },
+        Ok(o) => Check {
+            label: "firefox-profile schema",
+            status: Status::Fail,
+            message: format!(
+                "Profiles table query failed - Firefox may have changed its schema: {}",
+                String::from_utf8_lossy(&o.stderr).trim()
+            ),
+            hint: Some("this is undocumented internal Firefox state - if it broke, the firefox-profile driver needs updating to match".to_string()),
+        },
+        Err(e) => Check {
+            label: "firefox-profile schema",
+            status: Status::Fail,
+            message: format!("sqlite3 query failed: {e}"),
+            hint: None,
+        },
+    }
+}
+
+/// Every `firefox-profile` target's `profile` name actually resolves right
+/// now - catches renaming a profile in Firefox's own switcher (or deleting
+/// it) without updating the lane config that references it by name.
+fn check_firefox_profiles_resolve(cfg: &lanes::config::Config) -> Check {
+    let names = firefox_profile_targets(cfg);
+    let unresolved: Vec<&str> = names
+        .iter()
+        .filter(|n| lanes::firefox_profile_path(n).is_err())
+        .copied()
+        .collect();
+
+    if unresolved.is_empty() {
+        Check {
+            label: "firefox profiles",
+            status: Status::Ok,
+            message: format!("{} profile(s) referenced in config, all resolve", names.len()),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "firefox profiles",
+            status: Status::Warn,
+            message: format!("referenced in config but not found in Firefox's profile switcher: {}", unresolved.join(", ")),
+            hint: Some("renamed or deleted in Firefox's own UI? update the profile name in the lane config that references it".to_string()),
+        }
+    }
+}
+
+/// Every external binary a configured target's driver actually needs
+/// (`stree`, `code`) is on PATH. `code` in particular is opt-in per-machine
+/// (VS Code's own "install shell command" step), easy to forget - and
+/// unlike a missing `sqlite3`/`lanes-wm`, this failure is scoped to just
+/// the one driver, so each missing binary is its own line rather than
+/// failing the whole check.
+fn check_target_binaries(cfg: &lanes::config::Config) -> Check {
+    let mut needed: std::collections::HashSet<&'static str> = std::collections::HashSet::new();
+    for target in cfg.lanes.iter().flat_map(|l| &l.targets) {
+        match &target.driver {
+            lanes::model::TargetDriver::Sourcetree { .. } => { needed.insert("stree"); }
+            lanes::model::TargetDriver::Vscode { .. } => { needed.insert("code"); }
+            _ => {}
+        }
+    }
+
+    let missing: Vec<&str> = needed
+        .into_iter()
+        .filter(|bin| Command::new("which").arg(bin).output().is_ok_and(|o| !o.status.success()))
+        .collect();
+
+    if missing.is_empty() {
+        Check {
+            label: "target binaries",
+            status: Status::Ok,
+            message: "every binary referenced by a configured target driver is on PATH".to_string(),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "target binaries",
+            status: Status::Warn,
+            message: format!("referenced by a target but not found on PATH: {}", missing.join(", ")),
+            hint: Some("code: VS Code > Cmd+Shift+P > \"Shell Command: Install 'code' command in PATH\". stree: SourceTree > Install Command Line Tools".to_string()),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -672,6 +933,23 @@ mod tests {
             scope: vec![ScopeElement::zellij_session(session)],
             targets: vec![],
         }
+    }
+
+    fn lane_with_targets(id: &str, targets: Vec<lanes::model::Target>) -> Lane {
+        Lane { targets, ..lane(id, id, true, id) }
+    }
+
+    fn firefox_profile_target(profile: &str) -> lanes::model::Target {
+        lanes::model::Target {
+            driver: lanes::model::TargetDriver::FirefoxProfile { profile: profile.to_string() },
+            monitor: None,
+            position: None,
+            launch: false,
+        }
+    }
+
+    fn monitor(uuid: &str) -> lanes::config::MonitorConfig {
+        lanes::config::MonitorConfig { uuid: Some(uuid.to_string()), name: None }
     }
 
     #[test]
@@ -854,5 +1132,48 @@ mod tests {
     #[test]
     fn parse_ls_remote_symref_is_none_on_empty_output() {
         assert_eq!(parse_ls_remote_symref(""), None);
+    }
+
+    #[test]
+    fn stale_monitor_handles_flags_uuid_matching_no_live_display() {
+        let monitors: HashMap<String, lanes::config::MonitorConfig> =
+            [("lg-left".to_string(), monitor("AAAA"))].into_iter().collect();
+        let live: HashSet<String> = ["BBBB".to_string()].into_iter().collect();
+        assert_eq!(stale_monitor_handles(&monitors, &live), vec!["lg-left (AAAA)".to_string()]);
+    }
+
+    #[test]
+    fn stale_monitor_handles_empty_when_uuid_matches_case_insensitively() {
+        let monitors: HashMap<String, lanes::config::MonitorConfig> =
+            [("main".to_string(), monitor("aaaa"))].into_iter().collect();
+        let live: HashSet<String> = ["AAAA".to_string()].into_iter().collect();
+        assert!(stale_monitor_handles(&monitors, &live).is_empty());
+    }
+
+    #[test]
+    fn stale_monitor_handles_ignores_a_handle_with_no_uuid() {
+        let monitors: HashMap<String, lanes::config::MonitorConfig> =
+            [("main".to_string(), lanes::config::MonitorConfig { uuid: None, name: None })]
+                .into_iter()
+                .collect();
+        assert!(stale_monitor_handles(&monitors, &HashSet::new()).is_empty());
+    }
+
+    #[test]
+    fn firefox_profile_targets_collects_across_every_lane() {
+        let cfg = test_config(vec![
+            lane_with_targets("formation", vec![firefox_profile_target("Original profile")]),
+            lane_with_targets("japanese", vec![firefox_profile_target("Japanese")]),
+            lane("infra", "Infra", true, "infra"), // no targets at all
+        ]);
+        let mut names = firefox_profile_targets(&cfg);
+        names.sort();
+        assert_eq!(names, vec!["Japanese", "Original profile"]);
+    }
+
+    #[test]
+    fn has_firefox_profile_target_false_when_none_configured() {
+        let cfg = test_config(vec![lane("infra", "Infra", true, "infra")]);
+        assert!(!has_firefox_profile_target(&cfg));
     }
 }

@@ -1196,7 +1196,7 @@ fn run_command_checked(cmd: &mut std::process::Command, label: &str) -> Result<(
 /// `sqlite3` rather than adding a dependency for one query - same pattern
 /// as everything else here (wezterm/zellij/stree are all shelled out to,
 /// not linked against).
-fn firefox_profile_path(name: &str) -> Result<String, String> {
+pub fn firefox_profile_path(name: &str) -> Result<String, String> {
     let groups_dir = expand_tilde("~/Library/Application Support/Firefox/Profile Groups");
     let entries = std::fs::read_dir(&groups_dir)
         .map_err(|e| format!("could not read {groups_dir}: {e}"))?;
