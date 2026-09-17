@@ -294,6 +294,7 @@ mod tests {
             monitor: Some(monitor.to_string()),
             position: Some(toml::Value::String("full".to_string())),
             launch: false,
+            raise: false,
         }
     }
 
@@ -303,6 +304,7 @@ mod tests {
             monitor: None,
             position: None,
             launch: false,
+            raise: false,
         }
     }
 

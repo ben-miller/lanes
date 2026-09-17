@@ -66,6 +66,13 @@ pub struct Target {
     /// "App-not-running behavior".
     #[serde(default)]
     pub launch: bool,
+    /// Force raising this target's window even though it also has a
+    /// placement - the default (raise only when there's no placement)
+    /// assumes a placed target doesn't need to be seen right away, which
+    /// is true for WezTerm/Firefox but not for a "peek" app whose entire
+    /// purpose is to be glanced at.
+    #[serde(default)]
+    pub raise: bool,
 }
 
 /// Which app-specific mechanism activates this target, and that

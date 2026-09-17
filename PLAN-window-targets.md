@@ -85,6 +85,19 @@ than title) need a placement mode that doesn't filter by title at all -
 `kAXFocusedWindowAttribute` on the app's AX element. This is the one change
 needed in lanes-wm itself; everything else above is entirely lanes-cli-side.
 
+## Raising a placed target
+
+`raise_app = target.monitor.is_none()` was the original rule: raise an
+`app` target only when it has no placement, since a placed target's window
+gets correctly repositioned via `--focused` whether or not it's frontmost -
+true for WezTerm/Firefox, which don't need to be seen immediately after a
+switch. It's false for a "peek" app (a Trello board glance-view): its whole
+purpose is to be seen, so a placed-but-never-raised one just sits hidden
+behind whatever else occupies that screen. `Target.raise` (default false)
+overrides the inferred default - `raise_app = target.monitor.is_none() ||
+target.raise`. Found by testing live: the Japanese peek app, given a
+`monitor` for the first time, stopped showing at all until this was added.
+
 ## App-not-running behavior
 
 Whether a target auto-launches its app is explicit per-target config, not a

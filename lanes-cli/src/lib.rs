@@ -1402,9 +1402,11 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
             }
         }
 
-        // Only raise an `app` target's window when it isn't being placed -
-        // see activate_target's doc comment for why.
-        let raise_app = target.monitor.is_none();
+        // Only raise an `app` target's window when it isn't being placed,
+        // unless the target explicitly asks to be raised anyway (a "peek"
+        // app that also wants placement) - see activate_target's doc
+        // comment and Target::raise's doc comment for why.
+        let raise_app = target.monitor.is_none() || target.raise;
         let resolved_pid = match activate_target(&target.driver, raise_app, default_session, target.launch) {
             Ok(pid) => pid,
             Err(e) => {

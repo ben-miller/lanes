@@ -945,6 +945,7 @@ mod tests {
             monitor: None,
             position: None,
             launch: false,
+            raise: false,
         }
     }
 
