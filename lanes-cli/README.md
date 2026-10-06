@@ -74,6 +74,22 @@ records are landing.
 Phase 2 (see `PLAN-shell-signal.md`) will add a live `running` chip and
 `bash`/`zsh` hooks.
 
+## lensd spike (experimental)
+
+`lensd/lanes.dl` is Lanes' rule set for the lensd daemon (see the lensd repo's
+README). Copy or symlink it into lensd's rules directory
+(`~/.config/lensd/rules.d/lanes.dl`); lensd then serves it on
+`~/.local/state/lensd/lanes.sock`. It exposes `lanes_session`,
+`lanes_session_running`, `lanes_claude` and `lanes_command` rows.
+
+`lanes lensd-compare [--socket PATH]` reads one snapshot from that socket and
+diffs the signals it implies (Claude session, Command and SessionNotRunning)
+against `gather_lanes()`, printing `only in lanes` / `only in lensd` lines.
+`src/lensd.rs` holds the client. It is not used by the UI yet. Dismissals still
+come from `state.kdl` in Lanes. Not covered yet: repo signals, `SessionMissing`
+(needs the `state.kdl` tab cache), the Awaiting-to-Ready upgrade (the compare
+treats `ready` as `awaiting`), and pane/tab layout.
+
 ## Snapshot format
 
 `lanes snapshot` outputs a JSON `Snapshot`:

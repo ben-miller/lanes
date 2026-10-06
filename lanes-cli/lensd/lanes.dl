@@ -1,0 +1,11 @@
+# Lanes' rule set for lensd. Symlink or copy into lensd's rules dir
+# (default ~/.config/lensd/rules.d/lanes.dl); lensd then serves these
+# relations on <server dir>/lanes.sock. Lanes maps the raw states below to
+# signal reasons and applies its own dismissals (state.kdl) client-side.
+# Not derivable without negation (done client-side): "lane's Zellij session is
+# not running" = lanes_session minus lanes_session_running.
+
+lanes_session(Lane, Zellij) :- lane_zellij(Lane, Zellij).
+lanes_session_running(Lane, Zellij) :- lane_zellij(Lane, Zellij), zellij_session(Zellij).
+lanes_claude(Lane, SessionId, State) :- lane_zellij(Lane, Zellij), zellij_session(Zellij), claude_zellij(SessionId, Zellij, Pane), claude_session(SessionId, State).
+lanes_command(Lane, Zellij, Pane, State, StartedAt) :- lane_zellij(Lane, Zellij), zellij_pane(Zellij, Pane), shell_command(Zellij, Pane, State), shell_command_started(Zellij, Pane, StartedAt).

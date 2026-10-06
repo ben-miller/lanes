@@ -55,6 +55,13 @@ enum Command {
     /// List lanes that have signals requiring attention
     Signals,
 
+    /// Compare the signals lensd's `lanes` rule set implies against gather_lanes()
+    LensdCompare {
+        /// Socket path (default ~/.local/state/lensd/lanes.sock)
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
     /// Print the currently focused lane ID
     Current {
         /// Print the lane's display name instead of its id
@@ -281,6 +288,28 @@ fn main() {
                 Some(path) => std::fs::write(&path, &json).expect("failed to write output file"),
                 None => println!("{}", json),
             }
+        }
+
+        Command::LensdCompare { socket } => {
+            let cfg = lanes::config::Config::load();
+            let path = socket.unwrap_or_else(lanes::lensd::default_socket);
+            let mirror = match lanes::lensd::read_snapshot(&path, std::time::Duration::from_secs(5)) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("error: cannot read lensd socket {}: {e}", path.display());
+                    std::process::exit(1);
+                }
+            };
+            let from_lensd = lanes::lensd::keys_from_mirror(&mirror, lanes::state::is_signal_dismissed);
+            let from_lanes = lanes::lensd::keys_from_snapshot(&lanes::gather_lanes(&cfg));
+            for k in from_lanes.difference(&from_lensd) {
+                println!("only in lanes: {k}");
+            }
+            for k in from_lensd.difference(&from_lanes) {
+                println!("only in lensd: {k}");
+            }
+            println!("{} common, {} only lanes, {} only lensd", from_lanes.intersection(&from_lensd).count(),
+                from_lanes.difference(&from_lensd).count(), from_lensd.difference(&from_lanes).count());
         }
 
         Command::Signals => {
