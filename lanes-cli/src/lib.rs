@@ -7,6 +7,29 @@ pub mod state;
 
 pub use drivers::claude::RenamedCandidate;
 
+/// Spawn `cmd` as a fire-and-forget child that may outlive this process for
+/// the rest of the session (a launched app, a raised window) - every caller
+/// that doesn't plan to wait on or communicate with the child should go
+/// through this rather than a bare `.spawn()`.
+///
+/// `Command`'s default stdio is `inherit()`: an unconfigured spawn hands the
+/// child our own stdin/stdout/stderr. That's invisible and harmless when
+/// `lanes` is run interactively, but when Hammerspoon invokes `lanes` via
+/// `hs.task.new`, those fds are a pipe hs.task owns to capture output. If
+/// the child we spawn here is long-lived (Firefox, WezTerm, any GUI app),
+/// it holds that pipe's write end open indefinitely - `lanes` and bash both
+/// exit, but the pipe never sees EOF. hs.task's internals eventually do a
+/// synchronous drain-to-EOF read on Hammerspoon's *main thread*, which then
+/// blocks forever: every hotkey stops responding, with no crash and no log
+/// line to explain it. `Stdio::null()` on all three streams closes that gap
+/// - the child gets its own /dev/null, never shares our fds.
+fn spawn_detached(cmd: &mut std::process::Command) -> std::io::Result<std::process::Child> {
+    cmd.stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+}
+
 pub fn possibly_renamed_claude_sessions() -> Vec<RenamedCandidate> {
     drivers::claude::possibly_renamed_sessions()
 }
@@ -1118,8 +1141,8 @@ fn activate_wezterm_tab(session: &str, focus: bool) -> Result<(), String> {
     if focus {
         // Fire-and-forget: raising the WezTerm window doesn't need to block
         // this call, and waiting on `open`'s own ~90ms launchservices
-        // round-trip was pure latency on the hot path.
-        std::process::Command::new("open").args(["-a", "WezTerm"]).spawn().ok();
+        // round-trip was pure latency on the hot path. See spawn_detached.
+        spawn_detached(std::process::Command::new("open").args(["-a", "WezTerm"])).ok();
     }
 
     let mut cmd = std::process::Command::new("/opt/homebrew/bin/wezterm");
@@ -1289,11 +1312,41 @@ fn resolve_or_launch_firefox_profile(name: &str, launch: bool) -> Result<u32, St
     if !launch {
         return Err(format!("Firefox profile '{name}' is not running (set launch = true to start it automatically)"));
     }
-    let child = std::process::Command::new("/Applications/Firefox.app/Contents/MacOS/firefox")
-        .args(["--profile", &path])
-        .spawn()
-        .map_err(|e| format!("failed to launch Firefox profile '{name}': {e}"))?;
-    Ok(child.id())
+    // See spawn_detached: Firefox outlives `lanes` for the rest of the
+    // session, so it must not inherit our stdio.
+    let child = spawn_detached(
+        std::process::Command::new("/Applications/Firefox.app/Contents/MacOS/firefox")
+            .args(["--profile", &path]),
+    )
+    .map_err(|e| format!("failed to launch Firefox profile '{name}': {e}"))?;
+    let pid = child.id();
+    wait_for_a_window(pid, std::time::Duration::from_secs(5));
+    Ok(pid)
+}
+
+/// Polls (via System Events, since lanes-cli has no direct Accessibility
+/// access - that's lanes-wm's job) until a process has at least one window,
+/// up to `timeout`. Best-effort: a fresh app launch's window doesn't exist
+/// yet the instant the process starts, and placement immediately afterward
+/// would otherwise race it and fail with "no focused window" - seen doing
+/// exactly this with a freshly-launched Firefox profile. Doesn't error out
+/// on timeout; the subsequent placement call just fails on its own with a
+/// clear message if the window still isn't there.
+fn wait_for_a_window(pid: u32, timeout: std::time::Duration) {
+    let deadline = std::time::Instant::now() + timeout;
+    while std::time::Instant::now() < deadline {
+        let script = format!(
+            "tell application \"System Events\" to count of windows of (first process whose unix id is {pid})"
+        );
+        let has_window = std::process::Command::new("osascript")
+            .args(["-e", &script])
+            .output()
+            .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() != "0");
+        if has_window {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
 }
 
 /// Run a target's activation step - whatever app-specific mechanism makes
@@ -1395,10 +1448,12 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
 
     for target in targets {
         if target.launch {
+            // See spawn_detached: a launched app can outlive `lanes` for
+            // the rest of the session.
             if let model::TargetDriver::App { name, .. } = &target.driver {
-                std::process::Command::new("open").args(["-a", name]).spawn().ok();
+                spawn_detached(std::process::Command::new("open").args(["-a", name])).ok();
             } else if let Some(bundle_id) = target_bundle_id(&target.driver) {
-                std::process::Command::new("open").args(["-b", bundle_id]).spawn().ok();
+                spawn_detached(std::process::Command::new("open").args(["-b", bundle_id])).ok();
             }
         }
 
@@ -1611,6 +1666,42 @@ pub fn expand_tilde(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Regression test for the Hammerspoon-hang bug: a child spawned via
+    /// `spawn_detached` must not share our stdio, since a long-lived child
+    /// holding one of our fds open (e.g. a pipe `hs.task` is waiting on to
+    /// see EOF) is exactly what froze Hammerspoon's main thread. Can't
+    /// observe this through the child's own stdout (it's deliberately
+    /// null), so the child reports what its fd 1 resolves to via a file
+    /// instead.
+    #[test]
+    fn spawn_detached_points_child_stdio_at_dev_null() {
+        let out_path = std::env::temp_dir().join(format!(
+            "lanes-spawn-detached-test-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id(),
+        ));
+        // The result can't go through fd 1 via a plain `>` - that redirect
+        // would replace fd 1 with the output file *before* the check runs,
+        // so it'd always report "same" against whatever it just became.
+        // Open the output file on fd 3 instead, leaving fd 1 (what's
+        // actually being inspected) untouched. `-ef` (same device+inode)
+        // is the portable way to compare a special file like /dev/null -
+        // macOS doesn't expose /dev/fd/N as a plain `readlink`-able symlink.
+        let mut child = spawn_detached(std::process::Command::new("/bin/sh").arg("-c").arg(format!(
+            "exec 3>{out_path:?}; if [ /dev/fd/1 -ef /dev/null ]; then echo same 1>&3; else echo different 1>&3; fi"
+        )))
+        .expect("spawn_detached should start /bin/sh");
+        child.wait().expect("child should exit");
+
+        let result = std::fs::read_to_string(&out_path).unwrap_or_default();
+        let _ = std::fs::remove_file(&out_path);
+        assert_eq!(
+            result.trim(),
+            "same",
+            "spawn_detached's child should have fd 1 pointed at /dev/null"
+        );
+    }
 
     /// Trimmed from real `ps -eo pid,command` output captured during
     /// development: one main firefox process for the Development profile,
