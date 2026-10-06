@@ -301,7 +301,11 @@ fn main() {
                 }
             };
             let from_lensd = lanes::lensd::keys_from_mirror(&mirror, lanes::state::is_signal_dismissed);
-            let from_lanes = lanes::lensd::keys_from_snapshot(&lanes::gather_lanes(&cfg));
+            let (from_lanes, unwatched) =
+                lanes::lensd::keys_from_snapshot(&lanes::gather_lanes(&cfg), &lanes::lensd::watched_repos(&mirror));
+            if !unwatched.is_empty() {
+                println!("skipped repo signals for repos not in lensd.toml: {}", unwatched.into_iter().collect::<Vec<_>>().join(", "));
+            }
             for k in from_lanes.difference(&from_lensd) {
                 println!("only in lanes: {k}");
             }

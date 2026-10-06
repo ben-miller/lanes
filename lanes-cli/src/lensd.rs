@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::model::{LanewiseSnapshot, SignalAction};
+use crate::model::{FacetSnapshot, LanewiseSnapshot, RepoReason, SignalAction, SignalReason};
 
 pub type Row = Vec<Value>;
 
@@ -106,6 +106,12 @@ pub fn keys_from_mirror(m: &Mirror, is_dismissed: impl Fn(&str) -> bool) -> BTre
         }
         keys.insert(format!("{}|command|{reason}|{session}:{pane}", s(&r[0])));
     }
+    for r in m.rows("lanes_repo_dirty") {
+        keys.insert(format!("{}|repo|pending_commit|{}", s(&r[0]), s(&r[1])));
+    }
+    for r in m.rows("lanes_repo_branch") {
+        keys.insert(format!("{}|repo|non_default_branch|{}", s(&r[0]), s(&r[1])));
+    }
     let running: HashSet<(&str, &str)> = m.rows("lanes_session_running").map(|r| (s(&r[0]), s(&r[1]))).collect();
     for r in m.rows("lanes_session") {
         if !running.contains(&(s(&r[0]), s(&r[1]))) {
@@ -115,12 +121,46 @@ pub fn keys_from_mirror(m: &Mirror, is_dismissed: impl Fn(&str) -> bool) -> BTre
     keys
 }
 
+/// Resolved path -> repo name for the lane repos lensd actually watches
+/// (those also in its own config).
+pub fn watched_repos(m: &Mirror) -> HashMap<String, String> {
+    m.rows("lanes_repo_watched").map(|r| (s(&r[2]).to_string(), s(&r[1]).to_string())).collect()
+}
+
+fn resolve_path(path: &str) -> String {
+    let expanded = crate::expand_tilde(path);
+    let trimmed = expanded.trim_end_matches('/');
+    std::fs::canonicalize(trimmed).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| trimmed.to_string())
+}
+
 /// The same keys from `gather_lanes()`, limited to the kinds lensd covers so far.
+/// Repo signals are kept only for repos in `watched`; the rest are returned
+/// separately since lensd cannot know about them.
 /// `Ready` is `Awaiting` upgraded by lane cyclability, which lensd does not model.
-pub fn keys_from_snapshot(snap: &LanewiseSnapshot) -> BTreeSet<String> {
+pub fn keys_from_snapshot(snap: &LanewiseSnapshot, watched: &HashMap<String, String>) -> (BTreeSet<String>, BTreeSet<String>) {
     let mut keys = BTreeSet::new();
+    let mut unwatched = BTreeSet::new();
     for lane in &snap.lanes {
         for facet in &lane.facets {
+            if let FacetSnapshot::Repo { path, signals } = facet {
+                let resolved = resolve_path(path);
+                for sig in signals {
+                    let reason = match &sig.reason {
+                        SignalReason::Repo(RepoReason::PendingCommit) => "pending_commit",
+                        SignalReason::Repo(RepoReason::NonDefaultBranch) => "non_default_branch",
+                        _ => continue,
+                    };
+                    match watched.get(&resolved) {
+                        Some(name) => {
+                            keys.insert(format!("{}|repo|{reason}|{name}", lane.id));
+                        }
+                        None => {
+                            unwatched.insert(path.clone());
+                        }
+                    }
+                }
+                continue;
+            }
             for sig in facet.signals() {
                 let v = serde_json::to_value(sig).unwrap_or_default();
                 let kind = s(&v["kind"]);
@@ -140,7 +180,7 @@ pub fn keys_from_snapshot(snap: &LanewiseSnapshot) -> BTreeSet<String> {
             }
         }
     }
-    keys
+    (keys, unwatched)
 }
 
 #[cfg(test)]
@@ -180,6 +220,20 @@ mod tests {
         ]);
         let keys = keys_from_mirror(&m, |id| id == "command:z--3--T1");
         assert_eq!(keys, BTreeSet::from(["l|command|failed|z:4".to_string()]));
+    }
+
+    #[test]
+    fn repo_rows_become_repo_keys_and_watched_names_are_listed() {
+        let m = mirror(vec![
+            row("lanes_repo_dirty", json!(["l", "infra"])),
+            row("lanes_repo_branch", json!(["l", "infra", "feat", "main"])),
+            row("lanes_repo_watched", json!(["l", "infra", "/p/infra"])),
+        ]);
+        assert_eq!(
+            keys_from_mirror(&m, |_| false),
+            BTreeSet::from(["l|repo|pending_commit|infra".to_string(), "l|repo|non_default_branch|infra".to_string()])
+        );
+        assert_eq!(watched_repos(&m), HashMap::from([("/p/infra".to_string(), "infra".to_string())]));
     }
 
     #[test]

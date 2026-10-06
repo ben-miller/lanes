@@ -2,6 +2,9 @@
 # (default ~/.config/lensd/rules.d/lanes.dl); lensd then serves these
 # relations on <server dir>/lanes.sock. Lanes maps the raw states below to
 # signal reasons and applies its own dismissals (state.kdl) client-side.
+#
+# Repos are only seen if they are also listed in lensd.toml (matched by
+# resolved path); lanes_repo_watched says which lane repos lensd watches.
 # Not derivable without negation (done client-side): "lane's Zellij session is
 # not running" = lanes_session minus lanes_session_running.
 
@@ -9,3 +12,6 @@ lanes_session(Lane, Zellij) :- lane_zellij(Lane, Zellij).
 lanes_session_running(Lane, Zellij) :- lane_zellij(Lane, Zellij), zellij_session(Zellij).
 lanes_claude(Lane, SessionId, State) :- lane_zellij(Lane, Zellij), zellij_session(Zellij), claude_zellij(SessionId, Zellij, Pane), claude_session(SessionId, State).
 lanes_command(Lane, Zellij, Pane, State, StartedAt) :- lane_zellij(Lane, Zellij), zellij_pane(Zellij, Pane), shell_command(Zellij, Pane, State), shell_command_started(Zellij, Pane, StartedAt).
+lanes_repo_watched(Lane, Repo, Path) :- lane_repo_path(Lane, Path), repo_path(Repo, Path).
+lanes_repo_dirty(Lane, Repo) :- lane_repo_path(Lane, Path), repo_path(Repo, Path), dirty(Repo).
+lanes_repo_branch(Lane, Repo, Current, Default) :- lane_repo_path(Lane, Path), repo_path(Repo, Path), branch(Repo, Current), default_branch(Repo, Default), Current != Default.
