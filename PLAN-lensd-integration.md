@@ -32,14 +32,20 @@ not an exit criterion.
 
 ## Phases
 
-1. **Settle the semantics.** Decide on merit, not for parity:
-   - Detached HEAD: a "non-default branch" signal, or something else?
-   - `SessionMissing`: wanted at all? It needs the `state.kdl` tab cache.
-   - Claude pid-reuse slack: worth porting?
+1. **Settle the semantics.** Decided:
+   - Detached HEAD: do what Lanes does today, a "non-default branch" signal.
+     lensd's git source emits a placeholder `branch` for it so the existing
+     `Current != Default` rule fires.
+   - `SessionMissing`: lensd gets a WezTerm source (`wezterm_tab_session`,
+     done), and `lanes.dl` exposes `lanes_tab(Lane, Tab)`. Lanes computes
+     "missing" as `lanes_session` minus `lanes_tab` client-side. No dependence
+     on the `state.kdl` tab cache.
+   - Claude pid-reuse slack: port into lensd's `claude` source (process age
+     versus registry file age, 15s slack, command name), plus a slow periodic
+     rescan so a silently dead process is noticed.
    - Lane repos: have `lanes.dl` derive
      `watch_repo(Path, Lane) :- lane_repo_path(Lane, Path).` so every lane's
-     repo is watched. Side effect: extra `attention` rows tagged with a lane id
-     in lensd's default set, harmless to Lanes.
+     repo is watched. `rules.d/repos.dl` stays for now (project grouping).
 2. **Live client** (`lanes-cli/src/lensd.rs`). Replace the one-shot
    `read_snapshot` with a background thread that keeps the `Mirror` current
    from `snapshot` and `diff` messages, reconnects with backoff, and bumps a
@@ -82,4 +88,7 @@ not an exit criterion.
 
 Spike done: `lensd/lanes.dl`, the socket client and `lensd-compare` (see the
 "lensd spike" section of `lanes-cli/README.md`). Nothing in the UI uses lensd
-yet. Phase 1 is next.
+yet. Phase 1 done: WezTerm source (`lanes_tab`), detached HEAD as a
+`detached HEAD` branch, pid-reuse check plus 5s rescan in the `claude` source,
+and `watch_repo` derived from `lane_repo_path` in `lanes.dl`. Phase 2 (the live
+client) is next.
