@@ -1,11 +1,13 @@
-//! Spike: read Lanes' rule set from lensd's socket and compare the signals it
-//! implies against `gather_lanes()`. lensd is not wired into the UI yet; this
-//! exists to find which facts are missing before swapping anything.
+//! Client for lensd's `lanes` socket. [`Client`] keeps a [`Mirror`] of the
+//! rule set's rows current on a background thread and reconnects when lensd
+//! goes away. The rest of the file is the spike that compares what lensd
+//! implies against `gather_lanes()` (`lensd-compare`), removed with it.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::os::unix::net::UnixStream;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use serde_json::Value;
@@ -15,7 +17,7 @@ use crate::model::{FacetSnapshot, LanewiseSnapshot, RepoReason, SignalAction, Si
 pub type Row = Vec<Value>;
 
 /// The current rows per relation, rebuilt from a snapshot and kept current by diffs.
-#[derive(Default, Debug)]
+#[derive(Default, Debug, Clone)]
 pub struct Mirror {
     pub rels: HashMap<String, HashSet<Row>>,
     pub epoch: Option<u64>,
@@ -59,6 +61,92 @@ fn relation_values(v: &Value) -> Option<(String, Row)> {
 pub fn default_socket() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join(".local/state/lensd/lanes.sock")
+}
+
+#[derive(Default)]
+struct Shared {
+    mirror: Mirror,
+    connected: bool,
+    version: u64,
+}
+
+/// A live view of lensd's `lanes` stream. Not connected means lensd is not
+/// running (or restarting): there is no data, and no fallback.
+#[derive(Clone)]
+pub struct Client {
+    shared: Arc<Mutex<Shared>>,
+}
+
+const BACKOFF_START: Duration = Duration::from_millis(100);
+const BACKOFF_MAX: Duration = Duration::from_secs(5);
+
+impl Client {
+    /// Starts the background connection. `on_change` runs on that thread after
+    /// every snapshot, diff and connect/disconnect, with no lock held.
+    pub fn start(path: PathBuf, on_change: impl Fn() + Send + 'static) -> Client {
+        Self::start_with_backoff(path, BACKOFF_START, BACKOFF_MAX, on_change)
+    }
+
+    pub fn start_with_backoff(
+        path: PathBuf,
+        backoff_start: Duration,
+        backoff_max: Duration,
+        on_change: impl Fn() + Send + 'static,
+    ) -> Client {
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let client = Client { shared: shared.clone() };
+        std::thread::spawn(move || {
+            let mut backoff = backoff_start;
+            loop {
+                if let Ok(stream) = UnixStream::connect(&path) {
+                    if stream_into(stream, &shared, &on_change) {
+                        backoff = backoff_start;
+                    }
+                    let mut g = shared.lock().unwrap();
+                    g.mirror = Mirror::default();
+                    g.connected = false;
+                    g.version += 1;
+                    drop(g);
+                    on_change();
+                }
+                std::thread::sleep(backoff);
+                backoff = (backoff * 2).min(backoff_max);
+            }
+        });
+        client
+    }
+
+    /// The current rows, or `None` while not connected.
+    pub fn current(&self) -> Option<Mirror> {
+        let g = self.shared.lock().unwrap();
+        g.connected.then(|| g.mirror.clone())
+    }
+
+    pub fn connected(&self) -> bool {
+        self.shared.lock().unwrap().connected
+    }
+
+    /// Increases on every change, including connect and disconnect.
+    pub fn version(&self) -> u64 {
+        self.shared.lock().unwrap().version
+    }
+}
+
+/// Reads one connection until it ends. Returns whether a snapshot arrived.
+fn stream_into(stream: UnixStream, shared: &Mutex<Shared>, on_change: &impl Fn()) -> bool {
+    let mut got_snapshot = false;
+    for line in BufReader::new(stream).lines() {
+        let Ok(line) = line else { break };
+        {
+            let mut g = shared.lock().unwrap();
+            g.mirror.apply(&line);
+            g.connected = g.mirror.epoch.is_some();
+            got_snapshot |= g.connected;
+            g.version += 1;
+        }
+        on_change();
+    }
+    got_snapshot
 }
 
 /// Connects and reads until the snapshot has arrived.
@@ -244,6 +332,79 @@ mod tests {
             row("lanes_session_running", json!(["a", "up"])),
         ]);
         assert_eq!(keys_from_mirror(&m, |_| false), BTreeSet::from(["b|lanes|session_not_running|".to_string()]));
+    }
+
+    fn socket_path(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("lanes-lensd-{}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir.join("t.sock")
+    }
+
+    fn wait_until(what: &str, cond: impl Fn() -> bool) {
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while !cond() {
+            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+    }
+
+    fn send(c: &mut UnixStream, line: &str) {
+        use std::io::Write;
+        writeln!(c, "{line}").unwrap();
+    }
+
+    #[test]
+    fn client_follows_diffs_reports_disconnect_and_reconnects_with_a_fresh_snapshot() {
+        let path = socket_path("client");
+        let notified = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let n = notified.clone();
+        // Started before the socket exists: not connected, and keeps retrying.
+        let client = Client::start_with_backoff(path.clone(), Duration::from_millis(20), Duration::from_millis(50), move || {
+            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!client.connected());
+        assert!(client.current().is_none());
+
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let (mut c, _) = listener.accept().unwrap();
+        send(&mut c, r#"{"hello":{"protocol":1,"set":"lanes"}}"#);
+        send(&mut c, r#"{"snapshot":{"epoch":1,"rows":[{"relation":"lanes_session","values":["a","z"]}]}}"#);
+        wait_until("snapshot", || client.connected());
+        assert_eq!(client.current().unwrap().rels["lanes_session"].len(), 1);
+
+        let v = client.version();
+        send(&mut c, r#"{"diff":{"epoch":2,"changes":[{"relation":"lanes_session","values":["b","y"],"weight":1}]}}"#);
+        wait_until("diff", || client.version() > v);
+        assert_eq!(client.current().unwrap().rels["lanes_session"].len(), 2);
+        assert!(notified.load(std::sync::atomic::Ordering::SeqCst) >= 2);
+
+        // lensd goes away: no data, not a stale mirror.
+        drop(c);
+        wait_until("disconnect", || !client.connected());
+        assert!(client.current().is_none());
+
+        // It comes back: a fresh snapshot replaces everything, nothing doubled.
+        let (mut c, _) = listener.accept().unwrap();
+        send(&mut c, r#"{"snapshot":{"epoch":9,"rows":[{"relation":"lanes_session","values":["c","x"]}]}}"#);
+        wait_until("reconnect", || client.connected());
+        let m = client.current().unwrap();
+        assert_eq!(m.epoch, Some(9));
+        assert_eq!(m.rels["lanes_session"], HashSet::from([vec![Value::from("c"), Value::from("x")]]));
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    #[test]
+    fn a_connection_that_closes_before_a_snapshot_is_not_connected() {
+        let path = socket_path("nosnap");
+        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let client = Client::start_with_backoff(path.clone(), Duration::from_millis(20), Duration::from_millis(50), || {});
+        let (mut c, _) = listener.accept().unwrap();
+        send(&mut c, r#"{"hello":{"protocol":1,"set":"lanes"}}"#);
+        drop(c);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(!client.connected(), "hello alone is not data");
+        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     #[test]

@@ -85,7 +85,11 @@ README). Copy or symlink it into lensd's rules directory
 `lanes lensd-compare [--socket PATH]` reads one snapshot from that socket and
 diffs the signals it implies (Claude session, Command and SessionNotRunning)
 against `gather_lanes()`, printing `only in lanes` / `only in lensd` lines.
-`src/lensd.rs` holds the client. It is not used by the UI yet. Dismissals still
+`src/lensd.rs` holds the client. `lensd::Client::start(path, on_change)` keeps a
+`Mirror` of the rows current on a background thread, reconnects with backoff
+(100ms doubling to 5s), bumps `version()` on every change and calls
+`on_change`. `current()` is `None` while lensd is not running: there is no
+stale data and no fallback. The UI does not use it yet. Dismissals still
 come from `state.kdl` in Lanes. Repo signals only cover repos also listed in lensd's `lensd.toml` (matched by
 resolved path; others are listed as skipped). A detached HEAD is not covered
 (Lanes reports it as a non-default branch, lensd has no `branch` fact for it).

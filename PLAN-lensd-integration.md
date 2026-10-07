@@ -90,5 +90,6 @@ Spike done: `lensd/lanes.dl`, the socket client and `lensd-compare` (see the
 "lensd spike" section of `lanes-cli/README.md`). Nothing in the UI uses lensd
 yet. Phase 1 done: WezTerm source (`lanes_tab`), detached HEAD as a
 `detached HEAD` branch, pid-reuse check plus 5s rescan in the `claude` source,
-and `watch_repo` derived from `lane_repo_path` in `lanes.dl`. Phase 2 (the live
-client) is next.
+and `watch_repo` derived from `lane_repo_path` in `lanes.dl`. Phase 2 done: `lensd::Client` in
+`lanes-cli/src/lensd.rs` (live mirror, reconnect, version, change callback,
+tested against a fake socket). Phase 3 (`snapshot_from_mirror`) is next.
