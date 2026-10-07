@@ -80,37 +80,28 @@ fn start_switch_socket(
     });
 }
 
-/// `async` + `spawn_blocking` is load-bearing, not decoration: Tauri v2 runs
-/// a non-async command's body directly on the main thread, and
-/// gather_lanes() blocks for ~500-600ms doing real subprocess I/O (see the
-/// README's Diagnostics section). While that's running synchronously on the
-/// main thread, nothing else the app needs that thread for can happen
-/// either - confirmed via perf.log: the direct-socket "lane-changed"
-/// highlight update (meant to land in single-digit milliseconds) was
-/// measured stalling 500-600ms, resuming within ~10ms of whichever
-/// get_snapshot call was in flight finishing. Moving the actual work to a
-/// blocking-pool thread and only awaiting it here frees the main thread to
-/// keep dispatching that event (and everything else) while a refresh runs.
+/// `async` + `spawn_blocking` keeps the config and state.kdl reads off the
+/// main thread, which Tauri v2 otherwise uses to run non-async commands.
+/// Signals come from lensd's live mirror; with lensd down the answer is
+/// `{"lensd_connected": false}` and there is no fallback.
 #[tauri::command]
-async fn get_snapshot() -> serde_json::Value {
-    tauri::async_runtime::spawn_blocking(|| {
+async fn get_snapshot(lensd: tauri::State<'_, lanes::lensd::Client>) -> Result<serde_json::Value, ()> {
+    let lensd = lensd.inner().clone();
+    Ok(tauri::async_runtime::spawn_blocking(move || {
         let t0 = std::time::Instant::now();
         lanes::logging::perf("ui.get_snapshot.start", "");
+        let Some(mirror) = lensd.current() else {
+            return serde_json::json!({ "lensd_connected": false });
+        };
         let cfg = lanes::config::Config::load();
-        let snapshot = lanes::gather_lanes(&cfg);
+        let snapshot = lanes::lensd::snapshot_from_mirror(&cfg, &mirror);
         lanes::logging::perf("ui.get_snapshot.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
-        // Always returns every lane now - inactive-lane filtering is a
-        // dashboard display concern (the CLI's `lanes list`/`snapshot`/
-        // `signals` already always see every lane regardless), and doing it
-        // here meant toggling it required a whole new gather_lanes() round
-        // trip (~500-600ms of real subprocess I/O) just to show/hide rows
-        // that were already sitting right here. The frontend filters
-        // show_inactive/edit_mode itself against whatever the last fetch
-        // already returned - instant, no refetch needed.
+        // Always returns every lane: inactive-lane filtering is the
+        // frontend's job (App.svelte's visibleLanes).
         serde_json::to_value(&snapshot).unwrap()
     })
     .await
-    .expect("get_snapshot blocking task panicked")
+    .expect("get_snapshot blocking task panicked"))
 }
 
 /// Lets the frontend add its own entries to perf.log - the only way it can,
@@ -547,6 +538,12 @@ pub fn run() {
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 
             lanes::logging::init_state();
+
+            let lensd_handle = app.handle().clone();
+            let lensd = lanes::lensd::Client::start(lanes::lensd::default_socket(), move || {
+                lensd_handle.emit("sessions-changed", ()).ok();
+            });
+            app.manage(lensd);
 
             let pinned_at_startup = lanes::state::read_switch_pinned();
             let pin_item = CheckMenuItem::with_id(app, "pin", "Pin on Top", true, pinned_at_startup, None::<&str>)?;

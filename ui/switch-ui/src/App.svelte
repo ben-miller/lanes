@@ -10,22 +10,17 @@
   const EDIT_MODE_EXTRA_WIDTH = 36;
 
   let snapshot = null;
+  // lensd is the only source of signals; while its socket is down there is
+  // nothing to show but this state, and it clears itself on reconnect.
+  let lensdDown = false;
   let activeSignal = null;
   let dashboardEl;
 
-  // get_snapshot() -> gather_lanes() is a real subprocess round-trip per
-  // running Zellij session (~500-600ms typically - see the README's
-  // Diagnostics section). refresh() is triggered independently by a 10s
-  // timer AND every "sessions-changed" event, which in a normal working
-  // session (active-sessions/*.json touched by hook writes, git index
-  // changes, growing transcripts) can fire every 1-3s - faster than a
-  // single refresh finishes. Without this guard, a new refresh would start
-  // while the previous one's gather_lanes() was still mid-flight, and the
-  // two would contend over the same Zellij sessions' IPC, dragging both out
-  // past 1s (confirmed via perf.log's ui.refresh.done elapsed_ms spiking to
-  // 1000-1700ms even with no switch involved). At most one refresh runs at
-  // a time now; a trigger that arrives mid-refresh is coalesced into a
-  // single follow-up rather than dropped, so nothing is missed.
+  // get_snapshot() reads lensd's live mirror, so it is cheap, but refresh()
+  // is triggered by every "sessions-changed" event (each lensd diff, plus
+  // config and state.kdl changes), which can arrive in bursts. At most one
+  // refresh runs at a time; a trigger that arrives mid-refresh is coalesced
+  // into a single follow-up rather than dropped, so nothing is missed.
   let refreshInFlight = false;
   let refreshPending = false;
 
@@ -38,7 +33,9 @@
     const t0 = performance.now();
     invoke("log_ui_event", { event: "ui.refresh.start", detail: "" });
     try {
-      snapshot = await invoke("get_snapshot");
+      const next = await invoke("get_snapshot");
+      lensdDown = next.lensd_connected === false;
+      if (!lensdDown) snapshot = next;
       await tick();
       // Never resize/reposition the window while the overlay is showing -
       // clicking a signal opens the overlay, then immediately calls
@@ -188,7 +185,8 @@
 
   onMount(async () => {
     refresh();
-    timer = setInterval(() => { resyncToggles(); refresh(); }, 10000);
+    // Only the toggles are resynced on a timer; signals arrive as lensd diffs.
+    timer = setInterval(() => { resyncToggles(); }, 10000);
     await resyncToggles();
     unlistenEditMode = await listen("edit-mode-changed", (event) => applyEditMode(event.payload));
     unlistenShowInactive = await listen("show-inactive-changed", (event) => applyShowInactive(event.payload));
@@ -458,7 +456,11 @@
 
 <svelte:window on:keydown={handleKeydown} />
 
-{#if snapshot}
+{#if lensdDown}
+  <div class="dashboard" bind:this={dashboardEl} style="width: {panelWidth}px">
+    <div class="lensd-down">lensd not connected</div>
+  </div>
+{:else if snapshot}
   <div class="dashboard" bind:this={dashboardEl} style="width: {panelWidth}px">
     <div class="panel" class:pulse-noop={pulseNoop}>
       {#each visibleLanes as lane}
@@ -647,6 +649,12 @@
     background: var(--ground);
     border-radius: 12px;
     padding: 0.6rem;
+  }
+
+  .lensd-down {
+    padding: 0.8rem;
+    text-align: center;
+    opacity: 0.6;
   }
 
   .panel {

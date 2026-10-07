@@ -96,5 +96,10 @@ tested against a fake socket). Phase 3 done: `lensd::snapshot_from_mirror` build
 `LanewiseSnapshot` from the live mirror and Lane config, sharing `correct_signals`
 with `gather_lanes()`; tested for pane order, Ready upgrade, SessionMissing,
 SessionNotRunning, commands and repo signals. Known gap: cycling and tab
-activation still use the cached tab id, not lensd's `lanes_tab`. Phase 4 (Tauri
-wiring) is next.
+activation still use the cached tab id, not lensd's `lanes_tab`. Phase 4 done (untested
+live): the Tauri backend starts a `lensd::Client`, `get_snapshot` reads
+`snapshot_from_mirror` (or `{lensd_connected:false}`), each lensd change emits
+`sessions-changed`, the 10s refresh timer is gone (toggle resync stays) and
+`App.svelte` shows "lensd not connected". The repo and sessions-dir file
+watchers still fire `sessions-changed`; they are removed in phase 5. Phase 5
+(shadow, cut over, delete) is next.
