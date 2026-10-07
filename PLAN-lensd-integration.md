@@ -92,4 +92,9 @@ yet. Phase 1 done: WezTerm source (`lanes_tab`), detached HEAD as a
 `detached HEAD` branch, pid-reuse check plus 5s rescan in the `claude` source,
 and `watch_repo` derived from `lane_repo_path` in `lanes.dl`. Phase 2 done: `lensd::Client` in
 `lanes-cli/src/lensd.rs` (live mirror, reconnect, version, change callback,
-tested against a fake socket). Phase 3 (`snapshot_from_mirror`) is next.
+tested against a fake socket). Phase 3 done: `lensd::snapshot_from_mirror` builds a
+`LanewiseSnapshot` from the live mirror and Lane config, sharing `correct_signals`
+with `gather_lanes()`; tested for pane order, Ready upgrade, SessionMissing,
+SessionNotRunning, commands and repo signals. Known gap: cycling and tab
+activation still use the cached tab id, not lensd's `lanes_tab`. Phase 4 (Tauri
+wiring) is next.

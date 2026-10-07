@@ -242,35 +242,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
             .any(|f| f.signals().iter().any(|s| s.kind() == model::SignalKind::ClaudeSession));
         let cyclable = lane_cyclable(lane.active, reachable, has_claude_signal);
 
-        // Every signal was constructed with cyclable=false as a placeholder
-        // (signal_for() runs before a lane's own reachability is known) -
-        // correct them all now that lane-level cyclable is known, so the UI
-        // reads this straight off each signal instead of re-deriving "is
-        // this specific chip something a cycle would land on" from
-        // signal.kind() and lane.cyclable itself. Same pass also upgrades
-        // Awaiting -> Ready (see upgrade_awaiting_to_ready) - that
-        // reclassification depends on the exact same cyclable fact, only
-        // knowable at this same point in the pipeline.
-        for facet in facets.iter_mut() {
-            let signals = match facet {
-                model::FacetSnapshot::Terminal { signals, .. } => signals,
-                model::FacetSnapshot::Repo { signals, .. } => signals,
-                model::FacetSnapshot::Target { .. } => continue,
-            };
-            for s in signals.iter_mut() {
-                let session_disabled = match &s.action {
-                    Some(model::SignalAction::SwitchClaudeSession { session_id }) => {
-                        state::is_claude_session_disabled(session_id)
-                    }
-                    _ => false,
-                };
-                s.cyclable = signal_cyclable(s.kind(), cyclable, session_disabled);
-                s.reason = upgrade_awaiting_to_ready(s.reason.clone(), s.cyclable);
-                s.urgency = s.reason.urgency();
-                s.lifecycle = s.reason.lifecycle();
-                s.visible = signal_visible(s.kind(), s.cyclable);
-            }
-        }
+        correct_signals(&mut facets, cyclable);
 
         model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), active: lane.active, cyclable, facets }
     }).collect();
@@ -282,6 +254,37 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
         lanes,
         focused_lane: state::read_focused_lane(),
         focused_claude_session: state::read_claude_cursor(),
+    }
+}
+
+/// Every signal is constructed with cyclable=false as a placeholder (a
+/// lane's own reachability isn't known until all its facets are built).
+/// Corrects them all once lane-level `cyclable` is known, so the UI reads it
+/// straight off each signal instead of re-deriving "is this chip something a
+/// cycle would land on" from signal.kind() and lane.cyclable itself. The same
+/// pass upgrades Awaiting -> Ready (see `upgrade_awaiting_to_ready`), which
+/// depends on that same fact. Shared by `gather_lanes` and
+/// `lensd::snapshot_from_mirror`.
+pub(crate) fn correct_signals(facets: &mut [model::FacetSnapshot], cyclable: bool) {
+    for facet in facets.iter_mut() {
+        let signals = match facet {
+            model::FacetSnapshot::Terminal { signals, .. } => signals,
+            model::FacetSnapshot::Repo { signals, .. } => signals,
+            model::FacetSnapshot::Target { .. } => continue,
+        };
+        for s in signals.iter_mut() {
+            let session_disabled = match &s.action {
+                Some(model::SignalAction::SwitchClaudeSession { session_id }) => {
+                    state::is_claude_session_disabled(session_id)
+                }
+                _ => false,
+            };
+            s.cyclable = signal_cyclable(s.kind(), cyclable, session_disabled);
+            s.reason = upgrade_awaiting_to_ready(s.reason.clone(), s.cyclable);
+            s.urgency = s.reason.urgency();
+            s.lifecycle = s.reason.lifecycle();
+            s.visible = signal_visible(s.kind(), s.cyclable);
+        }
     }
 }
 

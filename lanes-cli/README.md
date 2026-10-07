@@ -89,13 +89,20 @@ against `gather_lanes()`, printing `only in lanes` / `only in lensd` lines.
 `Mirror` of the rows current on a background thread, reconnects with backoff
 (100ms doubling to 5s), bumps `version()` on every change and calls
 `on_change`. `current()` is `None` while lensd is not running: there is no
-stale data and no fallback. The UI does not use it yet. Dismissals still
-come from `state.kdl` in Lanes. Repo signals only cover repos also listed in lensd's `lensd.toml` (matched by
-resolved path; others are listed as skipped). A detached HEAD is not covered
-(Lanes reports it as a non-default branch, lensd has no `branch` fact for it).
-Not covered yet: `SessionMissing`
-(needs the `state.kdl` tab cache), the Awaiting-to-Ready upgrade (the compare
-treats `ready` as `awaiting`), and pane/tab layout.
+stale data and no fallback. The UI does not use it yet.
+
+`lensd::snapshot_from_mirror(cfg, mirror)` builds a `LanewiseSnapshot` from the
+live rows plus Lanes' lane config. Layout (lane order, scope) comes from the
+config; panes and signals come from the `lanes_*` relations in
+`lensd/lanes.dl`, and `watch_repo` is derived there from each lane's repo
+path. Policy stays in Lanes: the shared `correct_signals` pass sets
+`cyclable`, `visible`, `lifecycle` and the Awaiting-to-Ready upgrade, and
+dismissals and latched command state still come from `state.kdl`.
+`SessionMissing` is "session exists but `lanes_tab` has no WezTerm tab for
+it". Panes are ordered top to bottom, then left to right. Gap: cycling and tab
+activation still use the cached tab id, so `cyclable` (live tab) can disagree
+with what activation does.
+Repo signals in `lensd-compare` still only cover repos also listed in lensd's `lensd.toml`.
 
 ## Snapshot format
 

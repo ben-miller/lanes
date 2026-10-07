@@ -12,7 +12,12 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::model::{FacetSnapshot, LanewiseSnapshot, RepoReason, SignalAction, SignalReason};
+use crate::config::Config;
+use crate::drivers::shell::CommandRecord;
+use crate::model::{
+    ClaudeSessionReason, FacetSnapshot, LaneSnapshot, LanesReason, LanewiseSnapshot, PaneKind, PaneSnapshot, RepoReason,
+    Signal, SignalAction, SignalReason,
+};
 
 pub type Row = Vec<Value>;
 
@@ -162,6 +167,181 @@ pub fn read_snapshot(path: &std::path::Path, timeout: Duration) -> std::io::Resu
         }
     }
     Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "socket closed before a snapshot"))
+}
+
+fn int(v: &Value) -> i64 {
+    v.as_i64().unwrap_or(-1)
+}
+
+/// Rows of `rel` whose first column is `lane` and second is `session`.
+fn rows_for<'a>(m: &'a Mirror, rel: &str, lane: &'a str, session: &'a str) -> impl Iterator<Item = &'a Row> {
+    m.rows(rel).filter(move |r| s(&r[0]) == lane && s(&r[1]) == session)
+}
+
+/// `(pane) -> value` for one of the `lanes_pane_*` / `lanes_command_*` side relations.
+fn by_pane<'a>(m: &'a Mirror, rel: &str, lane: &'a str, session: &'a str) -> HashMap<i64, &'a Value> {
+    rows_for(m, rel, lane, session).map(|r| (int(&r[2]), &r[3])).collect()
+}
+
+fn panes_from_mirror(m: &Mirror, lane: &str, session: &str, any_claude_needs_you: bool) -> Vec<PaneSnapshot> {
+    let cmds = by_pane(m, "lanes_pane_cmd", lane, session);
+    let cwds = by_pane(m, "lanes_pane_cwd", lane, session);
+    let focused: HashSet<i64> = rows_for(m, "lanes_pane_focused", lane, session).map(|r| int(&r[2])).collect();
+    let mut panes: Vec<_> = rows_for(m, "lanes_pane", lane, session)
+        .map(|r| ((int(&r[3]), int(&r[6]), int(&r[5])), int(&r[2])))
+        .collect();
+    panes.sort();
+    panes
+        .into_iter()
+        .map(|(_, id)| {
+            let command = cmds.get(&id).map(|v| s(v));
+            let kind = match command {
+                Some("claude") => PaneKind::ClaudeSession { awaiting: any_claude_needs_you },
+                other => PaneKind::from_command(other),
+            };
+            PaneSnapshot { focused: focused.contains(&id), cwd: cwds.get(&id).map(|v| s(v).to_string()), kind }
+        })
+        .collect()
+}
+
+fn command_records(m: &Mirror, lane: &str, session: &str) -> Vec<CommandRecord> {
+    let cmds = by_pane(m, "lanes_command_cmd", lane, session);
+    let ended = by_pane(m, "lanes_command_ended", lane, session);
+    let exits = by_pane(m, "lanes_command_exit", lane, session);
+    rows_for(m, "lanes_command", lane, session)
+        .map(|r| {
+            let pane = int(&r[2]);
+            CommandRecord {
+                v: 1,
+                shell: None,
+                session: session.to_string(),
+                pane: pane.max(0) as u32,
+                argv0: None,
+                cmd: cmds.get(&pane).map(|v| s(v).to_string()),
+                started_at: Some(s(&r[4]).to_string()),
+                state: s(&r[3]).to_string(),
+                ended_at: ended.get(&pane).map(|v| s(v).to_string()),
+                exit_code: exits.get(&pane).and_then(|v| v.as_i64()).map(|c| c as i32),
+            }
+        })
+        .collect()
+}
+
+fn claude_signals(m: &Mirror, lane: &str, session: &str) -> Vec<Signal> {
+    let positions: HashMap<i64, (i64, i64, i64)> = rows_for(m, "lanes_pane", lane, session)
+        .map(|r| (int(&r[2]), (int(&r[3]), int(&r[6]), int(&r[5]))))
+        .collect();
+    let mut rows: Vec<&Row> = m.rows("lanes_claude").filter(|r| s(&r[0]) == lane && s(&r[4]) == session).collect();
+    // Same reading order as the on-screen panes, as gather_lanes() does.
+    rows.sort_by_key(|r| (positions.get(&int(&r[3])).copied().unwrap_or((i64::MAX, i64::MAX, i64::MAX)), s(&r[1]).to_string()));
+    rows.into_iter()
+        .map(|r| {
+            let reason = match s(&r[2]) {
+                "idle" => ClaudeSessionReason::Awaiting,
+                "permission_pending" => ClaudeSessionReason::Permission,
+                _ => ClaudeSessionReason::Active,
+            };
+            Signal::new(
+                SignalReason::ClaudeSession(reason),
+                Some(SignalAction::SwitchClaudeSession { session_id: s(&r[1]).to_string() }),
+                None,
+            )
+        })
+        .collect()
+}
+
+fn repo_signals(m: &Mirror, lane: &str, resolved_path: &str, raw_path: &str, session: Option<&str>) -> Vec<Signal> {
+    let action = || session.map(|session| SignalAction::FocusRepoPane { session: session.to_string(), path: raw_path.to_string() });
+    let mut out = Vec::new();
+    if m.rows("lanes_repo_dirty").any(|r| s(&r[0]) == lane && s(&r[2]) == resolved_path) {
+        out.push(Signal::new(SignalReason::Repo(RepoReason::PendingCommit), action(), None));
+    }
+    if let Some(r) = m.rows("lanes_repo_branch").find(|r| s(&r[0]) == lane && s(&r[4]) == resolved_path) {
+        out.push(Signal::new(
+            SignalReason::Repo(RepoReason::NonDefaultBranch),
+            action(),
+            Some(format!("on \"{}\", default is \"{}\"", s(&r[2]), s(&r[3]))),
+        ));
+    }
+    out
+}
+
+/// The UI snapshot built from lensd's rows. Lane definitions come from Lanes'
+/// config; signals and live state come from the mirror. Lanes' own policy
+/// (dismissals, disabled sessions, `cyclable`, `visible`, lifecycle) is
+/// applied here, never by lensd.
+pub fn snapshot_from_mirror(cfg: &Config, m: &Mirror) -> LanewiseSnapshot {
+    let lanes = cfg.lanes.iter().map(|lane| lane_from_mirror(lane, m)).collect();
+    LanewiseSnapshot {
+        taken_at: chrono::Utc::now().to_rfc3339(),
+        lanes,
+        focused_lane: crate::state::read_focused_lane(),
+        focused_claude_session: crate::state::read_claude_cursor(),
+    }
+}
+
+fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror) -> LaneSnapshot {
+    let nav_session = lane.scope.iter().find_map(|el| el.zellij_session_name());
+    let mut facets: Vec<FacetSnapshot> = lane
+        .scope
+        .iter()
+        .map(|el| {
+            if let Some(session) = el.zellij_session_name() {
+                let running = rows_for(m, "lanes_session_running", &lane.id, session).next().is_some();
+                let claude = if running { claude_signals(m, &lane.id, session) } else { vec![] };
+                let needs_you = m
+                    .rows("lanes_claude")
+                    .any(|r| s(&r[0]) == lane.id && s(&r[4]) == session && matches!(s(&r[2]), "idle" | "permission_pending"));
+                let panes = if running { panes_from_mirror(m, &lane.id, session, needs_you) } else { vec![] };
+                FacetSnapshot::Terminal { session: session.to_string(), running, panes, signals: claude }
+            } else {
+                let raw = el.repo_path().unwrap_or_default();
+                let signals = repo_signals(m, &lane.id, &resolve_path(raw), raw, nav_session);
+                FacetSnapshot::Repo { path: raw.to_string(), signals }
+            }
+        })
+        .collect();
+    facets.extend(lane.targets.iter().map(|t| FacetSnapshot::Target { driver: t.driver.name().to_string() }));
+
+    // "Reachable" is now whether a WezTerm tab is showing the lane's session
+    // right now (lensd's wezterm source), not Lanes' cached tab id.
+    let has_tab = m.rows("lanes_tab").any(|r| s(&r[0]) == lane.id);
+    let reachable = facets.iter().any(|f| matches!(f, FacetSnapshot::Terminal { .. })).then_some(has_tab);
+    let terminal_running = crate::lane_terminal_running(&facets);
+
+    if let Some(FacetSnapshot::Terminal { session, signals, .. }) =
+        facets.iter_mut().find(|f| matches!(f, FacetSnapshot::Terminal { .. }))
+    {
+        if crate::lane_session_missing(lane.active, reachable) {
+            signals.push(Signal::new(
+                SignalReason::Lanes(LanesReason::SessionMissing),
+                None,
+                Some(format!("no WezTerm tab showing zellij session \"{session}\"")),
+            ));
+        }
+        if terminal_running == Some(false) {
+            signals.push(Signal::new(
+                SignalReason::Lanes(LanesReason::SessionNotRunning),
+                None,
+                Some(format!("expected zellij session \"{session}\" to be running")),
+            ));
+        }
+        for rec in command_records(m, &lane.id, session) {
+            if crate::state::is_signal_dismissed(&rec.occurrence_id()) {
+                continue;
+            }
+            if let Some(sig) = crate::command_signal(&rec) {
+                signals.push(sig);
+            }
+        }
+    }
+
+    let has_claude_signal =
+        facets.iter().any(|f| f.signals().iter().any(|sig| sig.kind() == crate::model::SignalKind::ClaudeSession));
+    let cyclable = crate::lane_cyclable(lane.active, reachable, has_claude_signal);
+    crate::correct_signals(&mut facets, cyclable);
+
+    LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), active: lane.active, cyclable, facets }
 }
 
 fn s(v: &Value) -> &str {
@@ -405,6 +585,128 @@ mod tests {
         std::thread::sleep(Duration::from_millis(100));
         assert!(!client.connected(), "hello alone is not data");
         std::fs::remove_dir_all(path.parent().unwrap()).ok();
+    }
+
+    fn cfg_with(lane: crate::model::Lane) -> Config {
+        Config { drivers: None, monitors: HashMap::new(), order: None, lanes: vec![lane] }
+    }
+
+    fn lane() -> crate::model::Lane {
+        crate::model::Lane {
+            id: "l".into(),
+            name: "L".into(),
+            active: true,
+            scope: vec![
+                crate::scope::ScopeElement::zellij_session("z"),
+                crate::scope::ScopeElement::repo("/p/infra"),
+            ],
+            targets: vec![],
+        }
+    }
+
+    fn live_rows() -> Vec<Value> {
+        vec![
+            row("lanes_session", json!(["l", "z"])),
+            row("lanes_session_running", json!(["l", "z"])),
+            row("lanes_tab", json!(["l", 4])),
+            // pane 7 is lower on screen than pane 3, so its session sorts second.
+            row("lanes_pane", json!(["l", "z", 7, 0, "T", 0, 20])),
+            row("lanes_pane", json!(["l", "z", 3, 0, "T", 0, 1])),
+            row("lanes_pane_cmd", json!(["l", "z", 3, "claude"])),
+            row("lanes_pane_cmd", json!(["l", "z", 7, "claude"])),
+            row("lanes_pane_cwd", json!(["l", "z", 3, "/a"])),
+            row("lanes_pane_focused", json!(["l", "z", 3])),
+            row("lanes_claude", json!(["l", "s-low", "running", 7, "z"])),
+            row("lanes_claude", json!(["l", "s-high", "idle", 3, "z"])),
+        ]
+    }
+
+    fn terminal(snap: &LanewiseSnapshot) -> (&bool, &Vec<PaneSnapshot>, &Vec<Signal>) {
+        match &snap.lanes[0].facets[0] {
+            FacetSnapshot::Terminal { running, panes, signals, .. } => (running, panes, signals),
+            other => panic!("expected terminal, got {}", serde_json::to_string(&other.signals().len()).unwrap()),
+        }
+    }
+
+    #[test]
+    fn a_reachable_lane_with_an_idle_claude_has_a_ready_cyclable_signal_in_screen_order() {
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()));
+        let (running, panes, signals) = terminal(&snap);
+        assert!(*running);
+        assert_eq!(panes.len(), 2);
+        assert!(panes[0].focused && panes[0].cwd.as_deref() == Some("/a"), "top pane first");
+        assert!(matches!(panes[0].kind, PaneKind::ClaudeSession { awaiting: true }));
+
+        let ids: Vec<_> = signals
+            .iter()
+            .map(|sg| match &sg.action {
+                Some(SignalAction::SwitchClaudeSession { session_id }) => session_id.as_str(),
+                _ => "?",
+            })
+            .collect();
+        assert_eq!(ids, ["s-high", "s-low"]);
+        assert!(snap.lanes[0].cyclable);
+        assert!(matches!(signals[0].reason, SignalReason::ClaudeSession(ClaudeSessionReason::Ready)), "idle in a cyclable lane is Ready");
+        assert!(signals[0].cyclable && signals[0].visible);
+        assert!(matches!(signals[1].reason, SignalReason::ClaudeSession(ClaudeSessionReason::Active)));
+    }
+
+    #[test]
+    fn a_lane_without_a_wezterm_tab_is_session_missing_and_not_cyclable() {
+        let rows: Vec<Value> = live_rows().into_iter().filter(|r| r["relation"] != "lanes_tab").collect();
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let (_, _, signals) = terminal(&snap);
+        assert!(!snap.lanes[0].cyclable);
+        assert!(signals.iter().any(|sg| matches!(sg.reason, SignalReason::Lanes(LanesReason::SessionMissing)) && sg.visible));
+        assert!(
+            signals.iter().any(|sg| matches!(sg.reason, SignalReason::ClaudeSession(ClaudeSessionReason::Awaiting))),
+            "not Ready when no cycle can land there"
+        );
+    }
+
+    #[test]
+    fn a_session_that_is_not_running_has_no_panes_and_a_not_running_signal() {
+        let rows = vec![row("lanes_session", json!(["l", "z"])), row("lanes_tab", json!(["l", 4]))];
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let (running, panes, signals) = terminal(&snap);
+        assert!(!*running && panes.is_empty());
+        assert!(signals.iter().any(|sg| matches!(sg.reason, SignalReason::Lanes(LanesReason::SessionNotRunning))));
+    }
+
+    #[test]
+    fn finished_commands_carry_their_detail_and_dismiss_id() {
+        let mut rows = live_rows();
+        rows.extend([
+            row("lanes_command", json!(["l", "z", 3, "failed", "2026-01-01T00:00:00Z"])),
+            row("lanes_command_cmd", json!(["l", "z", 3, "cargo test"])),
+            row("lanes_command_exit", json!(["l", "z", 3, 101])),
+            row("lanes_command_ended", json!(["l", "z", 3, "2026-01-01T00:00:07Z"])),
+            row("lanes_command", json!(["l", "z", 7, "running", "2026-01-01T00:00:00Z"])),
+        ]);
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let (_, _, signals) = terminal(&snap);
+        let cmds: Vec<_> = signals.iter().filter(|sg| sg.kind() == crate::model::SignalKind::Command).collect();
+        assert_eq!(cmds.len(), 1, "running commands are not signals");
+        assert_eq!(cmds[0].detail.as_deref(), Some("cargo test · exit 101 · 7s"));
+        assert_eq!(cmds[0].dismiss_id.as_deref(), Some("command:z--3--2026-01-01T00:00:00Z"));
+        assert!(cmds[0].visible && !cmds[0].cyclable);
+    }
+
+    #[test]
+    fn repo_facets_get_dirty_and_branch_signals_that_focus_the_lanes_session() {
+        let mut rows = live_rows();
+        rows.extend([
+            row("lanes_repo_dirty", json!(["l", "infra", "/p/infra"])),
+            row("lanes_repo_branch", json!(["l", "infra", "feat", "main", "/p/infra"])),
+            row("lanes_repo_dirty", json!(["other", "x", "/p/infra"])),
+        ]);
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let FacetSnapshot::Repo { path, signals } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
+        assert_eq!(path, "/p/infra");
+        assert_eq!(signals.len(), 2);
+        assert!(matches!(signals[0].reason, SignalReason::Repo(RepoReason::PendingCommit)));
+        assert_eq!(signals[1].detail.as_deref(), Some("on \"feat\", default is \"main\""));
+        assert!(matches!(&signals[0].action, Some(SignalAction::FocusRepoPane { session, path }) if session == "z" && path == "/p/infra"));
     }
 
     #[test]
