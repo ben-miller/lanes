@@ -51,13 +51,20 @@ active = true
 Example `tab.toml`:
 
 ```toml
+# Whether the WezTerm tab should be open - ztabs' own concern (see the
+# infra repo's `ztabs` command), independent of lane.toml's `active`
+# (switcher visibility). Defaults to true when absent. The two can
+# legitimately disagree: a context can be hidden from the switcher while
+# still having an open terminal tab, or vice versa.
+active = true
+
 [[scope]]
 kind = "repo"
 path = "/Users/me/src/job-hunting"
 
 [[scope]]
 kind = "zellij_session"
-name = "job-hunting"
+session = "job-hunting"
 ```
 
 Example `targets.toml` (see `PLAN-window-targets.md` for the full `[[targets]]` model):
