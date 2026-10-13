@@ -596,16 +596,12 @@ fn check_lanes_registry() -> Check {
         Ok(entries) => {
             let count = entries
                 .filter_map(|e| e.ok())
-                .filter(|e| {
-                    let name = e.file_name();
-                    let s = name.to_string_lossy();
-                    s.ends_with(".toml") && s != "config.toml"
-                })
+                .filter(|e| e.path().is_dir())
                 .count();
             Check {
                 label: "lanes config",
                 status: Status::Ok,
-                message: format!("{} lane(s) defined in {}", count, dir.display()),
+                message: format!("{} context(s) defined in {}", count, dir.display()),
                 hint: None,
             }
         }

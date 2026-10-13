@@ -1,6 +1,7 @@
 use std::collections::HashMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
+use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
 use crate::model::{Lane, Target, TargetDriver};
@@ -27,7 +28,7 @@ pub struct Config {
 impl Config {
     pub fn load() -> Self {
         let (drivers, monitors, order, default_targets) = load_global_config();
-        let mut lanes = load_lanes(&default_targets);
+        let mut lanes = load_lanes(&config_dir(), &default_targets);
         if let Some(order) = &order {
             sort_by_order(&mut lanes, order);
         }
@@ -64,17 +65,21 @@ impl Config {
     }
 }
 
-/// Flip a lane's `active` flag in its own TOML file, in place. Uses
+/// Flip a context's `active` flag in its `lane.toml` facet, in place. Uses
 /// toml_edit rather than the parse-only `toml` crate so the rest of the
 /// file (formatting, key order, any future comments) is left untouched -
-/// these files are hand-maintained.
+/// these files are hand-maintained. `lane.toml` is an optional facet (see
+/// `load_lanes`), so a context that's never had one yet gets a fresh file
+/// containing just this one key, not an error.
 pub fn set_lane_active(lane_id: &str, active: bool) -> std::io::Result<()> {
-    let path = config_dir().join(format!("{lane_id}.toml"));
-    let text = std::fs::read_to_string(&path)?;
-    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| {
-        std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
-    })?;
-    doc["lane"]["active"] = toml_edit::value(active);
+    let path = config_dir().join(lane_id).join("lane.toml");
+    let mut doc = match std::fs::read_to_string(&path) {
+        Ok(text) => text.parse::<toml_edit::DocumentMut>().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+        })?,
+        Err(_) => toml_edit::DocumentMut::new(),
+    };
+    doc["active"] = toml_edit::value(active);
     // Write-then-rename: the Lanes Switch fs-watcher reads this dir the
     // instant it sees a change, and a torn read makes toml parsing fail,
     // which drops the lane from that refresh's snapshot entirely (see
@@ -121,7 +126,7 @@ struct GlobalConfig {
     #[serde(default)]
     order: Option<Vec<String>>,
     /// Targets applied to every lane, cascading with (and overridable by)
-    /// each lane's own `[[targets]]` - see `merge_targets`.
+    /// each lane's own `targets.toml` - see `merge_targets`.
     #[serde(default)]
     targets: Vec<Target>,
 }
@@ -132,31 +137,43 @@ struct MonitorConfigRaw {
     name: Option<String>,
 }
 
-#[derive(Deserialize)]
-struct LaneFile {
-    lane: LaneHeader,
+/// `<context>/lane.toml` - the switcher-facing facet. Entirely optional,
+/// same as every facet (see `load_lanes`): a context dir with no
+/// `lane.toml` still exists (and still gets a Zellij session / Boards
+/// project if `tab.toml`/`board.toml` are present), it just never renders
+/// a row in the Lanes Switch dashboard beyond the sensible defaults below.
+/// Identity (the old `id` field) isn't part of this anymore - it's the
+/// context directory's own name, which can't disagree with itself the way
+/// a hand-written `id` field could.
+#[derive(Deserialize, Default)]
+struct LaneToml {
+    name: Option<String>,
+    active: Option<bool>,
+}
+
+/// `<context>/tab.toml` - the Zellij/repo anchor (what used to be the one
+/// do-everything lane file's `[[scope]]` array). Same human-friendly
+/// `ScopeElementRaw` shape as before, just split into its own file.
+#[derive(Deserialize, Default)]
+struct TabToml {
     #[serde(default)]
     scope: Vec<ScopeElementRaw>,
+}
+
+/// `<context>/targets.toml` - window-placement targets applied on switch
+/// (app / obsidian / firefox-profile / wezterm / zellij-placement / vscode
+/// / sourcetree). Boards is deliberately *not* included here - see
+/// `read_board_target` for why it gets its own facet file instead.
+#[derive(Deserialize, Default)]
+struct TargetsToml {
     #[serde(default)]
     targets: Vec<Target>,
-}
-
-#[derive(Deserialize)]
-struct LaneHeader {
-    id: String,
-    name: String,
-    #[serde(default = "default_true")]
-    active: bool,
-}
-
-fn default_true() -> bool {
-    true
 }
 
 /// TOML-facing shape for a scope element - human-friendly fields
 /// (`session`, `path`) rather than making config authors hand-write the
 /// real ScopeElement's URI locators. Converted to the real type on load,
-/// same pattern as LaneFile/LaneHeader vs. the real Lane.
+/// same pattern as TabToml vs. the real Lane.
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum ScopeElementRaw {
@@ -228,44 +245,88 @@ fn merge_targets(defaults: &[Target], lane_targets: Vec<Target>) -> Vec<Target> 
     merged
 }
 
-fn load_lanes(default_targets: &[Target]) -> Vec<Lane> {
-    let dir = config_dir();
-    let entries = match std::fs::read_dir(&dir) {
+/// Read one optional facet file. Absent means "this facet doesn't apply to
+/// this context" - not an error, hence the `Default` rather than an
+/// `Option`/`Result`. A *present but malformed* file still only warns and
+/// falls back to that facet's defaults - same partial-failure discipline
+/// the old single-file loader had (a bad file drops only what it would
+/// have contributed, never the whole context).
+fn read_facet<T: DeserializeOwned + Default>(path: &Path) -> T {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return T::default();
+    };
+    match toml::from_str(&content) {
+        Ok(v) => v,
+        Err(err) => {
+            eprintln!("warning: could not parse {:?}: {}", path, err);
+            T::default()
+        }
+    }
+}
+
+/// `<context>/board.toml` - the Boards projection: which Boards project
+/// this context corresponds to, plus optional placement. Kept as its own
+/// facet (one `Target`, not a list - a context has at most one board)
+/// rather than folded into `targets.toml`, because Boards is architecturally
+/// different from the other target drivers: it's generated/materialized
+/// (see PLAN-context-model.md), not just another thing to place on switch.
+fn read_board_target(path: &Path) -> Option<Target> {
+    let content = std::fs::read_to_string(path).ok()?;
+    match toml::from_str::<Target>(&content) {
+        Ok(t) if matches!(t.driver, TargetDriver::Boards { .. }) => Some(t),
+        Ok(t) => {
+            eprintln!(
+                "warning: {:?}: board.toml must use driver = \"boards\", got {:?}",
+                path,
+                t.driver.name()
+            );
+            None
+        }
+        Err(err) => {
+            eprintln!("warning: could not parse {:?}: {}", path, err);
+            None
+        }
+    }
+}
+
+/// Every subdirectory of `dir` (always `config_dir()` outside tests - taken
+/// as a parameter purely so tests can point it at a throwaway tree instead
+/// of mutating `$HOME`, which would race every other test reading it) is
+/// one context; the directory name *is* its id (no separate field to
+/// hand-write, and so nothing to disagree with it - see LaneToml's doc
+/// comment). Inside, `lane.toml`, `tab.toml`, `targets.toml` and
+/// `board.toml` are each independently optional - a context can be just a
+/// tab, just a board, all of them, or (rare but valid) none, in which case
+/// it's an inert placeholder.
+fn load_lanes(dir: &Path, default_targets: &[Target]) -> Vec<Lane> {
+    let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
 
     let mut lanes: Vec<Lane> = entries
         .filter_map(|e| e.ok())
-        .filter(|e| {
-            let name = e.file_name();
-            let s = name.to_string_lossy();
-            s.ends_with(".toml") && s != "config.toml"
-        })
+        .filter(|e| e.path().is_dir())
         .filter_map(|e| {
-            let path = e.path();
-            let content = match std::fs::read_to_string(&path) {
-                Ok(s) => s,
-                Err(err) => { eprintln!("warning: could not read {:?}: {}", path, err); return None; }
-            };
-            let file: LaneFile = match toml::from_str(&content) {
-                Ok(f) => f,
-                Err(err) => { eprintln!("warning: could not parse {:?}: {}", path, err); return None; }
-            };
-            if file.lane.id.contains(char::is_whitespace) {
-                eprintln!(
-                    "warning: skipping lane file {:?} — id {:?} must not contain spaces",
-                    e.file_name(),
-                    file.lane.id
-                );
+            let id = e.file_name().to_string_lossy().into_owned();
+            if id.contains(char::is_whitespace) {
+                eprintln!("warning: skipping context dir {:?} - the directory name (id) must not contain spaces", id);
                 return None;
             }
+            let path = e.path();
+            let lane_toml: LaneToml = read_facet(&path.join("lane.toml"));
+            let tab_toml: TabToml = read_facet(&path.join("tab.toml"));
+            let targets_toml: TargetsToml = read_facet(&path.join("targets.toml"));
+
+            let mut own_targets = targets_toml.targets;
+            own_targets.extend(read_board_target(&path.join("board.toml")));
+
             Some(Lane {
-                id: file.lane.id,
-                name: file.lane.name,
-                active: file.lane.active,
-                scope: file.scope.into_iter().map(ScopeElement::from).collect(),
-                targets: merge_targets(default_targets, file.targets),
+                name: lane_toml.name.unwrap_or_else(|| id.clone()),
+                active: lane_toml.active.unwrap_or(true),
+                scope: tab_toml.scope.into_iter().map(ScopeElement::from).collect(),
+                targets: merge_targets(default_targets, own_targets),
+                id,
             })
         })
         .collect();
@@ -370,36 +431,34 @@ mod tests {
     }
 
     #[test]
-    fn parses_lane_file_zellij_session_scope_element() {
-        let content = r#"
-[lane]
-id = "sheetwork"
-name = "Sheetwork"
+    fn lane_toml_defaults_when_absent() {
+        // Simulates a context dir with no lane.toml at all.
+        let lane_toml = LaneToml::default();
+        assert_eq!(lane_toml.name, None);
+        assert_eq!(lane_toml.active, None);
+    }
 
+    #[test]
+    fn parses_tab_toml_zellij_session_scope_element() {
+        let content = r#"
 [[scope]]
 kind = "zellij_session"
 session = "sheetwork"
 "#;
-        let file: LaneFile = toml::from_str(content).unwrap();
-        assert_eq!(file.lane.id, "sheetwork");
-        assert_eq!(file.lane.name, "Sheetwork");
+        let file: TabToml = toml::from_str(content).unwrap();
         assert_eq!(file.scope.len(), 1);
         assert!(matches!(&file.scope[0], ScopeElementRaw::ZellijSession { session } if session == "sheetwork"));
     }
 
     #[test]
-    fn parses_lane_file_trello_list_card_scope_element() {
+    fn parses_tab_toml_trello_list_card_scope_element() {
         let content = r#"
-[lane]
-id = "lanes-dev"
-name = "Lanes Dev"
-
 [[scope]]
 kind = "trello"
 list = "abc123"
 position = 1
 "#;
-        let file: LaneFile = toml::from_str(content).unwrap();
+        let file: TabToml = toml::from_str(content).unwrap();
         assert_eq!(file.scope.len(), 1);
         assert!(matches!(
             &file.scope[0],
@@ -410,63 +469,38 @@ position = 1
     }
 
     #[test]
-    fn lane_active_defaults_true_when_absent() {
-        let content = r#"
-[lane]
-id = "sheetwork"
-name = "Sheetwork"
-"#;
-        let file: LaneFile = toml::from_str(content).unwrap();
-        assert!(file.lane.active);
+    fn lane_toml_active_true_is_parsed() {
+        let file: LaneToml = toml::from_str("name = \"Sheetwork\"\nactive = true\n").unwrap();
+        assert_eq!(file.active, Some(true));
     }
 
     #[test]
-    fn lane_active_false_is_parsed() {
-        let content = r#"
-[lane]
-id = "sheetwork"
-name = "Sheetwork"
-active = false
-"#;
-        let file: LaneFile = toml::from_str(content).unwrap();
-        assert!(!file.lane.active);
+    fn lane_toml_active_false_is_parsed() {
+        let file: LaneToml = toml::from_str("name = \"Sheetwork\"\nactive = false\n").unwrap();
+        assert_eq!(file.active, Some(false));
     }
 
     #[test]
-    fn lane_file_without_name_fails_to_parse() {
-        let content = r#"
-[lane]
-id = "sheetwork"
-
-[[scope]]
-kind = "zellij_session"
-session = "sheetwork"
-"#;
-        let result: Result<LaneFile, _> = toml::from_str(content);
-        assert!(result.is_err());
+    fn lane_toml_without_name_still_parses_name_is_optional_now() {
+        // Unlike the old single-file [lane] header, `name` is optional here -
+        // load_lanes() falls back to the directory name (see its own test
+        // coverage via the id-is-the-dirname design). lane.toml itself must
+        // not require it.
+        let file: LaneToml = toml::from_str("active = false\n").unwrap();
+        assert_eq!(file.name, None);
+        assert_eq!(file.active, Some(false));
     }
 
     #[test]
-    fn parses_lane_file_with_name_and_target() {
+    fn parses_targets_toml_with_name_and_target() {
         let content = r#"
-[lane]
-id = "lanes-dev"
-name = "lanes dev"
-
-[[scope]]
-kind = "zellij_session"
-session = "lanes"
-
 [[targets]]
 driver = "wezterm"
 session = "lanes"
 monitor = "lg-right"
 position = "full"
 "#;
-        let file: LaneFile = toml::from_str(content).unwrap();
-        assert_eq!(file.lane.id, "lanes-dev");
-        assert_eq!(file.lane.name, "lanes dev");
-        assert_eq!(file.scope.len(), 1);
+        let file: TargetsToml = toml::from_str(content).unwrap();
         assert_eq!(file.targets.len(), 1);
         assert_eq!(file.targets[0].driver.name(), "wezterm");
         assert_eq!(file.targets[0].monitor.as_deref(), Some("lg-right"));
@@ -480,10 +514,6 @@ position = "full"
         // span instead of a preset - lanes-cli doesn't interpret `position`,
         // just forwards it to lanes-wm, so it only needs to parse as TOML.
         let content = r#"
-[lane]
-id = "formation"
-name = "Formation"
-
 [[targets]]
 driver = "obsidian"
 vault = "Formation"
@@ -497,7 +527,7 @@ col = [1, 2]
 driver = "zellij"
 session = "formation"
 "#;
-        let file: LaneFile = toml::from_str(content).unwrap();
+        let file: TargetsToml = toml::from_str(content).unwrap();
         assert_eq!(file.targets.len(), 2);
         assert!(matches!(&file.targets[0].driver, crate::model::TargetDriver::Obsidian { vault } if vault == "Formation"));
         assert!(file.targets[0].position.is_some());
@@ -506,23 +536,46 @@ session = "formation"
     }
 
     #[test]
-    fn parses_boards_target() {
+    fn board_toml_parses_as_a_single_boards_target() {
         let content = r#"
-[lane]
-id = "infra"
-name = "Infra"
-
-[[targets]]
 driver = "boards"
 project = "Infra"
 monitor = "main"
 position = "full"
 raise = true
 "#;
-        let file: LaneFile = toml::from_str(content).unwrap();
-        assert_eq!(file.targets.len(), 1);
-        assert!(matches!(&file.targets[0].driver, crate::model::TargetDriver::Boards { project } if project == "Infra"));
-        assert!(file.targets[0].raise);
+        let target: Target = toml::from_str(content).unwrap();
+        assert!(matches!(&target.driver, crate::model::TargetDriver::Boards { project } if project == "Infra"));
+        assert!(target.raise);
+    }
+
+    #[test]
+    fn read_board_target_rejects_a_non_boards_driver() {
+        let dir = std::env::temp_dir().join(format!("lanes-config-test-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("board.toml");
+        std::fs::write(&path, "driver = \"app\"\nname = \"Whatever\"\n").unwrap();
+        assert!(read_board_target(&path).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn read_facet_falls_back_to_default_when_file_is_absent() {
+        let missing = std::env::temp_dir().join("lanes-config-test-does-not-exist").join("lane.toml");
+        let lane_toml: LaneToml = read_facet(&missing);
+        assert_eq!(lane_toml.name, None);
+        assert_eq!(lane_toml.active, None);
+    }
+
+    #[test]
+    fn read_facet_falls_back_to_default_on_malformed_toml_and_warns_not_panics() {
+        let dir = std::env::temp_dir().join(format!("lanes-config-test-malformed-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("lane.toml");
+        std::fs::write(&path, "this is not valid = = toml").unwrap();
+        let lane_toml: LaneToml = read_facet(&path);
+        assert_eq!(lane_toml.name, None);
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
@@ -608,5 +661,66 @@ raise = true
         assert_eq!(cfg.lane_for_session("lanes").map(|l| l.id.as_str()), Some("lanes-dev"));
         assert_eq!(cfg.lane_for_session("sheetwork1").map(|l| l.id.as_str()), Some("sheetwork1"));
         assert!(cfg.lane_for_session("job-hunting").is_none());
+    }
+
+    #[test]
+    fn load_lanes_reads_a_real_directory_tree_end_to_end() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-load-lanes-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // A fully-specified context: all four facets.
+        let infra = root.join("infra");
+        std::fs::create_dir_all(&infra).unwrap();
+        std::fs::write(infra.join("lane.toml"), "name = \"Infra\"\nactive = false\n").unwrap();
+        std::fs::write(
+            infra.join("tab.toml"),
+            "[[scope]]\nkind = \"zellij_session\"\nsession = \"infra\"\n",
+        ).unwrap();
+        std::fs::write(
+            infra.join("board.toml"),
+            "driver = \"boards\"\nproject = \"Infra\"\nmonitor = \"main\"\nposition = \"full\"\n",
+        ).unwrap();
+
+        // A bare context: just a directory, no facet files at all.
+        std::fs::create_dir_all(root.join("placeholder")).unwrap();
+
+        let lanes = load_lanes(&root, &[]);
+        assert_eq!(lanes.len(), 2);
+
+        let infra_lane = lanes.iter().find(|l| l.id == "infra").unwrap();
+        assert_eq!(infra_lane.name, "Infra");
+        assert!(!infra_lane.active);
+        assert_eq!(infra_lane.scope.len(), 1);
+        assert_eq!(infra_lane.targets.len(), 1);
+        assert!(matches!(&infra_lane.targets[0].driver, crate::model::TargetDriver::Boards { project } if project == "Infra"));
+
+        let placeholder = lanes.iter().find(|l| l.id == "placeholder").unwrap();
+        assert_eq!(placeholder.name, "placeholder");
+        assert!(placeholder.active);
+        assert!(placeholder.scope.is_empty());
+        assert!(placeholder.targets.is_empty());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_lanes_skips_a_directory_name_with_whitespace() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-whitespace-id-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("has space")).unwrap();
+        std::fs::create_dir_all(root.join("fine")).unwrap();
+
+        let lanes = load_lanes(&root, &[]);
+        assert_eq!(lanes.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), vec!["fine"]);
+
+        std::fs::remove_dir_all(&root).ok();
     }
 }

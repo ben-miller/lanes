@@ -13,23 +13,68 @@ lanes sessions get <id>  Get a single Claude session by ID
 
 ## Configuration
 
-`~/.config/lanes/registry.toml` is the single config file. It declares which drivers to run and defines named lanes.
+`~/.config/lanes.toml` is the global config. It declares which drivers to run, the order contexts should sort in, and default `[[targets]]`:
 
 ```toml
 drivers = ["zellij", "claude"]
-
-[[lanes]]
-name = "sheetwork"
-zellij_session = "sheetwork"
-position = 0
-
-[[lanes]]
-name = "lanes dev"
-zellij_session = "lanes"
-position = 1
+order = ["sheetwork-sandbox", "lanes-dev", "infra"]
 ```
 
-If `drivers` is omitted, all built-in drivers run.
+If `drivers` is omitted, all built-in drivers run. A context missing from `order` still works at runtime (it sorts alphabetically after the listed ones), but `lanes doctor` flags it.
+
+### Contexts
+
+Each context is a directory under `~/.config/lanes/<id>/`. The directory name *is* the identity - there's no separate id field anywhere. Everything inside is a facet file, and every facet is optional:
+
+```
+~/.config/lanes/
+  job-hunting/
+    lane.toml      # switcher-UI view: display name, active/cyclable
+    tab.toml       # Zellij session name + repo/cwd scope
+    targets.toml   # window-placement targets (non-Boards)
+    board.toml     # the Boards projection (a single `driver = "boards"` target)
+  lanes-wm/
+    lane.toml
+    tab.toml
+    # no targets.toml or board.toml - this context doesn't need them
+```
+
+A context with only `tab.toml` gets a real Zellij session without ever showing up in the Lanes Switch dashboard - useful for background contexts you don't want cluttering the switcher. A missing or malformed facet file never breaks the rest of the context (or the rest of the config); it just falls back to its default and (if malformed) prints a warning.
+
+Example `lane.toml`:
+
+```toml
+name = "Job Hunting"
+active = true
+```
+
+Example `tab.toml`:
+
+```toml
+[[scope]]
+kind = "repo"
+path = "/Users/me/src/job-hunting"
+
+[[scope]]
+kind = "zellij_session"
+name = "job-hunting"
+```
+
+Example `targets.toml` (see `PLAN-window-targets.md` for the full `[[targets]]` model):
+
+```toml
+[[targets]]
+driver = "firefox_profile"
+profile = "job-hunting"
+position = { cols = 3, col = [1, 2] }
+```
+
+Example `board.toml` (a single target, not an array - the Boards projection for this context):
+
+```toml
+driver = "boards"
+project = "job-hunting"
+```
 
 ### Drivers
 
