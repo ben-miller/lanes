@@ -101,6 +101,12 @@ pub enum TargetDriver {
     },
     /// Open a specific Obsidian vault via its `obsidian://` URI.
     Obsidian { vault: String },
+    /// Switch Boards (a standalone kanban app, `com.bmiller.boards`) to a
+    /// specific project via its `boards://` deep link. `project` is matched
+    /// by folder name under Boards' own data root, exactly as Boards'
+    /// `list_projects` returns it - same identity convention as `vault`
+    /// above, just for a different app.
+    Boards { project: String },
     /// Open a repo's working copy in SourceTree (`stree`, run from the
     /// repo's own directory).
     Sourcetree { repo: String },
@@ -135,6 +141,7 @@ impl TargetDriver {
             TargetDriver::Wezterm { .. } => "wezterm",
             TargetDriver::Zellij { .. } => "zellij",
             TargetDriver::Obsidian { .. } => "obsidian",
+            TargetDriver::Boards { .. } => "boards",
             TargetDriver::Sourcetree { .. } => "sourcetree",
             TargetDriver::Vscode { .. } => "vscode",
             TargetDriver::App { .. } => "app",

@@ -1177,6 +1177,7 @@ fn target_bundle_id(driver: &model::TargetDriver) -> Option<&str> {
     match driver {
         model::TargetDriver::Wezterm { .. } => Some("com.github.wez.wezterm"),
         model::TargetDriver::Obsidian { .. } => Some("md.obsidian"),
+        model::TargetDriver::Boards { .. } => Some("com.bmiller.boards"),
         model::TargetDriver::Sourcetree { .. } => Some("com.torusknot.SourceTreeNotMAS"),
         model::TargetDriver::Vscode { .. } => Some("com.microsoft.VSCode"),
         // Only known if the config gave us one - unlike the drivers above,
@@ -1409,6 +1410,11 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
         model::TargetDriver::Obsidian { vault } => {
             let uri = format!("obsidian://open?vault={}", percent_encode(vault));
             run_command_checked(std::process::Command::new("open").arg(uri), "open obsidian:// URI")?;
+            Ok(None)
+        }
+        model::TargetDriver::Boards { project } => {
+            let uri = format!("boards://open?project={}", percent_encode(project));
+            run_command_checked(std::process::Command::new("open").arg(uri), "open boards:// URI")?;
             Ok(None)
         }
         model::TargetDriver::Sourcetree { repo } => {
@@ -1939,6 +1945,10 @@ mod tests {
         assert_eq!(
             target_bundle_id(&model::TargetDriver::Obsidian { vault: "x".into() }),
             Some("md.obsidian")
+        );
+        assert_eq!(
+            target_bundle_id(&model::TargetDriver::Boards { project: "x".into() }),
+            Some("com.bmiller.boards")
         );
         assert_eq!(
             target_bundle_id(&model::TargetDriver::Vscode { folder: "x".into() }),

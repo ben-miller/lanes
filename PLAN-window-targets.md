@@ -63,6 +63,7 @@ runtime-only ID (tab ID, window number, chat UUID) by hand.
 | `wezterm` | `session` | `wezterm cli activate-tab --tab-id <id>` - id resolved via lanes-cli's existing cached-tab-id lookup per session (was `activate_wezterm_tab`) |
 | `zellij` | `session`, `pane` (optional) | zellij's own action API (was `focus_zellij_pane`/`first_pane_id`) |
 | `obsidian` | `vault` | `open 'obsidian://open?vault=<vault>'`, then place via lanes-wm's focused-window selector (see below) |
+| `boards` | `project` | `open 'boards://open?project=<project>'` (Boards, `com.bmiller.boards` - a standalone kanban app, own repo at `~/src/projects/boards`), same focused-window placement as `obsidian`. `project` matches a folder name under Boards' own data root exactly as its `list_projects` returns it - case-sensitive, no fuzzy matching. Added post-v1, 2026-10-07. |
 | `sourcetree` | `repo` | `cd <repo> && stree` |
 | `vscode` | `folder` | `code -r <folder>` (reuse window) |
 | `app` | `name`, `bundle_id` (optional) | fallback for anything else: `open -a <name>`, no window/tab addressing - brings forward whichever window the app last had focused. `bundle_id` unlocks placement (`monitor`/`position`); without it, activate-only. |

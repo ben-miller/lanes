@@ -506,6 +506,26 @@ session = "formation"
     }
 
     #[test]
+    fn parses_boards_target() {
+        let content = r#"
+[lane]
+id = "infra"
+name = "Infra"
+
+[[targets]]
+driver = "boards"
+project = "Infra"
+monitor = "main"
+position = "full"
+raise = true
+"#;
+        let file: LaneFile = toml::from_str(content).unwrap();
+        assert_eq!(file.targets.len(), 1);
+        assert!(matches!(&file.targets[0].driver, crate::model::TargetDriver::Boards { project } if project == "Infra"));
+        assert!(file.targets[0].raise);
+    }
+
+    #[test]
     fn scope_element_raw_converts_to_real_scope_element() {
         let el: ScopeElement = ScopeElementRaw::ZellijSession { session: "infra".to_string() }.into();
         assert_eq!(el.zellij_session_name(), Some("infra"));
