@@ -36,7 +36,13 @@ enum Command {
     Init,
 
     /// Check environment dependencies and configuration
-    Doctor,
+    Doctor {
+        /// Materialize any missing Boards project (~/boards/<project>/board.yaml)
+        /// named by a context's board.toml. Never touches a project that
+        /// already exists - Boards owns that file once created.
+        #[arg(long)]
+        fix: bool,
+    },
 
     /// List configured lanes and their facets
     List {
@@ -273,7 +279,7 @@ fn main() {
 
         Command::Init => lanes::logging::init_state(),
 
-        Command::Doctor => cmd::doctor::run(),
+        Command::Doctor { fix } => cmd::doctor::run(fix),
 
         Command::List { json } => {
             let cfg = lanes::config::Config::load();

@@ -24,8 +24,15 @@ impl Status {
     }
 }
 
-pub fn run() {
+pub fn run(fix: bool) {
     let cfg = lanes::config::Config::load();
+
+    let boards_dir = boards_data_dir();
+    if fix {
+        for project in materialize_boards_projects(&cfg, &boards_dir) {
+            println!("created ~/boards/{project}/board.yaml");
+        }
+    }
 
     let mut checks = vec![
         check_lanes_registry(),
@@ -39,6 +46,10 @@ pub fn run() {
         check_monitor_config(&cfg),
         check_target_binaries(&cfg),
     ];
+
+    if has_boards_target(&cfg) {
+        checks.push(check_boards_projects(&cfg, &boards_dir));
+    }
 
     if has_firefox_profile_target(&cfg) {
         checks.push(check_firefox_profile_schema());
@@ -759,6 +770,107 @@ fn check_monitor_config(cfg: &lanes::config::Config) -> Check {
     }
 }
 
+/// Boards' own data-root resolution order (BOARDS_DATA_DIR env var, then
+/// `data_dir` in ~/.config/boards/config.yaml, then ~/boards) - duplicated
+/// here deliberately rather than linking against Boards, which is a
+/// separate Tauri app with no library to depend on. Boards' own README is
+/// the source of truth for this order; keep it in sync if that ever
+/// changes.
+fn boards_data_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("BOARDS_DATA_DIR") {
+        return PathBuf::from(lanes::expand_tilde(&dir));
+    }
+    let config_path = PathBuf::from(lanes::expand_tilde("~/.config/boards/config.yaml"));
+    if let Ok(content) = std::fs::read_to_string(&config_path) {
+        for line in content.lines() {
+            if let Some(val) = line.trim().strip_prefix("data_dir:") {
+                let val = val.trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    return PathBuf::from(lanes::expand_tilde(val));
+                }
+            }
+        }
+    }
+    PathBuf::from(lanes::expand_tilde("~/boards"))
+}
+
+/// Every Boards project name named by a `board.toml` facet across every
+/// context - a context names at most one, since board.toml is a single
+/// target, not an array (see config.rs's read_board_target).
+fn boards_project_names(cfg: &lanes::config::Config) -> Vec<(&str, &str)> {
+    cfg.lanes
+        .iter()
+        .filter_map(|l| {
+            l.targets.iter().find_map(|t| match &t.driver {
+                lanes::model::TargetDriver::Boards { project } => Some((l.display_name(), project.as_str())),
+                _ => None,
+            })
+        })
+        .collect()
+}
+
+fn has_boards_target(cfg: &lanes::config::Config) -> bool {
+    !boards_project_names(cfg).is_empty()
+}
+
+/// Flags any context whose board.toml names a Boards project that doesn't
+/// exist on disk yet - Boards is deliberately generic (any subfolder of its
+/// data root with a board.yaml is a project), so this never teaches Boards
+/// anything new, it just checks the folder's there. Not auto-fixed by a
+/// plain `doctor` run - see `materialize_boards_projects` for `--fix`.
+fn check_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Check {
+    let missing: Vec<&str> = boards_project_names(cfg)
+        .into_iter()
+        .filter(|(_, project)| !data_dir.join(project).join("board.yaml").exists())
+        .map(|(_, project)| project)
+        .collect();
+
+    if missing.is_empty() {
+        Check {
+            label: "boards projects",
+            status: Status::Ok,
+            message: "every context's board.toml project exists under the Boards data root".to_string(),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "boards projects",
+            status: Status::Warn,
+            message: format!("project(s) missing a board.yaml in {}: {}", data_dir.display(), missing.join(", ")),
+            hint: Some("run `lanes doctor --fix` to create them with default columns".to_string()),
+        }
+    }
+}
+
+/// Creates `<data_dir>/<project>/board.yaml` for any context's board.toml
+/// project that doesn't exist yet, using the context's display name as the
+/// title and a plain default column set. Never touches a project that
+/// already exists - once created, its content (columns, cards) is Boards'
+/// to own, not lanes-cli's to overwrite on every `--fix`. Returns the
+/// project names actually created.
+fn materialize_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Vec<String> {
+    let mut created = Vec::new();
+    for (name, project) in boards_project_names(cfg) {
+        let board_yaml = data_dir.join(project).join("board.yaml");
+        if board_yaml.exists() {
+            continue;
+        }
+        if let Some(parent) = board_yaml.parent() {
+            if std::fs::create_dir_all(parent).is_err() {
+                continue;
+            }
+        }
+        // Double-quoted YAML scalar, so a display name with a colon,
+        // hash, or other flow-scalar-breaking character is still valid.
+        let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
+        let content = format!("title: \"{escaped_name}\"\ncolumns: [Backlog, Doing, Done]\n");
+        if std::fs::write(&board_yaml, content).is_ok() {
+            created.push(project.to_string());
+        }
+    }
+    created
+}
+
 /// Every `firefox-profile` target across every lane, driver fields intact -
 /// used by both the schema check (does this feature even apply here) and
 /// the per-profile resolution check below.
@@ -951,6 +1063,90 @@ mod tests {
 
     fn monitor(uuid: &str) -> lanes::config::MonitorConfig {
         lanes::config::MonitorConfig { uuid: Some(uuid.to_string()), name: None }
+    }
+
+    fn boards_target(project: &str) -> lanes::model::Target {
+        lanes::model::Target {
+            driver: lanes::model::TargetDriver::Boards { project: project.to_string() },
+            monitor: None,
+            position: None,
+            launch: false,
+            raise: false,
+        }
+    }
+
+    #[test]
+    fn has_boards_target_false_when_none_configured() {
+        let cfg = test_config(vec![lane("infra", "Infra", true, "infra")]);
+        assert!(!has_boards_target(&cfg));
+    }
+
+    #[test]
+    fn boards_project_names_pairs_display_name_with_project() {
+        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("infra-board")])]);
+        assert_eq!(boards_project_names(&cfg), vec![("infra", "infra-board")]);
+    }
+
+    fn boards_test_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lanes-doctor-test-boards-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn check_boards_projects_ok_when_board_yaml_already_exists() {
+        let dir = boards_test_dir("check-ok");
+        std::fs::create_dir_all(dir.join("infra-board")).unwrap();
+        std::fs::write(dir.join("infra-board/board.yaml"), "title: \"Infra\"\n").unwrap();
+
+        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("infra-board")])]);
+        let check = check_boards_projects(&cfg, &dir);
+        assert!(matches!(check.status, Status::Ok));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_boards_projects_warns_on_a_missing_board_yaml() {
+        let dir = boards_test_dir("check-warn");
+        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("infra-board")])]);
+        let check = check_boards_projects(&cfg, &dir);
+        assert!(matches!(check.status, Status::Warn));
+        assert!(check.message.contains("infra-board"));
+    }
+
+    #[test]
+    fn materialize_boards_projects_creates_a_missing_board_yaml() {
+        let dir = boards_test_dir("materialize-new");
+        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("infra-board")])]);
+        let created = materialize_boards_projects(&cfg, &dir);
+        assert_eq!(created, vec!["infra-board".to_string()]);
+
+        let content = std::fs::read_to_string(dir.join("infra-board/board.yaml")).unwrap();
+        assert!(content.contains("title: \"infra\""));
+        assert!(content.contains("columns: [Backlog, Doing, Done]"));
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn materialize_boards_projects_never_overwrites_an_existing_board_yaml() {
+        let dir = boards_test_dir("materialize-existing");
+        std::fs::create_dir_all(dir.join("infra-board")).unwrap();
+        std::fs::write(dir.join("infra-board/board.yaml"), "title: \"Custom\"\ncolumns: [A, B]\n").unwrap();
+
+        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("infra-board")])]);
+        let created = materialize_boards_projects(&cfg, &dir);
+        assert!(created.is_empty());
+
+        let content = std::fs::read_to_string(dir.join("infra-board/board.yaml")).unwrap();
+        assert!(content.contains("Custom"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
