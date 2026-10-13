@@ -486,29 +486,36 @@ fn check_lane_order(cfg: &lanes::config::Config) -> Check {
         .collect();
 
     if unknown.is_empty() && missing.is_empty() {
-        Check {
+        return Check {
             label: "lane order",
             status: Status::Ok,
             message: "lanes.toml `order` covers exactly the configured lanes".to_string(),
             hint: None,
-        }
-    } else {
-        let mut parts = Vec::new();
-        if !unknown.is_empty() {
-            parts.push(format!("order lists unknown lane id(s): {}", unknown.join(", ")));
-        }
-        if !missing.is_empty() {
-            parts.push(format!("lane(s) missing from order (sorted alphabetically last): {}", missing.join(", ")));
-        }
-        Check {
-            label: "lane order",
-            status: Status::Warn,
-            message: parts.join("; "),
-            hint: Some(
-                "not auto-fixed - edit `order` in ~/.config/lanes.toml by hand to match \
-                 the current set of lane ids.".to_string()
-            ),
-        }
+        };
+    }
+
+    let mut parts = Vec::new();
+    if !unknown.is_empty() {
+        parts.push(format!("order lists unknown lane id(s): {}", unknown.join(", ")));
+    }
+    if !missing.is_empty() {
+        parts.push(format!("context(s) missing from order (sorted alphabetically last): {}", missing.join(", ")));
+    }
+
+    // A context directory not registered in `order` works fine at runtime
+    // (it just sorts last, alphabetically) but is a real registration gap -
+    // fail doctor so it gets noticed, same as any other config that's
+    // tolerated at runtime but enforced at startup/doctor time.
+    let status = if missing.is_empty() { Status::Warn } else { Status::Fail };
+
+    Check {
+        label: "lane order",
+        status,
+        message: parts.join("; "),
+        hint: Some(
+            "not auto-fixed - edit `order` in ~/.config/lanes.toml by hand to match \
+             the current set of context ids.".to_string()
+        ),
     }
 }
 
@@ -1097,13 +1104,25 @@ mod tests {
     }
 
     #[test]
-    fn lane_order_warns_on_missing_lane() {
+    fn lane_order_fails_on_missing_lane() {
         let cfg = test_config_with_order(
             vec![lane("infra", "Infra", true, "infra"), lane("lanes-dev", "Lanes Dev", true, "lanes")],
             vec!["infra"],
         );
         let check = check_lane_order(&cfg);
-        assert!(matches!(check.status, Status::Warn));
+        assert!(matches!(check.status, Status::Fail));
+        assert!(check.message.contains("lanes-dev"));
+    }
+
+    #[test]
+    fn lane_order_fails_when_both_unknown_and_missing() {
+        let cfg = test_config_with_order(
+            vec![lane("infra", "Infra", true, "infra"), lane("lanes-dev", "Lanes Dev", true, "lanes")],
+            vec!["infra", "ghost"],
+        );
+        let check = check_lane_order(&cfg);
+        assert!(matches!(check.status, Status::Fail));
+        assert!(check.message.contains("ghost"));
         assert!(check.message.contains("lanes-dev"));
     }
 
