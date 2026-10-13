@@ -539,6 +539,23 @@ pub fn run() {
 
             lanes::logging::init_state();
 
+            // Fail-fast, mirroring lensd's main(): a context directory
+            // missing from lanes.toml `order` still works at runtime (it
+            // just sorts last), but refuse to show a dashboard over an
+            // unregistered context rather than silently tolerating the gap.
+            // Once already running, the fs watcher noticing a *newly*
+            // unregistered context must not take the app down - this check
+            // only runs here, at startup.
+            let startup_cfg = lanes::config::Config::load();
+            let unregistered = startup_cfg.unregistered_contexts();
+            if !unregistered.is_empty() {
+                return Err(format!(
+                    "context(s) missing from `order` in ~/.config/lanes.toml: {}. \
+                     Run `lanes doctor` and add them to `order` before starting Switch UI.",
+                    unregistered.join(", ")
+                ).into());
+            }
+
             let lensd_handle = app.handle().clone();
             let lensd = lanes::lensd::Client::start(lanes::lensd::default_socket(), move || {
                 lensd_handle.emit("sessions-changed", ()).ok();

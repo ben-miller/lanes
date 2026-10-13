@@ -63,6 +63,22 @@ impl Config {
     pub fn lane_for_session(&self, session: &str) -> Option<&Lane> {
         self.lanes.iter().find(|l| l.terminal_session() == Some(session))
     }
+
+    /// Context ids present as directories but absent from `order`. Doesn't
+    /// break anything at runtime (`sort_by_order`'s fallback still places
+    /// them, alphabetically, after any listed ones) but is the registration
+    /// gap `lanes doctor` and switch-ui's startup check both treat as fatal -
+    /// see PLAN-context-model.md point 7.
+    pub fn unregistered_contexts(&self) -> Vec<&str> {
+        let Some(order) = &self.order else {
+            return Vec::new();
+        };
+        self.lanes
+            .iter()
+            .map(|l| l.id.as_str())
+            .filter(|id| !order.iter().any(|o| o == id))
+            .collect()
+    }
 }
 
 /// Flip a context's `active` flag in its `lane.toml` facet, in place. Uses
@@ -367,6 +383,33 @@ mod tests {
             launch: false,
             raise: false,
         }
+    }
+
+    fn config_with(lanes: Vec<Lane>, order: Option<Vec<&str>>) -> Config {
+        Config {
+            drivers: None,
+            monitors: HashMap::new(),
+            order: order.map(|o| o.into_iter().map(String::from).collect()),
+            lanes,
+        }
+    }
+
+    #[test]
+    fn unregistered_contexts_is_empty_when_order_is_none() {
+        let cfg = config_with(vec![lane("infra")], None);
+        assert_eq!(cfg.unregistered_contexts(), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn unregistered_contexts_is_empty_when_order_covers_every_lane() {
+        let cfg = config_with(vec![lane("infra"), lane("lanes-dev")], Some(vec!["infra", "lanes-dev"]));
+        assert_eq!(cfg.unregistered_contexts(), Vec::<&str>::new());
+    }
+
+    #[test]
+    fn unregistered_contexts_lists_lanes_missing_from_order() {
+        let cfg = config_with(vec![lane("infra"), lane("lanes-dev")], Some(vec!["infra"]));
+        assert_eq!(cfg.unregistered_contexts(), vec!["lanes-dev"]);
     }
 
     #[test]

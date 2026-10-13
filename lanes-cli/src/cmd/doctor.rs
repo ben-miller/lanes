@@ -480,10 +480,7 @@ fn check_lane_order(cfg: &lanes::config::Config) -> Check {
         .map(|id| id.as_str())
         .filter(|id| !cfg.lanes.iter().any(|l| &l.id == id))
         .collect();
-    let missing: Vec<&str> = cfg.lanes.iter()
-        .map(|l| l.id.as_str())
-        .filter(|id| !order.iter().any(|o| o == id))
-        .collect();
+    let missing = cfg.unregistered_contexts();
 
     if unknown.is_empty() && missing.is_empty() {
         return Check {
