@@ -1467,6 +1467,26 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
             }
         }
 
+        // A minimize request never activates/raises first - doing so would
+        // just bring the window forward right before hiding it again - and
+        // never places, so it short-circuits before all of that.
+        if let Some(minimized) = target.minimized {
+            let Some(bundle_id) = target_bundle_id(&target.driver) else {
+                let e = format!(
+                    "target '{}' has `minimized` set but its driver can't be addressed by bundle id",
+                    target.driver.name()
+                );
+                eprintln!("warning: {e}");
+                warnings.push(e);
+                continue;
+            };
+            let mut placement = serde_json::Map::new();
+            placement.insert("app".to_string(), serde_json::json!(bundle_id));
+            placement.insert("minimized".to_string(), serde_json::json!(minimized));
+            placements.push(serde_json::Value::Object(placement));
+            continue;
+        }
+
         // Only raise an `app` target's window when it isn't being placed,
         // unless the target explicitly asks to be raised anyway (a "peek"
         // app that also wants placement) - see activate_target's doc

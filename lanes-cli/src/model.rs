@@ -73,6 +73,13 @@ pub struct Target {
     /// purpose is to be glanced at.
     #[serde(default)]
     pub raise: bool,
+    /// Minimize (true) or de-minimize (false) this target's window via
+    /// lanes-wm's kAXMinimizedAttribute support, instead of placing it -
+    /// mutually exclusive with `monitor`/`position` (lanes-wm rejects a
+    /// target setting both). For a window you never want to see, e.g. one
+    /// an app insists on keeping open but has no actual use for.
+    #[serde(default)]
+    pub minimized: Option<bool>,
 }
 
 /// Which app-specific mechanism activates this target, and that

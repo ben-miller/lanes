@@ -1058,6 +1058,7 @@ mod tests {
             position: None,
             launch: false,
             raise: false,
+            minimized: None,
         }
     }
 
@@ -1072,6 +1073,7 @@ mod tests {
             position: None,
             launch: false,
             raise: false,
+            minimized: None,
         }
     }
 

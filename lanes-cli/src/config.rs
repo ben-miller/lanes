@@ -375,6 +375,7 @@ mod tests {
             position: Some(toml::Value::String("full".to_string())),
             launch: false,
             raise: false,
+            minimized: None,
         }
     }
 
@@ -385,6 +386,7 @@ mod tests {
             position: None,
             launch: false,
             raise: false,
+            minimized: None,
         }
     }
 
@@ -551,6 +553,21 @@ position = "full"
         assert_eq!(file.targets[0].driver.name(), "wezterm");
         assert_eq!(file.targets[0].monitor.as_deref(), Some("lg-right"));
         assert!(matches!(&file.targets[0].driver, crate::model::TargetDriver::Wezterm { session } if session.as_deref() == Some("lanes")));
+    }
+
+    #[test]
+    fn parses_layout_toml_with_a_minimized_target_and_no_monitor() {
+        let content = r#"
+[[targets]]
+driver = "app"
+name = "Wispr Flow"
+bundle_id = "com.electron.wispr-flow.accessibility-mac-app"
+minimized = true
+"#;
+        let file: LayoutToml = toml::from_str(content).unwrap();
+        assert_eq!(file.targets.len(), 1);
+        assert_eq!(file.targets[0].minimized, Some(true));
+        assert_eq!(file.targets[0].monitor, None);
     }
 
     #[test]

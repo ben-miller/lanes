@@ -80,6 +80,16 @@ profile = "job-hunting"
 position = { cols = 3, col = [1, 2] }
 ```
 
+A target can minimize instead of place - `minimized = true`, no `monitor`/`position` (mutually exclusive with them). Good for a window an app insists on keeping open but that has no actual use, e.g. Wispr Flow's:
+
+```toml
+[[targets]]
+driver = "app"
+name = "Wispr Flow"
+bundle_id = "com.electron.wispr-flow.accessibility-mac-app"
+minimized = true
+```
+
 Example `board.toml` (a single target, not an array - the Boards projection for this context):
 
 ```toml

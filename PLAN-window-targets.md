@@ -112,6 +112,18 @@ overrides the inferred default - `raise_app = target.monitor.is_none() ||
 target.raise`. Found by testing live: the Japanese peek app, given a
 `monitor` for the first time, stopped showing at all until this was added.
 
+## Minimizing instead of placing (added 2026-10-14)
+
+`Target.minimized: Option<bool>`, mutually exclusive with `monitor`/
+`position` - for a window an app insists on keeping open but that's never
+actually useful (Wispr Flow, the motivating case: it has no window at rest,
+only while actively in use, and that window has no reason to ever be seen).
+`apply_targets` short-circuits on it before the activate/raise step - no
+raising a window right before hiding it again - and sends lanes-wm a
+minimize-only request (`{"app": "...", "minimized": true}`), which sets
+`kAXMinimizedAttribute` directly rather than moving/resizing. See the
+lanes-cli and lanes-wm READMEs for the current field-level detail.
+
 ## App-not-running behavior
 
 Whether a target auto-launches its app is explicit per-target config, not a
