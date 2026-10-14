@@ -1063,7 +1063,7 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     fn test_config(lanes: Vec<Lane>) -> Config {
-        Config { drivers: None, monitors: HashMap::new(), order: None, lanes }
+        Config { drivers: None, monitors: HashMap::new(), order: None, cycle_policy: lanes::model::CyclePolicy::default(), lanes }
     }
 
     fn lane(id: &str, name: &str, active: bool, session: &str) -> Lane {
@@ -1268,6 +1268,7 @@ mod tests {
             drivers: None,
             monitors: HashMap::new(),
             order: Some(order.into_iter().map(String::from).collect()),
+            cycle_policy: lanes::model::CyclePolicy::default(),
             lanes,
         }
     }

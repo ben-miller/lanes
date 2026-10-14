@@ -588,7 +588,7 @@ mod tests {
     }
 
     fn cfg_with(lane: crate::model::Lane) -> Config {
-        Config { drivers: None, monitors: HashMap::new(), order: None, lanes: vec![lane] }
+        Config { drivers: None, monitors: HashMap::new(), order: None, cycle_policy: crate::model::CyclePolicy::default(), lanes: vec![lane] }
     }
 
     fn lane() -> crate::model::Lane {

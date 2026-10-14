@@ -98,6 +98,15 @@ enum Command {
         command: LaneCycleCommand,
     },
 
+    /// Cycle using whichever policy `cycle_policy` names in the global
+    /// lanes.toml (default: Claude sessions, same as `sessions next`/
+    /// `prev`) - this is what a cycling hotkey should actually call, so
+    /// switching policies means editing config, not rebinding keys.
+    Cycle {
+        #[command(subcommand)]
+        command: CycleCommand,
+    },
+
     /// Manage the Zellij session -> WezTerm tab ID cache
     Tabs {
         #[command(subcommand)]
@@ -241,6 +250,21 @@ enum LaneCycleCommand {
     },
 
     /// Focus the previous active, reachable lane, cycling
+    Prev {
+        #[arg(long)]
+        show: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum CycleCommand {
+    /// Cycle forward using the configured policy
+    Next {
+        #[arg(long)]
+        show: bool,
+    },
+
+    /// Cycle backward using the configured policy
     Prev {
         #[arg(long)]
         show: bool,
@@ -421,6 +445,28 @@ fn main() {
                     lanes::notify_switch_show();
                 }
                 if let Err(e) = lanes::cycle_lane(-1) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        },
+
+        Command::Cycle { command } => match command {
+            CycleCommand::Next { show } => {
+                if show {
+                    lanes::notify_switch_show();
+                }
+                if let Err(e) = lanes::cycle(1) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            CycleCommand::Prev { show } => {
+                if show {
+                    lanes::notify_switch_show();
+                }
+                if let Err(e) = lanes::cycle(-1) {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
                 }

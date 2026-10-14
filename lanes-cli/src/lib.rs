@@ -1020,6 +1020,20 @@ pub fn cycle_lane(direction: i32) -> Result<(), String> {
     focus_lane(ids[idx])
 }
 
+/// The one entry point a cycling hotkey should actually call - dispatches
+/// to whichever policy `cycle_policy` names in the global `lanes.toml`
+/// (default: `ClaudeSessions`, today's existing behavior). One policy or
+/// the other, never both at once - see `CyclePolicy`'s own doc comment.
+/// `cycle_claude_session`/`cycle_lane` stay directly callable too (as
+/// `sessions next`/`prev` and `lane-cycle next`/`prev`) for testing a
+/// specific policy regardless of what's currently configured.
+pub fn cycle(direction: i32) -> Result<(), String> {
+    match config::Config::load().cycle_policy {
+        model::CyclePolicy::ClaudeSessions => cycle_claude_session(direction),
+        model::CyclePolicy::Lanes => cycle_lane(direction),
+    }
+}
+
 /// A Zellij session's position in `cfg.lanes` (already sorted by lanes.toml's
 /// `order` in `Config::load`) - `cfg.lanes.len()` for anything not found, so
 /// unmatched sessions sort after every real lane rather than interleaving
@@ -2218,7 +2232,7 @@ mod tests {
     }
 
     fn test_config(lanes: Vec<model::Lane>) -> config::Config {
-        config::Config { drivers: None, monitors: std::collections::HashMap::new(), order: None, lanes }
+        config::Config { drivers: None, monitors: std::collections::HashMap::new(), order: None, cycle_policy: model::CyclePolicy::default(), lanes }
     }
 
     fn lane_with_target(id: &str, target: model::Target) -> model::Lane {

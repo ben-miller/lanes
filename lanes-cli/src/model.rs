@@ -2,6 +2,20 @@ use serde::{Deserialize, Serialize};
 
 use crate::scope::ScopeElement;
 
+/// Which candidate list `lanes cycle next`/`prev` steps through - one or
+/// the other, never both at once (see PLAN-context-model.md's cycling
+/// discussion: multiple policies are meant to coexist as separate,
+/// deliberately-invoked commands/hotkeys, not blended into one). Set via
+/// `cycle_policy` in the global `lanes.toml`; defaults to `ClaudeSessions`
+/// so an existing config with no opinion keeps today's exact behavior.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "kebab-case")]
+pub enum CyclePolicy {
+    #[default]
+    ClaudeSessions,
+    Lanes,
+}
+
 // --- Lane config types ---
 
 #[derive(Clone, Debug, Serialize, Deserialize)]

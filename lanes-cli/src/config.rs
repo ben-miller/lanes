@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use crate::model::{Lane, Target, TargetDriver};
+use crate::model::{CyclePolicy, Lane, Target, TargetDriver};
 use crate::scope::ScopeElement;
 
 #[derive(Clone)]
@@ -21,13 +21,16 @@ pub struct Config {
     /// Lane display order, from lanes.toml `order` (list of lane ids). Lanes
     /// not listed fall back to alphabetical-by-id, after any listed ones.
     pub order: Option<Vec<String>>,
+    /// Which candidate list `lanes cycle` steps through - see
+    /// `CyclePolicy`'s own doc comment.
+    pub cycle_policy: CyclePolicy,
     /// Discovered lane definitions.
     pub lanes: Vec<Lane>,
 }
 
 impl Config {
     pub fn load() -> Self {
-        let (drivers, monitors, order) = load_global_config();
+        let (drivers, monitors, order, cycle_policy) = load_global_config();
         // Top-level layout.toml supplies the defaults every context's own
         // layout.toml cascades on top of (merge_targets) - same file name
         // at both levels, deliberately: one is "defaults", the other is
@@ -37,7 +40,7 @@ impl Config {
         if let Some(order) = &order {
             sort_by_order(&mut lanes, order);
         }
-        Self { drivers, monitors, order, lanes }
+        Self { drivers, monitors, order, cycle_policy, lanes }
     }
 
     pub fn monitor_uuid(&self, handle: &str) -> Option<&str> {
@@ -117,6 +120,7 @@ impl Default for Config {
             drivers: None,
             monitors: HashMap::new(),
             order: None,
+            cycle_policy: CyclePolicy::default(),
             lanes: Vec::new(),
         }
     }
@@ -146,6 +150,8 @@ struct GlobalConfig {
     monitors: HashMap<String, MonitorConfigRaw>,
     #[serde(default)]
     order: Option<Vec<String>>,
+    #[serde(default)]
+    cycle_policy: CyclePolicy,
 }
 
 #[derive(Deserialize)]
@@ -218,22 +224,22 @@ impl From<ScopeElementRaw> for ScopeElement {
 
 // --- Loaders ---
 
-type GlobalConfigLoaded = (Option<Vec<String>>, HashMap<String, MonitorConfig>, Option<Vec<String>>);
+type GlobalConfigLoaded = (Option<Vec<String>>, HashMap<String, MonitorConfig>, Option<Vec<String>>, CyclePolicy);
 
 fn load_global_config() -> GlobalConfigLoaded {
     let path = config_dir().join("lanes.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return (None, HashMap::new(), None),
+        Err(_) => return (None, HashMap::new(), None, CyclePolicy::default()),
     };
     let cfg: GlobalConfig = match toml::from_str(&content) {
         Ok(c) => c,
-        Err(_) => return (None, HashMap::new(), None),
+        Err(_) => return (None, HashMap::new(), None, CyclePolicy::default()),
     };
     let monitors = cfg.monitors.into_iter()
         .map(|(k, v)| (k, MonitorConfig { uuid: v.uuid, name: v.name }))
         .collect();
-    (cfg.drivers, monitors, cfg.order)
+    (cfg.drivers, monitors, cfg.order, cfg.cycle_policy)
 }
 
 /// A target's identity for cascade purposes: a lane's own target overrides
@@ -397,6 +403,7 @@ mod tests {
             drivers: None,
             monitors: HashMap::new(),
             order: order.map(|o| o.into_iter().map(String::from).collect()),
+            cycle_policy: CyclePolicy::default(),
             lanes,
         }
     }
@@ -478,6 +485,24 @@ mod tests {
             cfg.drivers,
             Some(vec!["zellij".to_string(), "claude".to_string()])
         );
+    }
+
+    #[test]
+    fn global_config_cycle_policy_defaults_to_claude_sessions_when_absent() {
+        let cfg: super::GlobalConfig = toml::from_str("").unwrap();
+        assert_eq!(cfg.cycle_policy, CyclePolicy::ClaudeSessions);
+    }
+
+    #[test]
+    fn global_config_parses_cycle_policy_lanes() {
+        let cfg: super::GlobalConfig = toml::from_str(r#"cycle_policy = "lanes""#).unwrap();
+        assert_eq!(cfg.cycle_policy, CyclePolicy::Lanes);
+    }
+
+    #[test]
+    fn global_config_parses_cycle_policy_claude_sessions_explicitly() {
+        let cfg: super::GlobalConfig = toml::from_str(r#"cycle_policy = "claude-sessions""#).unwrap();
+        assert_eq!(cfg.cycle_policy, CyclePolicy::ClaudeSessions);
     }
 
     #[test]
@@ -658,6 +683,7 @@ raise = true
             drivers: Some(vec!["zellij".to_string(), "claude".to_string()]),
             monitors: HashMap::new(),
             order: None,
+            cycle_policy: CyclePolicy::default(),
             lanes: Vec::new(),
         };
         assert!(cfg.driver_enabled("zellij"));
@@ -678,6 +704,7 @@ raise = true
             drivers: None,
             monitors: HashMap::new(),
             order: None,
+            cycle_policy: CyclePolicy::default(),
             lanes: vec![
                 Lane {
                     id: "sheetwork".to_string(),
@@ -706,6 +733,7 @@ raise = true
             drivers: None,
             monitors: HashMap::new(),
             order: None,
+            cycle_policy: CyclePolicy::default(),
             lanes: vec![
                 Lane {
                     id: "sheetwork1".to_string(),
