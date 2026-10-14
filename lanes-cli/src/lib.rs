@@ -1614,6 +1614,67 @@ fn run_lanes_wm_apply(placements: &[serde_json::Value]) -> Vec<String> {
         .collect()
 }
 
+fn focused_lane<'a>(cfg: &'a config::Config, focused_id: Option<&str>) -> Option<&'a model::Lane> {
+    let id = focused_id?;
+    cfg.lanes.iter().find(|l| l.id == id)
+}
+
+/// The focused lane's own target for a given driver, if either the lane or
+/// the target exists - pulled out of `activate_context` as a pure function
+/// (no process/state I/O) so the actual lookup logic is testable without
+/// a live focused-lane file or real config directory.
+fn context_target<'a>(cfg: &'a config::Config, focused_id: Option<&str>, driver_name: &str) -> Option<&'a model::Target> {
+    focused_lane(cfg, focused_id)?.targets.iter().find(|t| t.driver.name() == driver_name)
+}
+
+/// Activate whichever target the *currently focused* lane has for the
+/// given driver (e.g. "obsidian", "firefox-profile"), independent of lane
+/// switching - this is what a context-aware hotkey (Hammerspoon's K/O)
+/// calls on every press, not just on `lanes focus`. Deliberately
+/// activation-only: never applies the target's placement, since re-moving
+/// a window on every keypress would be a jarring side effect the hotkey
+/// never asked for - raising is as far as this goes.
+///
+/// Falls back to a plain `open -a` of a sensible default app when there's
+/// no focused lane, or the focused lane has no target for this driver -
+/// the same bare behavior the hotkey had before it became context-aware,
+/// so "no better answer available" is never worse than today.
+pub fn activate_context(driver_name: &str) -> Result<(), String> {
+    let cfg = config::Config::load();
+    let focused = state::read_focused_lane();
+    let target = context_target(&cfg, focused.as_deref(), driver_name);
+
+    let Some(target) = target else {
+        return fallback_activate(driver_name);
+    };
+
+    let default_session = focused_lane(&cfg, focused.as_deref()).and_then(|l| l.terminal_session());
+    let resolved_pid = activate_target(&target.driver, true, default_session, target.launch)?;
+
+    // activate_target resolves a firefox-profile target's pid but never
+    // raises it - raising normally only happens as a side effect of
+    // apply_targets' placement batch (see its own comment on this), a step
+    // this function deliberately skips. Make up for that here instead,
+    // since the whole point of this path is bringing the right window
+    // forward right now.
+    if let Some(pid) = resolved_pid {
+        let warnings = run_lanes_wm_apply(&[serde_json::json!({ "pid": pid, "raise": true })]);
+        if let Some(w) = warnings.into_iter().next() {
+            return Err(w);
+        }
+    }
+    Ok(())
+}
+
+fn fallback_activate(driver_name: &str) -> Result<(), String> {
+    let app_name = match driver_name {
+        "obsidian" => "Obsidian",
+        "firefox-profile" => "Firefox",
+        other => return Err(format!("no fallback activation for driver '{other}'")),
+    };
+    run_command_checked(std::process::Command::new("open").args(["-a", app_name]), "open -a")
+}
+
 /// Resolve a lane id: use `explicit` if given, otherwise fall back to
 /// `$ZELLIJ_SESSION_NAME` and find the lane whose Terminal facet matches it.
 /// Used by `focus`, `activate`, and `deactivate` so all three can be run
@@ -2038,6 +2099,55 @@ mod tests {
 
     fn test_config(lanes: Vec<model::Lane>) -> config::Config {
         config::Config { drivers: None, monitors: std::collections::HashMap::new(), order: None, lanes }
+    }
+
+    fn lane_with_target(id: &str, target: model::Target) -> model::Lane {
+        model::Lane {
+            id: id.to_string(),
+            name: id.to_string(),
+            active: true,
+            scope: vec![],
+            targets: vec![target],
+        }
+    }
+
+    fn obsidian_target(vault: &str) -> model::Target {
+        model::Target {
+            driver: model::TargetDriver::Obsidian { vault: vault.to_string() },
+            monitor: None,
+            position: None,
+            launch: false,
+            raise: false,
+            minimized: None,
+        }
+    }
+
+    #[test]
+    fn context_target_none_when_no_lane_is_focused() {
+        let cfg = test_config(vec![lane_with_target("infra", obsidian_target("Dev"))]);
+        assert!(context_target(&cfg, None, "obsidian").is_none());
+    }
+
+    #[test]
+    fn context_target_none_when_focused_lane_has_no_matching_driver() {
+        let cfg = test_config(vec![lane_with_target("infra", obsidian_target("Dev"))]);
+        assert!(context_target(&cfg, Some("infra"), "firefox-profile").is_none());
+    }
+
+    #[test]
+    fn context_target_finds_the_focused_lanes_target() {
+        let cfg = test_config(vec![
+            lane_with_target("infra", obsidian_target("Dev")),
+            lane_with_target("job-hunting", obsidian_target("Planning")),
+        ]);
+        let target = context_target(&cfg, Some("job-hunting"), "obsidian").unwrap();
+        assert!(matches!(&target.driver, model::TargetDriver::Obsidian { vault } if vault == "Planning"));
+    }
+
+    #[test]
+    fn context_target_none_when_focused_lane_id_is_not_in_config() {
+        let cfg = test_config(vec![lane_with_target("infra", obsidian_target("Dev"))]);
+        assert!(context_target(&cfg, Some("nonexistent"), "obsidian").is_none());
     }
 
     #[test]

@@ -75,6 +75,15 @@ enum Command {
         name: bool,
     },
 
+    /// Activate whichever target the currently focused lane has for the
+    /// given driver (e.g. "obsidian", "firefox-profile") - for a context-
+    /// aware hotkey, not lane switching (that's the unrelated `activate`,
+    /// which marks a lane active in its config). Falls back to a plain app
+    /// launch when there's no focused lane or no matching target.
+    ActivateDriver {
+        driver: String,
+    },
+
     /// Manage Claude sessions
     Sessions {
         #[command(subcommand)]
@@ -274,6 +283,13 @@ fn main() {
                     eprintln!("no focused lane");
                     std::process::exit(1);
                 }
+            }
+        }
+
+        Command::ActivateDriver { driver } => {
+            if let Err(e) = lanes::activate_context(&driver) {
+                eprintln!("error: {e}");
+                std::process::exit(1);
             }
         }
 
