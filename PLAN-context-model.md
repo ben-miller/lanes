@@ -95,8 +95,10 @@ with:**
   rather than coupling Boards to this project.
 
 **6. Ordering lives in exactly one place: the existing top-level `order`**
-(in `~/.config/lanes.toml`, sibling to the context directories) - not a new
-mechanism, just enforcement of the one that's already there. `ztabs` and
+(in `~/.config/lanes.toml`, sibling to the context directories - moved to
+`~/.config/lanes/lanes.toml` on 2026-10-14, see PLAN-window-targets.md's own
+note on this) - not a new mechanism, just enforcement of the one that's
+already there. `ztabs` and
 the Boards-materialization step both read *this* list rather than ever
 inventing their own sequence (today's `zellij-tabs.toml` tab order is
 exactly that already-happening problem, just never named as one).

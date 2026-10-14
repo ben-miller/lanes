@@ -217,8 +217,7 @@ impl From<ScopeElementRaw> for ScopeElement {
 type GlobalConfigLoaded = (Option<Vec<String>>, HashMap<String, MonitorConfig>, Option<Vec<String>>, Vec<Target>);
 
 fn load_global_config() -> GlobalConfigLoaded {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let path = PathBuf::from(home).join(".config").join("lanes.toml");
+    let path = config_dir().join("lanes.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
         Err(_) => return (None, HashMap::new(), None, Vec::new()),

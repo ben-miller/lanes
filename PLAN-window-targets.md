@@ -45,11 +45,16 @@ position = "left-half"  # optional, requires monitor
 ```
 
 `monitor` is a handle resolved against `[monitors.<handle>]` in the global
-`~/.config/lanes.toml` (a flat file, sibling to the `lanes/` directory - not
-`~/.config/lanes/lanes.toml` as an earlier draft of this doc said). It
-already exists with `lg-left`/`lg-right` entries; `main` (the built-in
-display) has been added alongside them. `position` is one of lanes-wm's
-five presets (`full`/`left-half`/`right-half`/`top-half`/`bottom-half`).
+config. At the time this was written that lived at `~/.config/lanes.toml`,
+a flat file sibling to the `lanes/` directory; **as of 2026-10-14 it's moved
+to `~/.config/lanes/lanes.toml`**, matching the broader `~/.config`
+convention of one app directory holding both its main config file and any
+per-item subdirectory (e.g. Zellij's own `~/.config/zellij/config.kdl`
+beside `layouts/`) - see `lanes-cli/src/config.rs`'s `load_global_config`
+for the current, authoritative path. It already exists with
+`lg-left`/`lg-right` entries; `main` (the built-in display) has been added
+alongside them. `position` is one of lanes-wm's five presets
+(`full`/`left-half`/`right-half`/`top-half`/`bottom-half`).
 
 ## Drivers (v1)
 

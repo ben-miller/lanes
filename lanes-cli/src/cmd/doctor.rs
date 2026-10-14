@@ -521,7 +521,7 @@ fn check_lane_order(cfg: &lanes::config::Config) -> Check {
         status,
         message: parts.join("; "),
         hint: Some(
-            "not auto-fixed - edit `order` in ~/.config/lanes.toml by hand to match \
+            "not auto-fixed - edit `order` in ~/.config/lanes/lanes.toml by hand to match \
              the current set of context ids.".to_string()
         ),
     }
@@ -590,7 +590,7 @@ fn check_lane_order_vs_ztabs(cfg: &lanes::config::Config) -> Check {
                 ztabs_side.join(", ")
             ),
             hint: Some(
-                "not auto-fixed - edit `order` in ~/.config/lanes.toml or the tab order in \
+                "not auto-fixed - edit `order` in ~/.config/lanes/lanes.toml or the tab order in \
                  ~/.config/infra/zellij-tabs.toml so the two agree."
                     .to_string(),
             ),
@@ -765,7 +765,7 @@ fn check_monitor_config(cfg: &lanes::config::Config) -> Check {
             label: "monitor config",
             status: Status::Warn,
             message: format!("handle(s) not matching any currently-attached display: {}", stale.join(", ")),
-            hint: Some("reconnect the display, or update the UUID in ~/.config/lanes.toml (see `lanes-wm monitors` for current UUIDs)".to_string()),
+            hint: Some("reconnect the display, or update the UUID in ~/.config/lanes/lanes.toml (see `lanes-wm monitors` for current UUIDs)".to_string()),
         }
     }
 }

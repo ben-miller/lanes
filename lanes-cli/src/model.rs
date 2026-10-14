@@ -51,7 +51,7 @@ impl Lane {
 pub struct Target {
     #[serde(flatten)]
     pub driver: TargetDriver,
-    /// Monitor handle, resolved against `[monitors.*]` in `~/.config/lanes.toml`.
+    /// Monitor handle, resolved against `[monitors.*]` in `~/.config/lanes/lanes.toml`.
     /// None if this target only activates, no placement.
     #[serde(default)]
     pub monitor: Option<String>,

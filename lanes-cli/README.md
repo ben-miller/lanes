@@ -13,7 +13,7 @@ lanes sessions get <id>  Get a single Claude session by ID
 
 ## Configuration
 
-`~/.config/lanes.toml` is the global config. It declares which drivers to run, the order contexts should sort in, and default `[[targets]]`:
+`~/.config/lanes/lanes.toml` is the global config - a plain preferences file living alongside the context directories, same as e.g. Zellij's own `~/.config/zellij/config.kdl` sits beside its `layouts/`. It declares which drivers to run, the order contexts should sort in, and default `[[targets]]`:
 
 ```toml
 drivers = ["zellij", "claude"]
@@ -28,6 +28,7 @@ Each context is a directory under `~/.config/lanes/<id>/`. The directory name *i
 
 ```
 ~/.config/lanes/
+  lanes.toml       # global config - see above
   job-hunting/
     lane.toml      # switcher-UI view: display name, active/cyclable
     tab.toml       # Zellij session name + repo/cwd scope

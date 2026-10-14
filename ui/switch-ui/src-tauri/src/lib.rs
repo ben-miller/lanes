@@ -287,7 +287,7 @@ mod tests {
             Path::new("/home/x/.claude/active-sessions"),
             state_dir,
             Path::new("/home/x/.config/lanes"),
-            Path::new("/home/x/.config/lanes.toml"),
+            Path::new("/home/x/.config/lanes/lanes.toml"),
             &state_dir.join("state.kdl"),
         ));
     }
@@ -306,7 +306,7 @@ mod tests {
                     Path::new("/home/x/.claude/active-sessions"),
                     state_dir,
                     Path::new("/home/x/.config/lanes"),
-                    Path::new("/home/x/.config/lanes.toml"),
+                    Path::new("/home/x/.config/lanes/lanes.toml"),
                     &state_dir.join(name),
                 ),
                 "{name} should not be treated as relevant"
@@ -327,7 +327,7 @@ mod tests {
                 Path::new("/home/x/.claude/active-sessions"),
                 state_dir,
                 Path::new("/home/x/.config/lanes"),
-                Path::new("/home/x/.config/lanes.toml"),
+                Path::new("/home/x/.config/lanes/lanes.toml"),
                 &state_dir.join("state.kdl.tmp"),
             ),
             "a state.kdl.tmp write should not be treated as relevant"
@@ -338,7 +338,7 @@ mod tests {
             Path::new("/home/x/.claude/active-sessions"),
             state_dir,
             Path::new("/home/x/.config/lanes"),
-            Path::new("/home/x/.config/lanes.toml"),
+            Path::new("/home/x/.config/lanes/lanes.toml"),
             &state_dir.join("state.kdl"),
         ));
     }
@@ -352,7 +352,7 @@ mod tests {
             Path::new("/home/x/.claude/active-sessions"),
             Path::new("/home/x/.local/state/lanes"),
             cfg_dir,
-            Path::new("/home/x/.config/lanes.toml"),
+            Path::new("/home/x/.config/lanes/lanes.toml"),
             p,
         );
         assert!(!args(&cfg_dir.join("lanes-wm.toml.tmp")));
@@ -373,7 +373,7 @@ mod tests {
                 Path::new("/home/x/.claude/active-sessions"),
                 state_dir,
                 Path::new("/home/x/.config/lanes"),
-                Path::new("/home/x/.config/lanes.toml"),
+                Path::new("/home/x/.config/lanes/lanes.toml"),
                 &state_dir.join("cache").join("list-panes-formation.json"),
             ),
             "a cache/ write should not be treated as relevant"
@@ -449,7 +449,11 @@ fn watch_paths(
     let sessions_dir = PathBuf::from(&home).join(".claude").join("active-sessions");
     let state_dir = PathBuf::from(&home).join(".local/state/lanes");
     let lanes_config_dir = lanes::config::config_dir();
-    let global_config_path = PathBuf::from(&home).join(".config").join("lanes.toml");
+    // Nested inside lanes_config_dir now (~/.config/lanes/lanes.toml), so
+    // watching lanes_config_dir already covers it - kept as its own
+    // variable/watch anyway since is_relevant_change compares against it by
+    // exact path, independent of how it happens to be laid out on disk.
+    let global_config_path = lanes_config_dir.join("lanes.toml");
 
     let cfg = lanes::config::Config::load();
     let repo_watches: Vec<RepoWatch> = cfg.lanes.iter()
@@ -550,7 +554,7 @@ pub fn run() {
             let unregistered = startup_cfg.unregistered_contexts();
             if !unregistered.is_empty() {
                 return Err(format!(
-                    "context(s) missing from `order` in ~/.config/lanes.toml: {}. \
+                    "context(s) missing from `order` in ~/.config/lanes/lanes.toml: {}. \
                      Run `lanes doctor` and add them to `order` before starting Switch UI.",
                     unregistered.join(", ")
                 ).into());
