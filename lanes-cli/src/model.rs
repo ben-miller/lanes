@@ -154,14 +154,6 @@ pub enum TargetDriver {
         #[serde(default)]
         bundle_id: Option<String>,
     },
-    /// Switch to a specific Firefox profile - addressed by the name you
-    /// gave it in Firefox's own profile switcher (Firefox's newer built-in
-    /// "Profiles" feature, not the legacy -P/profiles.ini system). Since
-    /// every profile shares the same bundle ID, this resolves to a
-    /// specific PID (matching a running process's `--profile <path>`
-    /// launch argument, or launching one if none is running) rather than
-    /// going through the bundle-ID-based drivers above.
-    FirefoxProfile { profile: String },
 }
 
 impl TargetDriver {
@@ -177,7 +169,6 @@ impl TargetDriver {
             TargetDriver::Sourcetree { .. } => "sourcetree",
             TargetDriver::Vscode { .. } => "vscode",
             TargetDriver::App { .. } => "app",
-            TargetDriver::FirefoxProfile { .. } => "firefox-profile",
         }
     }
 }

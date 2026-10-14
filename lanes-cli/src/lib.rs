@@ -1261,11 +1261,7 @@ fn target_bundle_id(driver: &model::TargetDriver) -> Option<&str> {
         // "app" has no fixed identity, so placement only works when the
         // config author supplied a bundle_id explicitly.
         model::TargetDriver::App { bundle_id, .. } => bundle_id.as_deref(),
-        // firefox-profile is never placed by bundle ID - every profile
-        // shares the same one, which is exactly the ambiguity it exists to
-        // resolve. It's placed by the PID activate_target resolves instead
-        // (see apply_targets).
-        model::TargetDriver::Zellij { .. } | model::TargetDriver::FirefoxProfile { .. } => None,
+        model::TargetDriver::Zellij { .. } => None,
     }
 }
 
@@ -1293,144 +1289,6 @@ fn run_command_checked(cmd: &mut std::process::Command, label: &str) -> Result<(
     Ok(())
 }
 
-/// Resolve a Firefox profile's display name - as set in Firefox's own
-/// built-in profile switcher (the newer "Profiles" feature, distinct from
-/// the legacy -P/profiles.ini system, which this doesn't touch at all) -
-/// to its on-disk profile directory. Names are stored in a per-install
-/// SQLite database under `Profile Groups/`, queried by shelling out to
-/// `sqlite3` rather than adding a dependency for one query - same pattern
-/// as everything else here (wezterm/zellij/stree are all shelled out to,
-/// not linked against).
-pub fn firefox_profile_path(name: &str) -> Result<String, String> {
-    let groups_dir = expand_tilde("~/Library/Application Support/Firefox/Profile Groups");
-    let entries = std::fs::read_dir(&groups_dir)
-        .map_err(|e| format!("could not read {groups_dir}: {e}"))?;
-    for entry in entries.filter_map(|e| e.ok()) {
-        let path = entry.path();
-        if path.extension().and_then(|e| e.to_str()) != Some("sqlite") {
-            continue;
-        }
-        let output = std::process::Command::new("sqlite3")
-            .arg(&path)
-            .arg(format!("SELECT path FROM Profiles WHERE name = '{}'", name.replace('\'', "''")))
-            .output()
-            .map_err(|e| format!("sqlite3: {e}"))?;
-        let relative = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if !relative.is_empty() {
-            return Ok(expand_tilde(&format!("~/Library/Application Support/Firefox/{relative}")));
-        }
-    }
-    Err(format!("no Firefox profile named '{name}' found in Firefox's profile switcher"))
-}
-
-/// Whether `profile_path` is the profile `profiles.ini` marks as the
-/// default - needed because Firefox's own default profile is normally
-/// launched with no `--profile` flag at all (see `firefox_profile_pid`),
-/// so matching launch arguments alone can't identify it.
-fn is_default_firefox_profile(profile_path: &str) -> bool {
-    let ini_path = expand_tilde("~/Library/Application Support/Firefox/profiles.ini");
-    let Ok(content) = std::fs::read_to_string(&ini_path) else { return false };
-    let Some(default_relative) = content
-        .lines()
-        .find_map(|l| l.strip_prefix("Path=").map(str::trim))
-    else {
-        return false;
-    };
-    profile_path.ends_with(default_relative)
-}
-
-/// Find the PID of a currently-running Firefox process using this exact
-/// profile directory, by matching `--profile <path>` in `ps`'s command
-/// output. Filters to the main `firefox` binary specifically - its helper
-/// processes (plugin-container, gpu-helper, crashhelper) all inherit and
-/// echo the same `-profile <path>` argument in their own command lines, so
-/// a plain substring match without this would find those instead. Falls
-/// back to matching a bare `firefox` process with no `--profile` flag at
-/// all when `profile_path` is Firefox's own default - that's how the
-/// default profile normally launches.
-fn firefox_profile_pid(profile_path: &str) -> Option<u32> {
-    let output = std::process::Command::new("ps").args(["-eo", "pid,command"]).output().ok()?;
-    let text = String::from_utf8_lossy(&output.stdout);
-    match_firefox_pid(&text, profile_path, is_default_firefox_profile(profile_path))
-}
-
-/// The pure matching logic behind `firefox_profile_pid`, pulled out so it's
-/// testable without an actual `ps` call. Filters `ps -eo pid,command`
-/// output to the main `firefox` binary specifically - its helper processes
-/// (plugin-container, gpu-helper, crashhelper) all inherit and echo the
-/// same `-profile <path>` argument in their own command lines, so a plain
-/// substring match without this would find those instead.
-fn match_firefox_pid(ps_output: &str, profile_path: &str, is_default: bool) -> Option<u32> {
-    let bin = "/Applications/Firefox.app/Contents/MacOS/firefox";
-    for line in ps_output.lines() {
-        let line = line.trim_start();
-        // Each line is "PID COMMAND...", so the binary path is never a
-        // prefix of the raw line itself - split off the PID first.
-        let Some((pid_str, command)) = line.split_once(char::is_whitespace) else { continue };
-        let Some(rest) = command.trim_start().strip_prefix(bin) else { continue };
-        let matches = rest.contains(&format!("--profile {profile_path}"))
-            || (is_default && !rest.contains("--profile"));
-        if !matches {
-            continue;
-        }
-        if let Ok(pid) = pid_str.parse() {
-            return Some(pid);
-        }
-    }
-    None
-}
-
-/// Resolve a Firefox profile name to a running PID. Only launches it if
-/// `launch` is true - matching the opt-in, default-off launch behavior
-/// every other driver has (see PLAN-window-targets.md's "App-not-running
-/// behavior"); otherwise a not-running profile is a clean failure, not a
-/// silent launch. A freshly-launched process's PID comes straight from
-/// `Child::id()` - no need to re-scan for it.
-fn resolve_or_launch_firefox_profile(name: &str, launch: bool) -> Result<u32, String> {
-    let path = firefox_profile_path(name)?;
-    if let Some(pid) = firefox_profile_pid(&path) {
-        return Ok(pid);
-    }
-    if !launch {
-        return Err(format!("Firefox profile '{name}' is not running (set launch = true to start it automatically)"));
-    }
-    // See spawn_detached: Firefox outlives `lanes` for the rest of the
-    // session, so it must not inherit our stdio.
-    let child = spawn_detached(
-        std::process::Command::new("/Applications/Firefox.app/Contents/MacOS/firefox")
-            .args(["--profile", &path]),
-    )
-    .map_err(|e| format!("failed to launch Firefox profile '{name}': {e}"))?;
-    let pid = child.id();
-    wait_for_a_window(pid, std::time::Duration::from_secs(5));
-    Ok(pid)
-}
-
-/// Polls (via System Events, since lanes-cli has no direct Accessibility
-/// access - that's lanes-wm's job) until a process has at least one window,
-/// up to `timeout`. Best-effort: a fresh app launch's window doesn't exist
-/// yet the instant the process starts, and placement immediately afterward
-/// would otherwise race it and fail with "no focused window" - seen doing
-/// exactly this with a freshly-launched Firefox profile. Doesn't error out
-/// on timeout; the subsequent placement call just fails on its own with a
-/// clear message if the window still isn't there.
-fn wait_for_a_window(pid: u32, timeout: std::time::Duration) {
-    let deadline = std::time::Instant::now() + timeout;
-    while std::time::Instant::now() < deadline {
-        let script = format!(
-            "tell application \"System Events\" to count of windows of (first process whose unix id is {pid})"
-        );
-        let has_window = std::process::Command::new("osascript")
-            .args(["-e", &script])
-            .output()
-            .is_ok_and(|o| o.status.success() && String::from_utf8_lossy(&o.stdout).trim() != "0");
-        if has_window {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
-}
-
 /// Run a target's activation step - whatever app-specific mechanism makes
 /// the right window/pane/vault frontmost. Doesn't place anything itself;
 /// placement is a separate, batched step in `apply_targets` (every
@@ -1453,12 +1311,7 @@ fn wait_for_a_window(pid: u32, timeout: std::time::Duration) {
 /// final terminal-focus step landed - visibly flickering through each app
 /// on every switch instead of just showing the one or two that actually
 /// need to be seen.
-///
-/// Returns the PID a driver resolved, if any - only `firefox-profile` does
-/// this, since resolving which of several same-bundle-ID processes is the
-/// right one *is* its activation step. `apply_targets` uses this instead
-/// of `target_bundle_id` to identify the placement target for such drivers.
-fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_session: Option<&str>, launch: bool) -> Result<Option<u32>, String> {
+fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_session: Option<&str>) -> Result<(), String> {
     let resolve_session = |session: &Option<String>| -> Result<String, String> {
         session.clone().or_else(|| default_session.map(String::from))
             .ok_or_else(|| "no session given and this lane has no terminal session to default to".to_string())
@@ -1471,7 +1324,7 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
         // just be a redundant, visible extra flip before that final step.
         model::TargetDriver::Wezterm { session } => {
             activate_wezterm_tab(&resolve_session(session)?, false)?;
-            Ok(None)
+            Ok(())
         }
         model::TargetDriver::Zellij { session, pane } => {
             let session = resolve_session(session)?;
@@ -1482,17 +1335,17 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
                     as u64,
             };
             focus_zellij_pane(&session, pane_id)?;
-            Ok(None)
+            Ok(())
         }
         model::TargetDriver::Obsidian { vault } => {
             let uri = format!("obsidian://open?vault={}", percent_encode(vault));
             run_command_checked(std::process::Command::new("open").arg(uri), "open obsidian:// URI")?;
-            Ok(None)
+            Ok(())
         }
         model::TargetDriver::Boards { project } => {
             let uri = format!("boards://open?project={}", percent_encode(project));
             run_command_checked(std::process::Command::new("open").arg(uri), "open boards:// URI")?;
-            Ok(None)
+            Ok(())
         }
         model::TargetDriver::Sourcetree { repo } => {
             let path = expand_tilde(repo);
@@ -1500,7 +1353,7 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
                 std::process::Command::new("/opt/homebrew/bin/stree").current_dir(&path).arg("."),
                 "stree",
             )?;
-            Ok(None)
+            Ok(())
         }
         model::TargetDriver::Vscode { folder } => {
             let path = expand_tilde(folder);
@@ -1508,16 +1361,13 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
                 std::process::Command::new("code").args(["-r", &path]),
                 "code -r (is the 'code' shell command installed? VS Code > Cmd+Shift+P > \"Shell Command: Install 'code' command in PATH\")",
             )?;
-            Ok(None)
+            Ok(())
         }
         model::TargetDriver::App { name, .. } => {
             if raise_app {
                 run_command_checked(std::process::Command::new("open").args(["-a", name]), "open -a")?;
             }
-            Ok(None)
-        }
-        model::TargetDriver::FirefoxProfile { profile } => {
-            resolve_or_launch_firefox_profile(profile, launch).map(Some)
+            Ok(())
         }
     }
 }
@@ -1569,35 +1419,25 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
         // app that also wants placement) - see activate_target's doc
         // comment and Target::raise's doc comment for why.
         let raise_app = target.monitor.is_none() || target.raise;
-        let resolved_pid = match activate_target(&target.driver, raise_app, default_session, target.launch) {
-            Ok(pid) => pid,
-            Err(e) => {
-                let e = format!("target '{}': {e}", target.driver.name());
+        if let Err(e) = activate_target(&target.driver, raise_app, default_session) {
+            let e = format!("target '{}': {e}", target.driver.name());
+            eprintln!("warning: {e}");
+            warnings.push(e);
+            continue;
+        }
+
+        let Some(monitor) = &target.monitor else { continue };
+        let identity_value: serde_json::Value = match target_bundle_id(&target.driver) {
+            Some(bundle_id) => serde_json::json!(bundle_id),
+            None => {
+                let e = format!(
+                    "target '{}' has monitor/position set but its driver can't be placed",
+                    target.driver.name()
+                );
                 eprintln!("warning: {e}");
                 warnings.push(e);
                 continue;
             }
-        };
-
-        let Some(monitor) = &target.monitor else { continue };
-        // A driver that resolved its own PID (firefox-profile) is placed by
-        // PID directly, since bundle-ID matching can't tell its instances
-        // apart in the first place; everything else is placed by bundle ID.
-        let identity_key = if resolved_pid.is_some() { "pid" } else { "app" };
-        let identity_value: serde_json::Value = match resolved_pid {
-            Some(pid) => serde_json::json!(pid),
-            None => match target_bundle_id(&target.driver) {
-                Some(bundle_id) => serde_json::json!(bundle_id),
-                None => {
-                    let e = format!(
-                        "target '{}' has monitor/position set but its driver can't be placed",
-                        target.driver.name()
-                    );
-                    eprintln!("warning: {e}");
-                    warnings.push(e);
-                    continue;
-                }
-            },
         };
         let Some(uuid) = cfg.monitor_uuid(monitor) else {
             let e = format!("monitor handle '{monitor}' not found in config");
@@ -1619,19 +1459,11 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
         // step above was to deterministically make the right window
         // frontmost first, so placement just acts on whatever that left
         // focused (lanes-wm's `--focused` selector).
-        // PID-resolved targets (today: firefox-profile) also get raised.
-        // They're exactly the ones that can end up competing for the same
-        // screen slot across lanes - e.g. every profile's window gets
-        // placed at the same lg-left coordinates - and placement alone
-        // doesn't affect z-order, so whichever one was already on top from
-        // an earlier lane would otherwise stay there, hiding the one that
-        // was just correctly (but invisibly) placed underneath it.
         let mut placement = serde_json::Map::new();
-        placement.insert(identity_key.to_string(), identity_value);
+        placement.insert("app".to_string(), identity_value);
         placement.insert("monitor".to_string(), serde_json::json!(uuid));
         placement.insert("position".to_string(), position_json);
         placement.insert("focused".to_string(), serde_json::json!(true));
-        placement.insert("raise".to_string(), serde_json::json!(resolved_pid.is_some()));
         placements.push(serde_json::Value::Object(placement));
     }
 
@@ -1705,7 +1537,7 @@ fn context_target<'a>(cfg: &'a config::Config, focused_id: Option<&str>, driver_
 }
 
 /// Activate whichever target the *currently focused* lane has for the
-/// given driver (e.g. "obsidian", "firefox-profile"), independent of lane
+/// given driver (e.g. "obsidian"), independent of lane
 /// switching - this is what a context-aware hotkey (Hammerspoon's K/O)
 /// calls on every press, not just on `lanes focus`. Deliberately
 /// activation-only: never applies the target's placement, since re-moving
@@ -1730,28 +1562,17 @@ pub fn activate_context(driver_name: &str) -> Result<(), String> {
 }
 
 /// Activate a target and guarantee it's actually raised, regardless of
-/// driver - the one thing `activate_target` alone doesn't guarantee for
-/// every driver (a firefox-profile target resolves its pid but is never
-/// raised there; raising it normally only happens as a side effect of
-/// apply_targets' placement batch, a step this skips). Shared by
-/// `activate_context` (a context-aware hotkey) and `land_lane` (a lane
-/// switch's final "make the primary target win" step) - both want exactly
-/// "bring this one thing forward, right now," never placement.
+/// driver. Shared by `activate_context` (a context-aware hotkey) and
+/// `land_lane` (a lane switch's final "make the primary target win" step) -
+/// both want exactly "bring this one thing forward, right now," never
+/// placement.
 fn activate_and_raise(target: &model::Target, default_session: Option<&str>) -> Result<(), String> {
-    let resolved_pid = activate_target(&target.driver, true, default_session, target.launch)?;
-    if let Some(pid) = resolved_pid {
-        let warnings = run_lanes_wm_apply(&[serde_json::json!({ "pid": pid, "raise": true })]);
-        if let Some(w) = warnings.into_iter().next() {
-            return Err(w);
-        }
-    }
-    Ok(())
+    activate_target(&target.driver, true, default_session)
 }
 
 fn fallback_activate(driver_name: &str) -> Result<(), String> {
     let app_name = match driver_name {
         "obsidian" => "Obsidian",
-        "firefox-profile" => "Firefox",
         other => return Err(format!("no fallback activation for driver '{other}'")),
     };
     run_command_checked(std::process::Command::new("open").args(["-a", app_name]), "open -a")
@@ -1941,38 +1762,6 @@ mod tests {
             "same",
             "spawn_detached's child should have fd 1 pointed at /dev/null"
         );
-    }
-
-    /// Trimmed from real `ps -eo pid,command` output captured during
-    /// development: one main firefox process for the Development profile,
-    /// plus two of its helper processes that echo the same `-profile`
-    /// argument in their own command lines (the exact false-positive this
-    /// filtering exists to avoid).
-    const PS_SAMPLE: &str = "\
-28420 /Applications/Firefox.app/Contents/MacOS/firefox -foreground --profile /Users/bmiller/Library/Application Support/Firefox/Profiles/1SBXZ1GS.Profile 1 -new-tab about:newprofile
-28490 /Applications/Firefox.app/Contents/MacOS/plugin-container.app/Contents/MacOS/plugin-container -profile /Users/bmiller/Library/Application Support/Firefox/Profiles/1SBXZ1GS.Profile 1 org.mozilla.machname.1 4 rdd
-28454 /Applications/Firefox.app/Contents/MacOS/gpu-helper.app/Contents/MacOS/Firefox GPU Helper -profile /Users/bmiller/Library/Application Support/Firefox/Profiles/1SBXZ1GS.Profile 1
-40972 /Applications/Firefox.app/Contents/MacOS/firefox";
-
-    #[test]
-    fn match_firefox_pid_finds_the_main_process_not_its_helpers() {
-        let path = "/Users/bmiller/Library/Application Support/Firefox/Profiles/1SBXZ1GS.Profile 1";
-        assert_eq!(match_firefox_pid(PS_SAMPLE, path, false), Some(28420));
-    }
-
-    #[test]
-    fn match_firefox_pid_none_when_profile_not_running_and_not_default() {
-        assert_eq!(match_firefox_pid(PS_SAMPLE, "/some/other/profile", false), None);
-    }
-
-    #[test]
-    fn match_firefox_pid_falls_back_to_bare_process_for_the_default_profile() {
-        // The default profile normally launches with no --profile flag at
-        // all (pid 40972 above) - only accepted as a match when the caller
-        // has independently confirmed (via profiles.ini) that the
-        // requested profile really is the default.
-        assert_eq!(match_firefox_pid(PS_SAMPLE, "/some/default/profile/path", true), Some(40972));
-        assert_eq!(match_firefox_pid(PS_SAMPLE, "/some/default/profile/path", false), None);
     }
 
     /// A real scratch git repo (not a mock) with a single commit on
@@ -2281,7 +2070,7 @@ mod tests {
     #[test]
     fn context_target_none_when_focused_lane_has_no_matching_driver() {
         let cfg = test_config(vec![lane_with_target("infra", obsidian_target("Dev"))]);
-        assert!(context_target(&cfg, Some("infra"), "firefox-profile").is_none());
+        assert!(context_target(&cfg, Some("infra"), "boards").is_none());
     }
 
     #[test]

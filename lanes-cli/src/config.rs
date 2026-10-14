@@ -184,7 +184,7 @@ struct TabToml {
 }
 
 /// `layout.toml` - window-placement targets applied on switch (app /
-/// obsidian / firefox-profile / wezterm / zellij-placement / vscode /
+/// obsidian / wezterm / zellij-placement / vscode /
 /// sourcetree). Same shape at two levels: a top-level `~/.config/lanes/layout.toml`
 /// supplies defaults applied to every context (see `load_global_config`),
 /// and a context's own `<id>/layout.toml` overrides/adds to them (see

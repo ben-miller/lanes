@@ -52,11 +52,6 @@ pub fn run(fix: bool) {
         checks.push(check_boards_projects(&cfg, &boards_dir));
     }
 
-    if has_firefox_profile_target(&cfg) {
-        checks.push(check_firefox_profile_schema());
-        checks.push(check_firefox_profiles_resolve(&cfg));
-    }
-
     if cfg.driver_enabled("zellij") {
         checks.push(check_zellij());
     }
@@ -900,122 +895,6 @@ fn materialize_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path
     created
 }
 
-/// Every `firefox-profile` target across every lane, driver fields intact -
-/// used by both the schema check (does this feature even apply here) and
-/// the per-profile resolution check below.
-fn firefox_profile_targets(cfg: &lanes::config::Config) -> Vec<&str> {
-    cfg.lanes
-        .iter()
-        .flat_map(|l| &l.targets)
-        .filter_map(|t| match &t.driver {
-            lanes::model::TargetDriver::FirefoxProfile { profile } => Some(profile.as_str()),
-            _ => None,
-        })
-        .collect()
-}
-
-fn has_firefox_profile_target(cfg: &lanes::config::Config) -> bool {
-    !firefox_profile_targets(cfg).is_empty()
-}
-
-/// Verifies the undocumented assumptions the `firefox-profile` driver
-/// depends on: `sqlite3` is on PATH (it's shelled out to, not linked
-/// against), and Firefox's Profile Groups database actually has the
-/// `Profiles` table with a `name`/`path` we can query. Firefox's newer
-/// Profiles feature has no public schema spec - this is the thing that
-/// would silently break if Mozilla ever changes it, so it gets checked
-/// directly rather than only discovered the next time a lane switch fails.
-fn check_firefox_profile_schema() -> Check {
-    if Command::new("sqlite3").arg("-version").output().is_err() {
-        return Check {
-            label: "firefox-profile schema",
-            status: Status::Fail,
-            message: "sqlite3 not found on PATH".to_string(),
-            hint: Some("install sqlite3 (e.g. `brew install sqlite`) - every firefox-profile target depends on it".to_string()),
-        };
-    }
-
-    let groups_dir = lanes::expand_tilde("~/Library/Application Support/Firefox/Profile Groups");
-    let entries = match std::fs::read_dir(&groups_dir) {
-        Ok(e) => e,
-        Err(_) => {
-            return Check {
-                label: "firefox-profile schema",
-                status: Status::Fail,
-                message: format!("could not read {groups_dir}"),
-                hint: Some("has Firefox's Profiles feature ever been used on this machine?".to_string()),
-            };
-        }
-    };
-    let db = entries
-        .filter_map(|e| e.ok())
-        .find(|e| e.path().extension().and_then(|x| x.to_str()) == Some("sqlite"));
-    let Some(db) = db else {
-        return Check {
-            label: "firefox-profile schema",
-            status: Status::Fail,
-            message: format!("no .sqlite database found in {groups_dir}"),
-            hint: None,
-        };
-    };
-
-    let output = Command::new("sqlite3")
-        .arg(db.path())
-        .arg("SELECT name, path FROM Profiles LIMIT 1")
-        .output();
-    match output {
-        Ok(o) if o.status.success() => Check {
-            label: "firefox-profile schema",
-            status: Status::Ok,
-            message: "Profiles table has the name/path columns we query".to_string(),
-            hint: None,
-        },
-        Ok(o) => Check {
-            label: "firefox-profile schema",
-            status: Status::Fail,
-            message: format!(
-                "Profiles table query failed - Firefox may have changed its schema: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-            hint: Some("this is undocumented internal Firefox state - if it broke, the firefox-profile driver needs updating to match".to_string()),
-        },
-        Err(e) => Check {
-            label: "firefox-profile schema",
-            status: Status::Fail,
-            message: format!("sqlite3 query failed: {e}"),
-            hint: None,
-        },
-    }
-}
-
-/// Every `firefox-profile` target's `profile` name actually resolves right
-/// now - catches renaming a profile in Firefox's own switcher (or deleting
-/// it) without updating the lane config that references it by name.
-fn check_firefox_profiles_resolve(cfg: &lanes::config::Config) -> Check {
-    let names = firefox_profile_targets(cfg);
-    let unresolved: Vec<&str> = names
-        .iter()
-        .filter(|n| lanes::firefox_profile_path(n).is_err())
-        .copied()
-        .collect();
-
-    if unresolved.is_empty() {
-        Check {
-            label: "firefox profiles",
-            status: Status::Ok,
-            message: format!("{} profile(s) referenced in config, all resolve", names.len()),
-            hint: None,
-        }
-    } else {
-        Check {
-            label: "firefox profiles",
-            status: Status::Warn,
-            message: format!("referenced in config but not found in Firefox's profile switcher: {}", unresolved.join(", ")),
-            hint: Some("renamed or deleted in Firefox's own UI? update the profile name in the lane config that references it".to_string()),
-        }
-    }
-}
-
 /// Every external binary a configured target's driver actually needs
 /// (`stree`, `code`) is on PATH. `code` in particular is opt-in per-machine
 /// (VS Code's own "install shell command" step), easy to forget - and
@@ -1078,18 +957,6 @@ mod tests {
 
     fn lane_with_targets(id: &str, targets: Vec<lanes::model::Target>) -> Lane {
         Lane { targets, ..lane(id, id, true, id) }
-    }
-
-    fn firefox_profile_target(profile: &str) -> lanes::model::Target {
-        lanes::model::Target {
-            driver: lanes::model::TargetDriver::FirefoxProfile { profile: profile.to_string() },
-            monitor: None,
-            position: None,
-            launch: false,
-            raise: false,
-            minimized: None,
-            primary: false,
-        }
     }
 
     fn monitor(uuid: &str) -> lanes::config::MonitorConfig {
@@ -1332,14 +1199,14 @@ mod tests {
 
     #[test]
     fn check_primary_targets_ok_when_none_are_marked() {
-        let cfg = test_config(vec![lane_with_targets("infra", vec![firefox_profile_target("Dev")])]);
+        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("Dev")])]);
         let check = check_primary_targets(&cfg);
         assert!(matches!(check.status, Status::Ok));
     }
 
     #[test]
     fn check_primary_targets_ok_with_exactly_one_marked() {
-        let mut target = firefox_profile_target("Dev");
+        let mut target = boards_target("Dev");
         target.primary = true;
         let cfg = test_config(vec![lane_with_targets("infra", vec![target])]);
         let check = check_primary_targets(&cfg);
@@ -1348,9 +1215,9 @@ mod tests {
 
     #[test]
     fn check_primary_targets_fails_when_a_lane_has_two() {
-        let mut a = firefox_profile_target("Dev");
+        let mut a = boards_target("Dev");
         a.primary = true;
-        let mut b = firefox_profile_target("Japanese");
+        let mut b = boards_target("Japanese");
         b.primary = true;
         let cfg = test_config(vec![lane_with_targets("infra", vec![a, b])]);
         let check = check_primary_targets(&cfg);
@@ -1430,21 +1297,4 @@ mod tests {
         assert!(stale_monitor_handles(&monitors, &HashSet::new()).is_empty());
     }
 
-    #[test]
-    fn firefox_profile_targets_collects_across_every_lane() {
-        let cfg = test_config(vec![
-            lane_with_targets("formation", vec![firefox_profile_target("Original profile")]),
-            lane_with_targets("japanese", vec![firefox_profile_target("Japanese")]),
-            lane("infra", "Infra", true, "infra"), // no targets at all
-        ]);
-        let mut names = firefox_profile_targets(&cfg);
-        names.sort();
-        assert_eq!(names, vec!["Japanese", "Original profile"]);
-    }
-
-    #[test]
-    fn has_firefox_profile_target_false_when_none_configured() {
-        let cfg = test_config(vec![lane("infra", "Infra", true, "infra")]);
-        assert!(!has_firefox_profile_target(&cfg));
-    }
 }

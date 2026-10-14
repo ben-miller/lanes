@@ -80,7 +80,6 @@ runtime-only ID (tab ID, window number, chat UUID) by hand.
 | `sourcetree` | `repo` | `cd <repo> && stree` |
 | `vscode` | `folder` | `code -r <folder>` (reuse window) |
 | `app` | `name`, `bundle_id` (optional) | fallback for anything else: `open -a <name>`, no window/tab addressing - brings forward whichever window the app last had focused. `bundle_id` unlocks placement (`monitor`/`position`); without it, activate-only. |
-| `firefox-profile` | `profile` | switches which Firefox profile occupies a target, added after v1 - see its own section below |
 
 Explicitly not in v1, and why:
 - **brotab** (browser tabs) - blocked on a macOS install bug (`bt install`
@@ -240,62 +239,16 @@ defaults to the owning lane's own terminal session at apply time.
 `target_bundle_id` only knows a bundle id for an `app` target that supplies
 one (Firefox does; a Trello peek app with no placement doesn't need to).
 
-Note: the global default above was later replaced by `firefox-profile` (see
-below) - Firefox itself is now switched per profile, not just placed once.
+### Firefox profiles (tried, reverted)
 
-## Firefox profiles
-
-Firefox's newer built-in "Profiles" feature (distinct from the legacy
-`-P`/`profiles.ini` system, which it doesn't touch at all) lets multiple
-profiles run simultaneously, each as a genuinely separate process - but
-every one of them shares the same bundle ID (`org.mozilla.firefox`), which
-none of the existing drivers could disambiguate.
-
-```toml
-[[targets]]
-driver = "firefox-profile"
-profile = "Development"
-monitor = "lg-left"
-position = "full"
-```
-
-`profile` is the name you gave it in Firefox's own profile switcher.
-Resolution (`lanes-cli/src/lib.rs`):
-1. Look up the profile's on-disk path by name, from the per-install SQLite
-   database under `~/Library/Application Support/Firefox/Profile Groups/`
-   (queried via the `sqlite3` CLI - not `profiles.ini`, which the new
-   Profiles feature doesn't write to at all).
-2. Match a running process's `--profile <path>` launch argument via `ps`,
-   filtered to the main `firefox` binary specifically - its helper
-   processes (plugin-container, gpu-helper, crashhelper) all inherit and
-   echo the same `-profile <path>` argument, so a plain substring match
-   without that filter finds those instead (caught by a test, not by
-   inspection - worth remembering for the next process-scanning driver).
-   Falls back to matching a bare `firefox` process with no `--profile` flag
-   for the *default* profile specifically, since that's how it normally
-   launches.
-3. Launch it (`firefox --profile <path>`) only if `launch = true` - same
-   opt-in default-off behavior every other driver has.
-
-This is what motivated **lanes-wm's `--pid`**: an alternative to `--app`
-that targets one specific process directly, since bundle-ID resolution
-can't tell multiple Firefox profiles apart. `apply_targets` uses whichever
-identity a driver actually resolved (a bundle ID for everything else, the
-PID `firefox-profile` resolved as a byproduct of its own activation step).
-
-It also motivated **lanes-wm's `--raise`**: placement (`setFrame`) doesn't
-touch z-order, so an app placed at the same coordinates on every call - the
-whole point of "whichever profile is active occupies this exact screen
-region" - leaves whichever instance was already on top still on top,
-hiding the newly-placed one underneath. `--raise` activates the exact PID a
-window was resolved from (`NSRunningApplication`, not `open`, which can't
-target one instance among several sharing a bundle ID either). Every
-PID-resolved target gets `raise: true` automatically in `apply_targets` -
-that's currently synonymous with "needs raising," since PID resolution
-only exists for the same-screen-slot-competition problem in the first
-place. Note: `NSApplicationActivationOptions::ActivateIgnoringOtherApps` is
-deprecated on macOS 14+ and documented as having no effect - empty options
-is what actually works now.
+A `firefox-profile` driver briefly existed here, switching which Firefox
+profile occupied a target by resolving a specific PID (profiles.ini's
+`Default=` doesn't reliably say which profile a bare `firefox` launch uses
+when `StartWithLastProfile=1` is set - "last used," not "default," decides
+it - so profile detection kept misfiring and spawning stray windows). Removed
+2026-10-15: not worth the ongoing fragility: the config now just targets the
+single "Original profile" `app`-driver Firefox everywhere, same as any other
+`app` target.
 
 ## Two bugs found by actually using this on real lane switches
 

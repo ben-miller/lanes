@@ -76,7 +76,7 @@ enum Command {
     },
 
     /// Activate whichever target the currently focused lane has for the
-    /// given driver (e.g. "obsidian", "firefox-profile") - for a context-
+    /// given driver (e.g. "obsidian") - for a context-
     /// aware hotkey, not lane switching (that's the unrelated `activate`,
     /// which marks a lane active in its config). Falls back to a plain app
     /// launch when there's no focused lane or no matching target.
