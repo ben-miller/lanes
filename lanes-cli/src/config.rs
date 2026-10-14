@@ -376,6 +376,7 @@ mod tests {
             launch: false,
             raise: false,
             minimized: None,
+            primary: false,
         }
     }
 
@@ -387,6 +388,7 @@ mod tests {
             launch: false,
             raise: false,
             minimized: None,
+            primary: false,
         }
     }
 
