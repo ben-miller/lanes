@@ -80,6 +80,17 @@ pub struct Target {
     /// an app insists on keeping open but has no actual use for.
     #[serde(default)]
     pub minimized: Option<bool>,
+    /// This is the one target a lane switch should end up visually looking
+    /// at, overriding the terminal's usual claim to that (see
+    /// `land_lane`'s doc comment for the full sequencing). At most one
+    /// target per lane may set this - `doctor` rejects a lane with more
+    /// than one, rather than guessing which one wins. Granularity (which
+    /// pane, which vault note, ...) is never primary's own concern - it's
+    /// whatever that driver's own fields already express (e.g. Zellij's
+    /// `pane`), so marking a target primary never needs new fields of its
+    /// own to support "primary, but more specific."
+    #[serde(default)]
+    pub primary: bool,
 }
 
 /// Which app-specific mechanism activates this target, and that

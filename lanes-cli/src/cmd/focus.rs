@@ -8,7 +8,7 @@ pub fn run(id: Option<String>, cfg: &Config) {
             std::process::exit(1);
         }
     };
-    if let Err(e) = lanes::focus_lane(&lane_id, true) {
+    if let Err(e) = lanes::focus_lane(&lane_id) {
         eprintln!("error: {}", e);
         std::process::exit(1);
     }

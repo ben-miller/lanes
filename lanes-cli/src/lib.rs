@@ -754,33 +754,48 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
         }
 
         // Apply the lane's own targets (Firefox, peek apps, etc.) *before*
-        // focusing the terminal below - each target's own activation step
-        // (open -a, an obsidian:// URI, ...) brings that app frontmost, so
-        // doing this first and WezTerm/Zellij last guarantees the terminal
-        // (and the Claude session in it) is what you're actually looking at
-        // once the switch finishes, not whichever target happened to be
-        // activated last. This is also the actual window placement step,
-        // previously missing entirely from this path (it only ever
-        // activated the WezTerm tab/Zellij pane, never touched [[targets]]
-        // at all). Best-effort like focus_lane's own target handling: a
-        // target failure (an app not running, a driver command failing)
-        // doesn't roll back a terminal switch that already succeeded.
-        if let Some(lane) = lane_id.as_deref().and_then(|id| cfg.lanes.iter().find(|l| l.id == id)) {
+        // land_lane below - each target's own activation step (open -a, an
+        // obsidian:// URI, ...) brings that app frontmost, so doing this
+        // first guarantees land_lane's own choice (the terminal, or the
+        // lane's primary target) gets the true last word, not whichever
+        // target happened to be activated last. This is also the actual
+        // window placement step, previously missing entirely from this
+        // path (it only ever activated the WezTerm tab/Zellij pane, never
+        // touched [[targets]] at all). Best-effort like focus_lane's own
+        // target handling: a target failure (an app not running, a driver
+        // command failing) doesn't roll back a terminal switch that
+        // already succeeded.
+        let lane = lane_id.as_deref().and_then(|id| cfg.lanes.iter().find(|l| l.id == id));
+        if let Some(lane) = lane {
             for w in apply_targets(&lane.targets, &cfg, lane.terminal_session()) {
                 eprintln!("warning: {w}");
             }
         }
         logging::perf("switch.targets_applied", &format!("session={session_id} elapsed_us={}", t0.elapsed().as_micros()));
 
-        // Resolve the tab through the same session -> tab-id cache everything
-        // else uses, rather than the wezterm_tab_id recorded in the session
-        // file at hook time (which came from the same unreliable title
-        // matching we removed everywhere else). Deliberately last - see above.
-        activate_wezterm_tab(&zellij_session, true)?;
-        logging::perf("switch.tab_activated", &format!("session={session_id} elapsed_us={}", t0.elapsed().as_micros()));
-
-        if let Some(pane_id) = zellij_pane_id {
-            focus_zellij_pane(&zellij_session, pane_id)?;
+        // land_lane resolves the tab through the same session -> tab-id
+        // cache everything else uses, rather than the wezterm_tab_id
+        // recorded in the session file at hook time (which came from the
+        // same unreliable title matching we removed everywhere else).
+        // Deliberately last - see above. The exact pane this Claude
+        // session was registered in is a more specific answer than
+        // anything land_lane could infer on its own, so it's passed
+        // through as the explicit override. A session whose zellij_session
+        // maps to no configured lane at all (lane is None) has no targets
+        // or primary to consider - fall back to the bare tab/pane switch
+        // this path always did before land_lane existed.
+        match lane {
+            Some(lane) => {
+                for w in land_lane(lane, zellij_pane_id) {
+                    eprintln!("warning: {w}");
+                }
+            }
+            None => {
+                activate_wezterm_tab(&zellij_session, true)?;
+                if let Some(pane_id) = zellij_pane_id {
+                    focus_zellij_pane(&zellij_session, pane_id)?;
+                }
+            }
         }
         logging::perf("switch.pane_focused", &format!("session={session_id} elapsed_us={}", t0.elapsed().as_micros()));
 
@@ -1649,14 +1664,19 @@ pub fn activate_context(driver_name: &str) -> Result<(), String> {
     };
 
     let default_session = focused_lane(&cfg, focused.as_deref()).and_then(|l| l.terminal_session());
-    let resolved_pid = activate_target(&target.driver, true, default_session, target.launch)?;
+    activate_and_raise(target, default_session)
+}
 
-    // activate_target resolves a firefox-profile target's pid but never
-    // raises it - raising normally only happens as a side effect of
-    // apply_targets' placement batch (see its own comment on this), a step
-    // this function deliberately skips. Make up for that here instead,
-    // since the whole point of this path is bringing the right window
-    // forward right now.
+/// Activate a target and guarantee it's actually raised, regardless of
+/// driver - the one thing `activate_target` alone doesn't guarantee for
+/// every driver (a firefox-profile target resolves its pid but is never
+/// raised there; raising it normally only happens as a side effect of
+/// apply_targets' placement batch, a step this skips). Shared by
+/// `activate_context` (a context-aware hotkey) and `land_lane` (a lane
+/// switch's final "make the primary target win" step) - both want exactly
+/// "bring this one thing forward, right now," never placement.
+fn activate_and_raise(target: &model::Target, default_session: Option<&str>) -> Result<(), String> {
+    let resolved_pid = activate_target(&target.driver, true, default_session, target.launch)?;
     if let Some(pid) = resolved_pid {
         let warnings = run_lanes_wm_apply(&[serde_json::json!({ "pid": pid, "raise": true })]);
         if let Some(w) = warnings.into_iter().next() {
@@ -1699,42 +1719,109 @@ pub fn resolve_lane_id(explicit: Option<String>, cfg: &config::Config) -> Result
 /// caller with no attached terminal (Lanes Switch, calling this in-process)
 /// has something to actually log instead of the warnings vanishing into a
 /// GUI process's unreachable stderr.
-pub fn focus_lane(lane_id: &str, focus: bool) -> Result<(), String> {
-    let cfg = config::Config::load();
-    let lane = match cfg.lanes.iter().find(|l| l.id == lane_id) {
-        Some(l) => l,
-        None => return Err(format!("lane not found: {}", lane_id)),
-    };
+/// The lane's own designated primary target, if any - assumes `doctor`
+/// already rejected a lane with more than one, so the first match is the
+/// only one there should ever be.
+fn primary_target(targets: &[model::Target]) -> Option<&model::Target> {
+    targets.iter().find(|t| t.primary)
+}
 
-    // Targets (Firefox, peek apps, etc.) are applied *before* the
-    // terminal-focus loop below, not after - each target's own activation
-    // step brings that app frontmost, so doing this first and the terminal
-    // last guarantees you end up looking at the terminal once focus_lane
-    // finishes, not whichever target happened to be activated last.
-    let mut warnings = apply_targets(&lane.targets, &cfg, lane.terminal_session());
-    for el in &lane.scope {
-        if let Some(session) = el.zellij_session_name() {
-            if let Err(e) = activate_wezterm_tab(session, focus) {
-                eprintln!("warning: {}", e);
-                warnings.push(e);
-                continue;
-            }
-            // Deterministically land on a real pane rather than whatever
-            // Zellij's own internal state happens to have last focused -
-            // "focus this lane" should always put you somewhere you can
-            // immediately type into, not just switch WezTerm's active tab
-            // and leave the actual in-session focus as a coin flip. Only
-            // reached for lanes with no more specific routing already
-            // handled elsewhere (a Claude session's own pane_id, via
-            // switch_claude_session) - this is the general fallback.
-            if let Some(pane_id) = first_pane_id(session) {
-                if let Err(e) = focus_zellij_pane(session, pane_id as u64) {
+/// Land on whichever target a lane switch should end up visually looking
+/// at - the terminal by default, or the lane's own designated `primary`
+/// target when it has one. Two things that used to be the same decision
+/// now have to split apart: switching the Zellij/WezTerm *session state*
+/// (other things depend on "which session is current" regardless of what
+/// ends up visually frontmost) always happens if the lane has one, but it
+/// only gets to keep the frontmost result if nothing else is primary. When
+/// something else is primary, the terminal switch still happens (for the
+/// state), WezTerm itself just doesn't get raised doing it, and the
+/// primary target gets raised again immediately after - so it's the true
+/// last word on what's actually in front.
+///
+/// `explicit_pane_id` is a more specific answer than anything primary (or
+/// the plain first-pane fallback) can give - today, the exact pane a
+/// Claude session was registered in (see `switch_claude_session`). Same
+/// "more specific signal wins" hierarchy as everywhere else in this file:
+/// explicit override > primary's own pane (if it's a Zellij target) >
+/// first pane in the session.
+/// Whether a primary target is itself the terminal (Zellij/WezTerm) - if
+/// so, the terminal-focus step below already lands on it, there's nothing
+/// further to raise afterward.
+fn primary_is_terminal(primary: Option<&model::Target>) -> bool {
+    matches!(
+        primary.map(|t| &t.driver),
+        Some(model::TargetDriver::Zellij { .. }) | Some(model::TargetDriver::Wezterm { .. })
+    )
+}
+
+/// Only actually raise WezTerm if nothing else is going to win the
+/// frontmost question anyway - otherwise this would visibly flash to
+/// WezTerm right before the primary target gets raised over it.
+fn should_raise_wezterm(primary: Option<&model::Target>) -> bool {
+    primary.is_none() || primary_is_terminal(primary)
+}
+
+/// Which pane to land on, given everything known *before* falling back to
+/// the session's first pane (that fallback needs a live `pane_positions`
+/// query, so it's not part of this pure function) - explicit override >
+/// primary's own pane (if it's a Zellij target) > nothing, defer to the
+/// caller's own fallback.
+fn preferred_pane(primary: Option<&model::Target>, explicit_pane_id: Option<u64>) -> Option<u64> {
+    explicit_pane_id.or_else(|| {
+        primary.and_then(|t| match &t.driver {
+            model::TargetDriver::Zellij { pane, .. } => pane.map(|p| p as u64),
+            _ => None,
+        })
+    })
+}
+
+fn land_lane(lane: &model::Lane, explicit_pane_id: Option<u64>) -> Vec<String> {
+    let mut warnings = Vec::new();
+    let primary = primary_target(&lane.targets);
+
+    if let Some(session) = lane.terminal_session() {
+        if let Err(e) = activate_wezterm_tab(session, should_raise_wezterm(primary)) {
+            eprintln!("warning: {}", e);
+            warnings.push(e);
+        } else {
+            let pane_id = preferred_pane(primary, explicit_pane_id)
+                .or_else(|| first_pane_id(session).map(|p| p as u64));
+            if let Some(pane_id) = pane_id {
+                if let Err(e) = focus_zellij_pane(session, pane_id) {
                     eprintln!("warning: {}", e);
                     warnings.push(e);
                 }
             }
         }
     }
+
+    if let Some(target) = primary {
+        if !primary_is_terminal(primary) {
+            if let Err(e) = activate_and_raise(target, lane.terminal_session()) {
+                let e = format!("primary target '{}': {e}", target.driver.name());
+                eprintln!("warning: {e}");
+                warnings.push(e);
+            }
+        }
+    }
+
+    warnings
+}
+
+pub fn focus_lane(lane_id: &str) -> Result<(), String> {
+    let cfg = config::Config::load();
+    let lane = match cfg.lanes.iter().find(|l| l.id == lane_id) {
+        Some(l) => l,
+        None => return Err(format!("lane not found: {}", lane_id)),
+    };
+
+    // Targets (Firefox, peek apps, etc.) are applied *before* land_lane -
+    // each target's own activation step brings that app frontmost, so
+    // doing this first guarantees land_lane's own choice (terminal, or the
+    // primary target) gets the true last word, not whichever target
+    // happened to be activated last.
+    let mut warnings = apply_targets(&lane.targets, &cfg, lane.terminal_session());
+    warnings.extend(land_lane(lane, None));
 
     state::set_focused_lane(lane_id);
 
@@ -2119,6 +2206,7 @@ mod tests {
             launch: false,
             raise: false,
             minimized: None,
+            primary: false,
         }
     }
 
@@ -2148,6 +2236,92 @@ mod tests {
     fn context_target_none_when_focused_lane_id_is_not_in_config() {
         let cfg = test_config(vec![lane_with_target("infra", obsidian_target("Dev"))]);
         assert!(context_target(&cfg, Some("nonexistent"), "obsidian").is_none());
+    }
+
+    fn zellij_target(pane: Option<u32>, primary: bool) -> model::Target {
+        model::Target {
+            driver: model::TargetDriver::Zellij { session: None, pane },
+            monitor: None,
+            position: None,
+            launch: false,
+            raise: false,
+            minimized: None,
+            primary,
+        }
+    }
+
+    fn primary_obsidian_target(vault: &str) -> model::Target {
+        let mut t = obsidian_target(vault);
+        t.primary = true;
+        t
+    }
+
+    #[test]
+    fn primary_target_none_when_no_target_is_marked_primary() {
+        assert!(primary_target(&[obsidian_target("Dev")]).is_none());
+    }
+
+    #[test]
+    fn primary_target_finds_the_marked_one() {
+        let targets = vec![obsidian_target("Dev"), primary_obsidian_target("Planning")];
+        let found = primary_target(&targets).unwrap();
+        assert!(matches!(&found.driver, model::TargetDriver::Obsidian { vault } if vault == "Planning"));
+    }
+
+    #[test]
+    fn primary_is_terminal_true_for_zellij_and_wezterm() {
+        assert!(primary_is_terminal(Some(&zellij_target(None, true))));
+        let wezterm = model::Target {
+            driver: model::TargetDriver::Wezterm { session: None },
+            monitor: None,
+            position: None,
+            launch: false,
+            raise: false,
+            minimized: None,
+            primary: true,
+        };
+        assert!(primary_is_terminal(Some(&wezterm)));
+    }
+
+    #[test]
+    fn primary_is_terminal_false_for_non_terminal_driver_or_no_primary() {
+        assert!(!primary_is_terminal(Some(&primary_obsidian_target("Dev"))));
+        assert!(!primary_is_terminal(None));
+    }
+
+    #[test]
+    fn should_raise_wezterm_when_nothing_is_primary() {
+        assert!(should_raise_wezterm(None));
+    }
+
+    #[test]
+    fn should_raise_wezterm_when_the_terminal_itself_is_primary() {
+        assert!(should_raise_wezterm(Some(&zellij_target(None, true))));
+    }
+
+    #[test]
+    fn should_not_raise_wezterm_when_something_else_is_primary() {
+        // The whole point: don't flash WezTerm forward right before the
+        // primary target gets raised over it.
+        assert!(!should_raise_wezterm(Some(&primary_obsidian_target("Dev"))));
+    }
+
+    #[test]
+    fn preferred_pane_explicit_override_wins_over_primary() {
+        let primary = zellij_target(Some(7), true);
+        assert_eq!(preferred_pane(Some(&primary), Some(3)), Some(3));
+    }
+
+    #[test]
+    fn preferred_pane_falls_back_to_primarys_own_pane() {
+        let primary = zellij_target(Some(7), true);
+        assert_eq!(preferred_pane(Some(&primary), None), Some(7));
+    }
+
+    #[test]
+    fn preferred_pane_none_when_primary_is_not_zellij_or_unset() {
+        assert_eq!(preferred_pane(Some(&primary_obsidian_target("Dev")), None), None);
+        assert_eq!(preferred_pane(None, None), None);
     }
 
     #[test]

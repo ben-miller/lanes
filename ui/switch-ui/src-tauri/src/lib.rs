@@ -126,7 +126,7 @@ fn focus_lane(lane_id: String) {
     // without the app ever coming to the foreground, which is exactly why
     // clicking a lane with nothing more specific to route through looked
     // like it did nothing at all.
-    if let Err(e) = lanes::focus_lane(&lane_id, true) {
+    if let Err(e) = lanes::focus_lane(&lane_id) {
         lanes::logging::append_line("switch-ui.log", "warn", &format!("focus_lane({lane_id}): {e}"));
     }
 }

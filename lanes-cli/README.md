@@ -90,6 +90,17 @@ bundle_id = "com.electron.wispr-flow.accessibility-mac-app"
 minimized = true
 ```
 
+At most one target per lane can be marked `primary = true` - the one thing a lane switch should end up visually looking at, overriding the terminal's usual claim to that. Granularity (which pane, which vault note, ...) is never primary's own concern - it's whatever that driver's own fields already express (Zellij's `pane`, say), so marking something primary never needs new fields of its own:
+
+```toml
+[[targets]]
+driver = "obsidian"
+vault = "Planning"
+primary = true
+```
+
+`lanes doctor` fails if a lane ends up with more than one target marked primary - never guessed, never silently resolved.
+
 Example `board.toml` (a single target, not an array - the Boards projection for this context):
 
 ```toml

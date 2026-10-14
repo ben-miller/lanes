@@ -39,6 +39,7 @@ pub fn run(fix: bool) {
         check_logs(),
         check_wezterm_tab_cache(&cfg),
         check_session_naming(&cfg),
+        check_primary_targets(&cfg),
         check_lane_order(&cfg),
         check_lane_order_vs_ztabs(&cfg),
         check_git_default_branches(&cfg),
@@ -470,6 +471,34 @@ fn check_session_naming(cfg: &lanes::config::Config) -> Check {
                  already running in it (see the check above). Fix the lane's config for new \
                  sessions, or rename the existing session by hand with care.".to_string()
             ),
+        }
+    }
+}
+
+/// At most one target per lane may be marked `primary` - `land_lane`
+/// (lanes-cli's own lib.rs) trusts this and just takes the first match it
+/// finds rather than detecting or resolving a tie, so an ambiguous lane is
+/// a real config error to catch here, not something to guess through at
+/// switch time.
+fn check_primary_targets(cfg: &lanes::config::Config) -> Check {
+    let offending: Vec<&str> = cfg.lanes.iter()
+        .filter(|l| l.targets.iter().filter(|t| t.primary).count() > 1)
+        .map(|l| l.id.as_str())
+        .collect();
+
+    if offending.is_empty() {
+        Check {
+            label: "primary targets",
+            status: Status::Ok,
+            message: "every lane has at most one primary target".to_string(),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "primary targets",
+            status: Status::Fail,
+            message: format!("lane(s) with more than one target marked primary: {}", offending.join(", ")),
+            hint: Some("edit that lane's layout.toml (or the global default) so only one target sets primary = true".to_string()),
         }
     }
 }
@@ -1059,6 +1088,7 @@ mod tests {
             launch: false,
             raise: false,
             minimized: None,
+            primary: false,
         }
     }
 
@@ -1074,6 +1104,7 @@ mod tests {
             launch: false,
             raise: false,
             minimized: None,
+            primary: false,
         }
     }
 
@@ -1296,6 +1327,34 @@ mod tests {
             restrict_to_common(&lane_order, &ztabs_order),
             restrict_to_common(&ztabs_order, &lane_order)
         );
+    }
+
+    #[test]
+    fn check_primary_targets_ok_when_none_are_marked() {
+        let cfg = test_config(vec![lane_with_targets("infra", vec![firefox_profile_target("Dev")])]);
+        let check = check_primary_targets(&cfg);
+        assert!(matches!(check.status, Status::Ok));
+    }
+
+    #[test]
+    fn check_primary_targets_ok_with_exactly_one_marked() {
+        let mut target = firefox_profile_target("Dev");
+        target.primary = true;
+        let cfg = test_config(vec![lane_with_targets("infra", vec![target])]);
+        let check = check_primary_targets(&cfg);
+        assert!(matches!(check.status, Status::Ok));
+    }
+
+    #[test]
+    fn check_primary_targets_fails_when_a_lane_has_two() {
+        let mut a = firefox_profile_target("Dev");
+        a.primary = true;
+        let mut b = firefox_profile_target("Japanese");
+        b.primary = true;
+        let cfg = test_config(vec![lane_with_targets("infra", vec![a, b])]);
+        let check = check_primary_targets(&cfg);
+        assert!(matches!(check.status, Status::Fail));
+        assert!(check.message.contains("infra"));
     }
 
     #[test]
