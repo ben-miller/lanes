@@ -90,6 +90,14 @@ enum Command {
         command: SessionsCommand,
     },
 
+    /// Cycle through active, reachable lanes directly - independent of
+    /// whether anything (Claude or otherwise) is running inside them. A
+    /// separate policy from `sessions next`/`prev`, not a replacement.
+    LaneCycle {
+        #[command(subcommand)]
+        command: LaneCycleCommand,
+    },
+
     /// Manage the Zellij session -> WezTerm tab ID cache
     Tabs {
         #[command(subcommand)]
@@ -218,6 +226,21 @@ enum SessionsCommand {
     },
 
     /// Switch to the previous Claude session, cycling
+    Prev {
+        #[arg(long)]
+        show: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum LaneCycleCommand {
+    /// Focus the next active, reachable lane, cycling
+    Next {
+        #[arg(long)]
+        show: bool,
+    },
+
+    /// Focus the previous active, reachable lane, cycling
     Prev {
         #[arg(long)]
         show: bool,
@@ -376,6 +399,28 @@ fn main() {
                     lanes::notify_switch_show();
                 }
                 if let Err(e) = lanes::cycle_claude_session(-1) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+        },
+
+        Command::LaneCycle { command } => match command {
+            LaneCycleCommand::Next { show } => {
+                if show {
+                    lanes::notify_switch_show();
+                }
+                if let Err(e) = lanes::cycle_lane(1) {
+                    eprintln!("error: {}", e);
+                    std::process::exit(1);
+                }
+            }
+
+            LaneCycleCommand::Prev { show } => {
+                if show {
+                    lanes::notify_switch_show();
+                }
+                if let Err(e) = lanes::cycle_lane(-1) {
                     eprintln!("error: {}", e);
                     std::process::exit(1);
                 }

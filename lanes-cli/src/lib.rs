@@ -987,6 +987,39 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
     switch_claude_session(&ids[idx])
 }
 
+/// Cycle to the next (direction=1) or previous (direction=-1) active,
+/// reachable lane - a second, deliberately independent cycling policy
+/// alongside `cycle_claude_session`, not a generalization of it. Doesn't
+/// care whether anything is running inside a lane at all, Claude or
+/// otherwise - this is "which lane," not "which session." Kept as its own
+/// small function rather than unified with `cycle_claude_session` behind a
+/// shared abstraction for now: a real third policy (the lensd-backed one
+/// that's coming) will show a lot more about what that abstraction should
+/// actually look like than guessing from two policies would.
+pub fn cycle_lane(direction: i32) -> Result<(), String> {
+    let cfg = config::Config::load();
+    // cfg.lanes is already sorted by lanes.toml's `order` (Config::load) -
+    // no separate ranking step needed, unlike cycle_claude_session's own
+    // sessions (which aren't lanes themselves, just grouped by one).
+    let ids: Vec<&str> = cfg.lanes.iter()
+        .filter(|l| {
+            let has_cached_tab_id = l.terminal_session()
+                .is_some_and(|s| state::get_wezterm_tab_id(s).is_some());
+            reachable_lane_decision(l.active, has_cached_tab_id)
+        })
+        .map(|l| l.id.as_str())
+        .collect();
+
+    if ids.is_empty() {
+        return Ok(());
+    }
+
+    let cursor = state::read_focused_lane();
+    let current_index = cursor.as_deref().and_then(|c| ids.iter().position(|id| *id == c));
+    let idx = cycle_index(ids.len(), current_index, direction);
+    focus_lane(ids[idx])
+}
+
 /// A Zellij session's position in `cfg.lanes` (already sorted by lanes.toml's
 /// `order` in `Config::load`) - `cfg.lanes.len()` for anything not found, so
 /// unmatched sessions sort after every real lane rather than interleaving
