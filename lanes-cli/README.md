@@ -13,7 +13,7 @@ lanes sessions get <id>  Get a single Claude session by ID
 
 ## Configuration
 
-`~/.config/lanes/lanes.toml` is the global config - a plain preferences file living alongside the context directories, same as e.g. Zellij's own `~/.config/zellij/config.kdl` sits beside its `layouts/`. It declares which drivers to run, the order contexts should sort in, and default `[[targets]]`:
+`~/.config/lanes/lanes.toml` is the global config - a plain preferences file living alongside the context directories, same as e.g. Zellij's own `~/.config/zellij/config.kdl` sits beside its `layouts/`. It declares which drivers to run and the order contexts should sort in:
 
 ```toml
 drivers = ["zellij", "claude"]
@@ -22,6 +22,8 @@ order = ["sheetwork-sandbox", "lanes-dev", "infra"]
 
 If `drivers` is omitted, all built-in drivers run. A context missing from `order` still works at runtime (it sorts alphabetically after the listed ones), but `lanes doctor` flags it.
 
+A sibling `~/.config/lanes/layout.toml` (same file name, same `[[targets]]` shape as a context's own `layout.toml` below) supplies window-placement defaults applied to every context. A context's own `layout.toml` cascades on top of these CSS-style: its own entry for a given driver overrides the matching default rather than duplicating it; anything it doesn't mention still comes from the defaults.
+
 ### Contexts
 
 Each context is a directory under `~/.config/lanes/<id>/`. The directory name *is* the identity - there's no separate id field anywhere. Everything inside is a facet file, and every facet is optional:
@@ -29,15 +31,16 @@ Each context is a directory under `~/.config/lanes/<id>/`. The directory name *i
 ```
 ~/.config/lanes/
   lanes.toml       # global config - see above
+  layout.toml      # window-placement defaults, applied to every context
   job-hunting/
     lane.toml      # switcher-UI view: display name, active/cyclable
     tab.toml       # Zellij session name + repo/cwd scope
-    targets.toml   # window-placement targets (non-Boards)
+    layout.toml    # window-placement targets (non-Boards) - overrides the defaults above
     board.toml     # the Boards projection (a single `driver = "boards"` target)
   lanes-wm/
     lane.toml
     tab.toml
-    # no targets.toml or board.toml - this context doesn't need them
+    # no layout.toml or board.toml - this context doesn't need them
 ```
 
 A context with only `tab.toml` gets a real Zellij session without ever showing up in the Lanes Switch dashboard - useful for background contexts you don't want cluttering the switcher. A missing or malformed facet file never breaks the rest of the context (or the rest of the config); it just falls back to its default and (if malformed) prints a warning.
@@ -68,7 +71,7 @@ kind = "zellij_session"
 session = "job-hunting"
 ```
 
-Example `targets.toml` (see `PLAN-window-targets.md` for the full `[[targets]]` model):
+Example `layout.toml` (see `PLAN-window-targets.md` for the full `[[targets]]` model - same shape whether this is a context's own `<id>/layout.toml` override or the top-level `~/.config/lanes/layout.toml` defaults):
 
 ```toml
 [[targets]]

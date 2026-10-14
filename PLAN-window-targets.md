@@ -56,6 +56,14 @@ for the current, authoritative path. It already exists with
 alongside them. `position` is one of lanes-wm's five presets
 (`full`/`left-half`/`right-half`/`top-half`/`bottom-half`).
 
+**Also as of 2026-10-14:** the per-lane `[[targets]]` facet file (called
+`targets.toml` throughout the rest of this doc) was renamed to
+`layout.toml` - the `Target`/`TargetDriver` Rust vocabulary is unchanged,
+only the TOML filename. The top-level global defaults described above also
+moved out of `lanes.toml` into their own sibling `~/.config/lanes/layout.toml`,
+same file name as the per-context override - see the lanes-cli README for
+the current shape.
+
 ## Drivers (v1)
 
 Each driver is a small, fixed chunk of Rust in lanes-cli that turns its

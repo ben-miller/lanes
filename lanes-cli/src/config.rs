@@ -27,8 +27,13 @@ pub struct Config {
 
 impl Config {
     pub fn load() -> Self {
-        let (drivers, monitors, order, default_targets) = load_global_config();
-        let mut lanes = load_lanes(&config_dir(), &default_targets);
+        let (drivers, monitors, order) = load_global_config();
+        // Top-level layout.toml supplies the defaults every context's own
+        // layout.toml cascades on top of (merge_targets) - same file name
+        // at both levels, deliberately: one is "defaults", the other is
+        // "overrides" of the same thing, not two different concepts.
+        let default_targets: LayoutToml = read_facet(&config_dir().join("layout.toml"));
+        let mut lanes = load_lanes(&config_dir(), &default_targets.targets);
         if let Some(order) = &order {
             sort_by_order(&mut lanes, order);
         }
@@ -141,10 +146,6 @@ struct GlobalConfig {
     monitors: HashMap<String, MonitorConfigRaw>,
     #[serde(default)]
     order: Option<Vec<String>>,
-    /// Targets applied to every lane, cascading with (and overridable by)
-    /// each lane's own `targets.toml` - see `merge_targets`.
-    #[serde(default)]
-    targets: Vec<Target>,
 }
 
 #[derive(Deserialize)]
@@ -176,12 +177,15 @@ struct TabToml {
     scope: Vec<ScopeElementRaw>,
 }
 
-/// `<context>/targets.toml` - window-placement targets applied on switch
-/// (app / obsidian / firefox-profile / wezterm / zellij-placement / vscode
-/// / sourcetree). Boards is deliberately *not* included here - see
+/// `layout.toml` - window-placement targets applied on switch (app /
+/// obsidian / firefox-profile / wezterm / zellij-placement / vscode /
+/// sourcetree). Same shape at two levels: a top-level `~/.config/lanes/layout.toml`
+/// supplies defaults applied to every context (see `load_global_config`),
+/// and a context's own `<id>/layout.toml` overrides/adds to them (see
+/// `merge_targets`). Boards is deliberately *not* included here - see
 /// `read_board_target` for why it gets its own facet file instead.
 #[derive(Deserialize, Default)]
-struct TargetsToml {
+struct LayoutToml {
     #[serde(default)]
     targets: Vec<Target>,
 }
@@ -214,22 +218,22 @@ impl From<ScopeElementRaw> for ScopeElement {
 
 // --- Loaders ---
 
-type GlobalConfigLoaded = (Option<Vec<String>>, HashMap<String, MonitorConfig>, Option<Vec<String>>, Vec<Target>);
+type GlobalConfigLoaded = (Option<Vec<String>>, HashMap<String, MonitorConfig>, Option<Vec<String>>);
 
 fn load_global_config() -> GlobalConfigLoaded {
     let path = config_dir().join("lanes.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return (None, HashMap::new(), None, Vec::new()),
+        Err(_) => return (None, HashMap::new(), None),
     };
     let cfg: GlobalConfig = match toml::from_str(&content) {
         Ok(c) => c,
-        Err(_) => return (None, HashMap::new(), None, Vec::new()),
+        Err(_) => return (None, HashMap::new(), None),
     };
     let monitors = cfg.monitors.into_iter()
         .map(|(k, v)| (k, MonitorConfig { uuid: v.uuid, name: v.name }))
         .collect();
-    (cfg.drivers, monitors, cfg.order, cfg.targets)
+    (cfg.drivers, monitors, cfg.order)
 }
 
 /// A target's identity for cascade purposes: a lane's own target overrides
@@ -282,7 +286,7 @@ fn read_facet<T: DeserializeOwned + Default>(path: &Path) -> T {
 /// `<context>/board.toml` - the Boards projection: which Boards project
 /// this context corresponds to, plus optional placement. Kept as its own
 /// facet (one `Target`, not a list - a context has at most one board)
-/// rather than folded into `targets.toml`, because Boards is architecturally
+/// rather than folded into `layout.toml`, because Boards is architecturally
 /// different from the other target drivers: it's generated/materialized
 /// (see PLAN-context-model.md), not just another thing to place on switch.
 fn read_board_target(path: &Path) -> Option<Target> {
@@ -309,7 +313,7 @@ fn read_board_target(path: &Path) -> Option<Target> {
 /// of mutating `$HOME`, which would race every other test reading it) is
 /// one context; the directory name *is* its id (no separate field to
 /// hand-write, and so nothing to disagree with it - see LaneToml's doc
-/// comment). Inside, `lane.toml`, `tab.toml`, `targets.toml` and
+/// comment). Inside, `lane.toml`, `tab.toml`, `layout.toml` and
 /// `board.toml` are each independently optional - a context can be just a
 /// tab, just a board, all of them, or (rare but valid) none, in which case
 /// it's an inert placeholder.
@@ -331,9 +335,9 @@ fn load_lanes(dir: &Path, default_targets: &[Target]) -> Vec<Lane> {
             let path = e.path();
             let lane_toml: LaneToml = read_facet(&path.join("lane.toml"));
             let tab_toml: TabToml = read_facet(&path.join("tab.toml"));
-            let targets_toml: TargetsToml = read_facet(&path.join("targets.toml"));
+            let layout_toml: LayoutToml = read_facet(&path.join("layout.toml"));
 
-            let mut own_targets = targets_toml.targets;
+            let mut own_targets = layout_toml.targets;
             own_targets.extend(read_board_target(&path.join("board.toml")));
 
             Some(Lane {
@@ -534,7 +538,7 @@ position = 1
     }
 
     #[test]
-    fn parses_targets_toml_with_name_and_target() {
+    fn parses_layout_toml_with_name_and_target() {
         let content = r#"
 [[targets]]
 driver = "wezterm"
@@ -542,7 +546,7 @@ session = "lanes"
 monitor = "lg-right"
 position = "full"
 "#;
-        let file: TargetsToml = toml::from_str(content).unwrap();
+        let file: LayoutToml = toml::from_str(content).unwrap();
         assert_eq!(file.targets.len(), 1);
         assert_eq!(file.targets[0].driver.name(), "wezterm");
         assert_eq!(file.targets[0].monitor.as_deref(), Some("lg-right"));
@@ -569,7 +573,7 @@ col = [1, 2]
 driver = "zellij"
 session = "formation"
 "#;
-        let file: TargetsToml = toml::from_str(content).unwrap();
+        let file: LayoutToml = toml::from_str(content).unwrap();
         assert_eq!(file.targets.len(), 2);
         assert!(matches!(&file.targets[0].driver, crate::model::TargetDriver::Obsidian { vault } if vault == "Formation"));
         assert!(file.targets[0].position.is_some());
