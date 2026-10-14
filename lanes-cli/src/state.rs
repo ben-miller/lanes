@@ -317,9 +317,173 @@ fn set_signal_dismissed_in(doc: &mut KdlDocument, id: &str, dismissed: bool) {
     }
 }
 
+fn cycle_lock_dir() -> PathBuf {
+    state_path().with_file_name("cycle.lock")
+}
+
+/// A crash older than this is assumed dead, not just slow - a lock this old
+/// almost certainly means a previous holder never got to clean up (killed,
+/// panicked), not that it's still legitimately working. Kept comfortably
+/// above `LOCK_WAIT_TIMEOUT` so a holder that's merely slow (still within
+/// its own wait window from some other caller's perspective) is never
+/// mistaken for a crashed one and have its lock pulled out from under it.
+const STALE_LOCK_AGE: std::time::Duration = std::time::Duration::from_secs(30);
+/// One real transaction (apply targets, switch WezTerm/Zellij, write state)
+/// measured around 0.5s - this needs to comfortably absorb several of
+/// those queued back to back (a held-down or rapidly repeated hotkey),
+/// not just one. Found by testing: 2s was enough for 2 concurrent callers
+/// but not 7 - the 7th would've waited ~3s for the other 6 to each take
+/// their turn, past the old deadline, and fallen through to the
+/// unprotected path, reintroducing the exact race this exists to fix.
+const LOCK_WAIT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// A cross-process mutex around one full cycle transaction (read whichever
+/// lane/session is current, decide what's next, switch to it) - without
+/// this, two cycle invocations started close together (a held-down or
+/// rapidly repeated hotkey, each keypress spawning its own one-shot `lanes
+/// cycle` process) both read the *same* stale "current" before either has
+/// written its result, so they compute the same "next" and one keypress's
+/// worth of advancement gets silently lost per overlap. `mkdir` is atomic
+/// on POSIX - exactly one concurrent caller sees `Ok`, every other sees
+/// `AlreadyExists` - so it doubles as a lock with no extra dependency.
+///
+/// Waits up to `LOCK_WAIT_TIMEOUT` for a concurrent holder to finish rather
+/// than blocking forever (a cycle that's somehow stuck must not wedge every
+/// future keypress), and clears a lock older than `STALE_LOCK_AGE` outright
+/// rather than waiting out the deadline for a holder that's already dead.
+pub fn with_cycle_lock<T>(f: impl FnOnce() -> T) -> T {
+    with_lock_at(&cycle_lock_dir(), f)
+}
+
+/// `with_cycle_lock`'s actual logic, taking the lock directory as a
+/// parameter purely so tests can point it at a throwaway path instead of
+/// the real state dir - same reasoning as `load_lanes` taking `dir`
+/// explicitly rather than reading `$HOME` itself (see config.rs).
+fn with_lock_at<T>(lock_dir: &Path, f: impl FnOnce() -> T) -> T {
+    let deadline = std::time::Instant::now() + LOCK_WAIT_TIMEOUT;
+    loop {
+        match std::fs::create_dir(lock_dir) {
+            Ok(()) => break,
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                let is_stale = std::fs::metadata(lock_dir)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|modified| modified.elapsed().ok())
+                    .is_some_and(|age| age > STALE_LOCK_AGE);
+                if is_stale {
+                    let _ = std::fs::remove_dir(lock_dir);
+                }
+                // Checked on every iteration, stale-removal attempted or
+                // not - a `remove_dir` that silently fails (the directory
+                // somehow isn't empty, a permissions quirk, ...) must never
+                // turn this into an infinite loop. Found exactly this way:
+                // an early test left a file inside the lock dir, `is_stale`
+                // kept being true, `remove_dir` kept silently failing on a
+                // non-empty directory, and this spun forever with no
+                // deadline check reachable from that branch.
+                if std::time::Instant::now() >= deadline {
+                    // Proceed without the lock rather than hang forever -
+                    // a missed update on timeout is the same failure mode
+                    // this is fixing, just rarer, not a new one.
+                    break;
+                }
+                if !is_stale {
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+            }
+            // Some other filesystem error (permissions, disk full, ...) -
+            // don't let a lock we can't even create hang every cycle.
+            Err(_) => break,
+        }
+    }
+    let result = f();
+    let _ = std::fs::remove_dir(lock_dir);
+    result
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn lock_test_dir(label: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lanes-state-test-lock-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        dir
+    }
+
+    #[test]
+    fn with_lock_at_returns_the_closures_result() {
+        let lock_dir = lock_test_dir("return-value");
+        let result = with_lock_at(&lock_dir, || 42);
+        assert_eq!(result, 42);
+    }
+
+    #[test]
+    fn with_lock_at_removes_the_lock_dir_when_done() {
+        let lock_dir = lock_test_dir("cleanup");
+        with_lock_at(&lock_dir, || ());
+        assert!(!lock_dir.exists());
+    }
+
+    #[test]
+    fn with_lock_at_serializes_concurrent_callers() {
+        // The actual bug this exists to fix: two overlapping transactions
+        // must never see each other's "before" state - one must fully
+        // finish (including its write) before the other even starts its
+        // read. Modeled here as two threads incrementing a shared counter
+        // through a read-then-write-with-a-delay step that would lose an
+        // update if they interleaved.
+        let lock_dir = std::sync::Arc::new(lock_test_dir("serialize"));
+        let counter = std::sync::Arc::new(std::sync::Mutex::new(0));
+
+        let handles: Vec<_> = (0..8)
+            .map(|_| {
+                let lock_dir = lock_dir.clone();
+                let counter = counter.clone();
+                std::thread::spawn(move || {
+                    with_lock_at(&lock_dir, || {
+                        let current = *counter.lock().unwrap();
+                        std::thread::sleep(std::time::Duration::from_millis(5));
+                        *counter.lock().unwrap() = current + 1;
+                    });
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        assert_eq!(*counter.lock().unwrap(), 8, "a racing pair would have lost at least one increment");
+        let _ = std::fs::remove_dir_all(&*lock_dir);
+    }
+
+    #[test]
+    fn with_lock_at_clears_a_stale_lock_instead_of_waiting_out_the_deadline() {
+        let lock_dir = lock_test_dir("stale");
+        std::fs::create_dir(&lock_dir).unwrap();
+        // Backdate it past STALE_LOCK_AGE, standing in for a lock a
+        // crashed process never cleaned up - std's own File::set_modified
+        // (stable since 1.75) is enough for this, no extra dependency
+        // needed just to touch an mtime. The directory must stay empty -
+        // remove_dir only removes empty directories, and a non-empty one
+        // here would make this test exercise the "stale removal silently
+        // fails" case instead (a real bug `with_lock_at` had to be fixed
+        // for separately - see the comment at its deadline check).
+        let backdated = std::time::SystemTime::now() - (STALE_LOCK_AGE + std::time::Duration::from_secs(1));
+        std::fs::File::open(&lock_dir).unwrap().set_modified(backdated).unwrap();
+
+        let start = std::time::Instant::now();
+        with_lock_at(&lock_dir, || ());
+        // A stale lock is cleared and retried immediately, not waited out -
+        // this should finish almost instantly, nowhere near the full
+        // contention timeout.
+        assert!(start.elapsed() < LOCK_WAIT_TIMEOUT / 2);
+        let _ = std::fs::remove_dir_all(&lock_dir);
+    }
 
     #[test]
     fn atomic_write_replaces_contents_and_leaves_no_tmp_behind() {

@@ -919,7 +919,16 @@ pub fn notify_switch_show_inactive_noop() {
 /// left-to-right within that tab (see `pane_position_rank`) - falling back
 /// to Zellij session name then session ID for any session whose lane isn't
 /// listed in `order`, or whose pane position couldn't be resolved.
+/// Thin lock-holding wrapper - see `state::with_cycle_lock`'s own doc
+/// comment for why this needs to exist at all (concurrent/rapid cycle
+/// invocations otherwise race, each reading the same stale "current"
+/// before any of them has written). `cycle_claude_session_impl` is the
+/// actual logic, unchanged.
 pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
+    state::with_cycle_lock(|| cycle_claude_session_impl(direction))
+}
+
+fn cycle_claude_session_impl(direction: i32) -> Result<(), String> {
     let ct0 = std::time::Instant::now();
     let cfg = config::Config::load();
     let live_sessions = if cfg.driver_enabled("claude") {
@@ -996,7 +1005,13 @@ pub fn cycle_claude_session(direction: i32) -> Result<(), String> {
 /// shared abstraction for now: a real third policy (the lensd-backed one
 /// that's coming) will show a lot more about what that abstraction should
 /// actually look like than guessing from two policies would.
+/// Same lock-holding wrapper as `cycle_claude_session` - see
+/// `state::with_cycle_lock`'s doc comment.
 pub fn cycle_lane(direction: i32) -> Result<(), String> {
+    state::with_cycle_lock(|| cycle_lane_impl(direction))
+}
+
+fn cycle_lane_impl(direction: i32) -> Result<(), String> {
     let cfg = config::Config::load();
     // cfg.lanes is already sorted by lanes.toml's `order` (Config::load) -
     // no separate ranking step needed, unlike cycle_claude_session's own
