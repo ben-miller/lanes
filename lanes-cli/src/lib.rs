@@ -350,7 +350,9 @@ fn lane_terminal_running(facets: &[model::FacetSnapshot]) -> Option<bool> {
 /// session is the other half: a reachable lane with only a pending-commit
 /// signal still has nothing for a cycle to land on.
 fn lane_cyclable(active: bool, reachable: Option<bool>, has_claude_signal: bool) -> bool {
-    reachable.is_some_and(|r| reachable_lane_decision(active, r)) && has_claude_signal
+    // reachable is Some only when lane_reachable found a Terminal facet at
+    // all, so has_terminal_session is unconditionally true here too.
+    reachable.is_some_and(|r| reachable_lane_decision(active, true, r)) && has_claude_signal
 }
 
 /// Whether one specific signal is something `sessions next`/`prev` would
@@ -1048,7 +1050,7 @@ fn cycle_lane_impl(direction: i32) -> Result<(), String> {
         .filter(|l| {
             let has_cached_tab_id = l.terminal_session()
                 .is_some_and(|s| state::get_wezterm_tab_id(s).is_some());
-            reachable_lane_decision(l.active, has_cached_tab_id)
+            reachable_lane_decision(l.active, l.terminal_session().is_some(), has_cached_tab_id)
         })
         .map(|l| l.id.as_str())
         .collect();
@@ -1129,15 +1131,23 @@ fn session_belongs_to_reachable_lane(zellij_session: Option<&str>, cfg: &config:
     let zellij_session = zellij_session.unwrap_or("");
     match cfg.lane_for_session(zellij_session) {
         Some(lane) => {
+            // Matched by terminal_session() == Some(zellij_session), so this
+            // lane has a terminal by construction - true unconditionally.
             let has_cached_tab_id = state::get_wezterm_tab_id(zellij_session).is_some();
-            reachable_lane_decision(lane.active, has_cached_tab_id)
+            reachable_lane_decision(lane.active, true, has_cached_tab_id)
         }
         None => true,
     }
 }
 
-fn reachable_lane_decision(active: bool, has_cached_tab_id: bool) -> bool {
-    active && has_cached_tab_id
+/// `has_cached_tab_id` only matters when the lane actually has a terminal to
+/// land on - a lane with no Terminal facet at all (no `tab.toml`, or one
+/// with no `zellij_session` scope element) has nothing for that cache to be
+/// missing, so it's reachable on `active` alone. Without this, a lane never
+/// shows up in cycling at all until it's given a terminal - the terminal
+/// isn't what cycling fundamentally depends on, landing on *something* is.
+fn reachable_lane_decision(active: bool, has_terminal_session: bool, has_cached_tab_id: bool) -> bool {
+    active && (!has_terminal_session || has_cached_tab_id)
 }
 
 fn cycle_index(len: usize, current_index: Option<usize>, direction: i32) -> usize {
@@ -1400,6 +1410,22 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
     }
 }
 
+/// Whether a wezterm/zellij target has no session to act on at all - no
+/// `session` field of its own, and no lane-level `default_session` to fall
+/// back to either. True for a target a lane only has because it inherited
+/// it from a global default (e.g. `default.toml`'s wezterm target) while
+/// the lane itself has no terminal facet yet - there's nothing for it to
+/// address, so it's nothing-to-do, not a failure. Any other driver always
+/// returns false here - they don't have a session concept at all.
+fn terminal_target_has_no_resolvable_session(driver: &model::TargetDriver, default_session: Option<&str>) -> bool {
+    let own_session = match driver {
+        model::TargetDriver::Wezterm { session } => session,
+        model::TargetDriver::Zellij { session, .. } => session,
+        _ => return false,
+    };
+    own_session.is_none() && default_session.is_none()
+}
+
 /// Activate every target in a lane, then place all of them that asked for
 /// placement in a single `lanes-wm apply` call - never one `lanes-wm place`
 /// per target, since a lane switch always moves several windows at once and
@@ -1439,6 +1465,16 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
             placement.insert("app".to_string(), serde_json::json!(bundle_id));
             placement.insert("minimized".to_string(), serde_json::json!(minimized));
             placements.push(serde_json::Value::Object(placement));
+            continue;
+        }
+
+        // A wezterm/zellij target with no session of its own, in a lane
+        // with no terminal session to default to (e.g. inherited from the
+        // global default.toml by a lane that doesn't have one of its own
+        // yet) - nothing to do, not a failure. Without this, such a lane
+        // couldn't be landed on at all: every switch would hard-error on a
+        // target that was never meant to apply to it in the first place.
+        if terminal_target_has_no_resolvable_session(&target.driver, default_session) {
             continue;
         }
 
@@ -2221,13 +2257,13 @@ mod tests {
 
     #[test]
     fn inactive_lane_is_never_reachable_regardless_of_cached_tab_id() {
-        assert!(!reachable_lane_decision(false, false));
-        assert!(!reachable_lane_decision(false, true));
+        assert!(!reachable_lane_decision(false, true, false));
+        assert!(!reachable_lane_decision(false, true, true));
     }
 
     #[test]
     fn active_lane_with_cached_tab_id_is_reachable() {
-        assert!(reachable_lane_decision(true, true));
+        assert!(reachable_lane_decision(true, true, true));
     }
 
     #[test]
@@ -2236,7 +2272,52 @@ mod tests {
         // active flag says yes, but nothing has ever pushed (or something
         // cleared) a cached WezTerm tab-id for it - exactly what caused the
         // "wezterm activate-tab failed" cycling errors.
-        assert!(!reachable_lane_decision(true, false));
+        assert!(!reachable_lane_decision(true, true, false));
+    }
+
+    #[test]
+    fn active_lane_with_no_terminal_at_all_is_reachable_regardless_of_tab_id() {
+        // job-hunting's actual case: no tab.toml yet at all, so there's no
+        // terminal to have a missing/stale tab-id in the first place -
+        // cycling shouldn't skip it just because it hasn't been given a
+        // terminal yet.
+        assert!(reachable_lane_decision(true, false, false));
+    }
+
+    #[test]
+    fn inherited_wezterm_target_with_no_default_session_has_no_resolvable_session() {
+        // job-hunting's actual case: it inherits default.toml's wezterm
+        // target (session omitted, meant to default to whichever lane owns
+        // it) but has no terminal session of its own to default to.
+        let driver = model::TargetDriver::Wezterm { session: None };
+        assert!(terminal_target_has_no_resolvable_session(&driver, None));
+    }
+
+    #[test]
+    fn wezterm_target_resolves_via_its_own_session_even_with_no_default() {
+        let driver = model::TargetDriver::Wezterm { session: Some("explicit".to_string()) };
+        assert!(!terminal_target_has_no_resolvable_session(&driver, None));
+    }
+
+    #[test]
+    fn wezterm_target_resolves_via_the_lanes_default_session() {
+        let driver = model::TargetDriver::Wezterm { session: None };
+        assert!(!terminal_target_has_no_resolvable_session(&driver, Some("lane-session")));
+    }
+
+    #[test]
+    fn zellij_target_with_no_session_and_no_default_has_no_resolvable_session() {
+        let driver = model::TargetDriver::Zellij { session: None, pane: None };
+        assert!(terminal_target_has_no_resolvable_session(&driver, None));
+    }
+
+    #[test]
+    fn non_terminal_driver_never_has_an_unresolvable_session() {
+        // Drivers without a session concept at all (obsidian, app, ...)
+        // always return false here - this check only ever applies to
+        // wezterm/zellij.
+        let driver = model::TargetDriver::App { name: "Firefox".to_string(), bundle_id: None };
+        assert!(!terminal_target_has_no_resolvable_session(&driver, None));
     }
 
     fn ordered_lane(id: &str, session: &str) -> model::Lane {

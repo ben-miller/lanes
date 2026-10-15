@@ -899,10 +899,13 @@ fn check_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path
 
 /// Creates `<data_dir>/<project>/board.yaml` for any context's board.toml
 /// project that doesn't exist yet, using the context's display name as the
-/// title and a plain default column set. Never touches a project that
-/// already exists - once created, its content (columns, cards) is Boards'
-/// to own, not lanes-cli's to overwrite on every `--fix`. Returns the
-/// project names actually created.
+/// title and a single `Inbox` column - the user's own convention: every
+/// fresh board starts as just an inbox, with no presumed workflow stages
+/// (no Backlog/Doing/Done baked in), and gets whatever columns it actually
+/// needs added later by hand. Never touches a project that already exists -
+/// once created, its content (columns, cards) is Boards' to own, not
+/// lanes-cli's to overwrite on every `--fix`. Returns the project names
+/// actually created.
 fn materialize_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Vec<String> {
     let mut created = Vec::new();
     for (name, project) in boards_project_names(cfg) {
@@ -918,7 +921,7 @@ fn materialize_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path
         // Double-quoted YAML scalar, so a display name with a colon,
         // hash, or other flow-scalar-breaking character is still valid.
         let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
-        let content = format!("title: \"{escaped_name}\"\ncolumns: [Backlog, Doing, Done]\n");
+        let content = format!("title: \"{escaped_name}\"\ncolumns: [Inbox]\n");
         if std::fs::write(&board_yaml, content).is_ok() {
             created.push(project.to_string());
         }
@@ -1064,7 +1067,7 @@ mod tests {
 
         let content = std::fs::read_to_string(dir.join("infra-board/board.yaml")).unwrap();
         assert!(content.contains("title: \"infra\""));
-        assert!(content.contains("columns: [Backlog, Doing, Done]"));
+        assert!(content.contains("columns: [Inbox]"));
 
         let _ = std::fs::remove_dir_all(&dir);
     }
