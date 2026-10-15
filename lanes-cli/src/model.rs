@@ -37,7 +37,8 @@ pub struct Lane {
     // imperative action ("activate this, optionally place it") triggered on
     // lane focus. Doesn't fit the scope/observation model, so it stays its
     // own thing rather than being forced into a ScopeElement kind with no
-    // observations and no real locator identity. See PLAN-window-targets.md.
+    // observations and no real locator identity. See the README's "Target
+    // drivers" section.
     #[serde(default)]
     pub targets: Vec<Target>,
     // The name of the `layout-templates/<name>.toml` this lane's own
@@ -66,8 +67,8 @@ impl Lane {
 /// One thing a lane wants activated (made frontmost/focused) on lane focus,
 /// and optionally placed on a monitor afterward. Every driver is the same
 /// shape - a name plus that driver's own fields - so adding a new app means
-/// adding one driver, never new config syntax. See PLAN-window-targets.md
-/// (in the lanes repo root) for the full design rationale.
+/// adding one driver, never new config syntax. See the lanes-cli README's
+/// "Target drivers" section.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Target {
     #[serde(flatten)]
@@ -83,8 +84,9 @@ pub struct Target {
     #[serde(default)]
     pub position: Option<toml::Value>,
     /// Whether to launch the app first if it isn't already running.
-    /// Deliberately opt-in, not automatic - see PLAN-window-targets.md's
-    /// "App-not-running behavior".
+    /// Deliberately opt-in, not automatic: with this false (the default) a
+    /// not-running app is a loud per-target failure, not a silent skip or
+    /// a silent auto-open.
     #[serde(default)]
     pub launch: bool,
     /// Force raising this target's window even though it also has a
@@ -155,7 +157,7 @@ pub enum TargetDriver {
     /// optional and only needed if this target also wants placement
     /// (`monitor`/`position`) - without it, this is activate-only, no
     /// window/tab addressing at all, deliberately the ceiling for apps
-    /// without one of the drivers above (see PLAN-window-targets.md).
+    /// without one of the drivers above.
     App {
         name: String,
         #[serde(default)]

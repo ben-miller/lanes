@@ -1293,7 +1293,7 @@ fn run_command_checked(cmd: &mut std::process::Command, label: &str) -> Result<(
 /// the right window/pane/vault frontmost. Doesn't place anything itself;
 /// placement is a separate, batched step in `apply_targets` (every
 /// placement in a lane goes through one `lanes-wm apply` call, not one per
-/// target - see PLAN-window-targets.md).
+/// target).
 ///
 /// `default_session` is the owning lane's own terminal session - used when
 /// a `wezterm`/`zellij` target omits `session`, which is what lets one
@@ -1375,8 +1375,8 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
 /// Activate every target in a lane, then place all of them that asked for
 /// placement in a single `lanes-wm apply` call - never one `lanes-wm place`
 /// per target, since a lane switch always moves several windows at once and
-/// should do it in one shot (see PLAN-window-targets.md). Best-effort like
-/// the scope loop above: one broken target doesn't block the rest.
+/// should do it in one shot. Best-effort like the scope loop above: one
+/// broken target doesn't block the rest.
 ///
 /// `default_session` - see `activate_target`.
 fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_session: Option<&str>) -> Vec<String> {

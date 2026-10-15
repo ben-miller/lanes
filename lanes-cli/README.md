@@ -76,14 +76,31 @@ kind = "zellij_session"
 session = "job-hunting"
 ```
 
-Example `layout.toml` (see `PLAN-window-targets.md` for the full `[[targets]]` model and `PLAN-layout-templates.md` for the cascade - same shape whether this is a context's own `contexts/<id>/layout.toml`, a `layout-templates/<name>.toml`, or `layout-templates/default.toml`):
+Example `layout.toml` (see `PLAN-layout-templates.md` for the cascade - same shape whether this is a context's own `contexts/<id>/layout.toml`, a `layout-templates/<name>.toml`, or `layout-templates/default.toml`):
 
 ```toml
 [[targets]]
-driver = "firefox_profile"
-profile = "job-hunting"
+driver = "obsidian"
+vault = "job-hunting"
+monitor = "lg-left"
 position = { cols = 3, col = [1, 2] }
 ```
+
+### Target drivers
+
+Each target's `driver` picks one of these; fields beyond it are driver-specific:
+
+| driver | fields | mechanism |
+|---|---|---|
+| `wezterm` | `session` (optional, defaults to the lane's own terminal session) | `wezterm cli activate-tab` |
+| `zellij` | `session` (optional), `pane` (optional) | zellij's own action API |
+| `obsidian` | `vault` | `open 'obsidian://open?vault=<vault>'`, placed via lanes-wm's focused-window selector |
+| `boards` | `project` | `open 'boards://open?project=<project>'` - matches a folder name under Boards' own data root exactly, case-sensitive |
+| `sourcetree` | `repo` | `cd <repo> && stree` |
+| `vscode` | `folder` | `code -r <folder>` (reuse window) |
+| `app` | `name`, `bundle_id` (optional) | `open -a <name>`; `bundle_id` unlocks placement, otherwise activate-only |
+
+A placed target (`monitor` set) only raises its app if `raise = true` - it's correctly repositioned via lanes-wm's focused-window selector either way, so stealing focus is opt-in (needed for a "peek" app whose whole point is to be seen immediately, e.g. a Trello board glance-view).
 
 A target can minimize instead of place - `minimized = true`, no `monitor`/`position` (mutually exclusive with them). Good for a window an app insists on keeping open but that has no actual use, e.g. Wispr Flow's:
 
