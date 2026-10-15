@@ -22,25 +22,30 @@ order = ["sheetwork-sandbox", "lanes-dev", "infra"]
 
 If `drivers` is omitted, all built-in drivers run. A context missing from `order` still works at runtime (it sorts alphabetically after the listed ones), but `lanes doctor` flags it.
 
-A sibling `~/.config/lanes/layout.toml` (same file name, same `[[targets]]` shape as a context's own `layout.toml` below) supplies window-placement defaults applied to every context. A context's own `layout.toml` cascades on top of these CSS-style: its own entry for a given driver overrides the matching default rather than duplicating it; anything it doesn't mention still comes from the defaults.
+`~/.config/lanes/layout-templates/default.toml` (same `[[targets]]` shape as a context's own `layout.toml` below) supplies window-placement defaults applied to every context, unconditionally. A context's own `layout.toml` can also opt into one named `layout-templates/<name>.toml` via `layout_template = "<name>"`, cascading in between. Each level overrides the previous one CSS-style: an entry for a given driver overrides the matching one from the level below rather than duplicating it; anything it doesn't mention still comes from there. See `PLAN-layout-templates.md` for the full design.
 
 ### Contexts
 
-Each context is a directory under `~/.config/lanes/<id>/`. The directory name *is* the identity - there's no separate id field anywhere. Everything inside is a facet file, and every facet is optional:
+Each context is a directory under `~/.config/lanes/contexts/<id>/`. The directory name *is* the identity - there's no separate id field anywhere. Everything inside is a facet file, and every facet is optional:
 
 ```
 ~/.config/lanes/
-  lanes.toml       # global config - see above
-  layout.toml      # window-placement defaults, applied to every context
-  job-hunting/
-    lane.toml      # switcher-UI view: display name, active/cyclable
-    tab.toml       # Zellij session name + repo/cwd scope
-    layout.toml    # window-placement targets (non-Boards) - overrides the defaults above
-    board.toml     # the Boards projection (a single `driver = "boards"` target)
-  lanes-wm/
-    lane.toml
-    tab.toml
-    # no layout.toml or board.toml - this context doesn't need them
+  lanes.toml           # global config - see above
+  layout-templates/
+    default.toml       # window-placement defaults, applied to every context
+    dev.toml           # a named template a context can opt into - see
+                        # PLAN-layout-templates.md
+  contexts/
+    job-hunting/
+      lane.toml         # switcher-UI view: display name, active/cyclable
+      tab.toml          # Zellij session name + repo/cwd scope
+      layout.toml       # window-placement targets (non-Boards) - overrides
+                         # default.toml (and an opted-into template, if any)
+      board.toml        # the Boards projection (a single `driver = "boards"` target)
+    lanes-wm/
+      lane.toml
+      tab.toml
+      # no layout.toml or board.toml - this context doesn't need them
 ```
 
 A context with only `tab.toml` gets a real Zellij session without ever showing up in the Lanes Switch dashboard - useful for background contexts you don't want cluttering the switcher. A missing or malformed facet file never breaks the rest of the context (or the rest of the config); it just falls back to its default and (if malformed) prints a warning.
@@ -71,7 +76,7 @@ kind = "zellij_session"
 session = "job-hunting"
 ```
 
-Example `layout.toml` (see `PLAN-window-targets.md` for the full `[[targets]]` model - same shape whether this is a context's own `<id>/layout.toml` override or the top-level `~/.config/lanes/layout.toml` defaults):
+Example `layout.toml` (see `PLAN-window-targets.md` for the full `[[targets]]` model and `PLAN-layout-templates.md` for the cascade - same shape whether this is a context's own `contexts/<id>/layout.toml`, a `layout-templates/<name>.toml`, or `layout-templates/default.toml`):
 
 ```toml
 [[targets]]

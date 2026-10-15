@@ -153,3 +153,18 @@ No templates need to actually exist yet for this migration to land cleanly
 - `layout-templates/` can start with only `default.toml` and grow templates
 as real shared patterns emerge (e.g. a `dev.toml` once there's an actual
 second or third dev-flavored context to justify it).
+
+## Firefox and Claude: tracked, then untracked
+
+`dev.toml` and the global `default.toml` briefly auto-placed Firefox and
+Claude on the left screen for dev-flavored lanes (Firefox right two-thirds,
+Claude left two-thirds, overlapping). Removed 2026-10-15: not every window
+should be under layout-template control - the left screen specifically is
+left alone between switches by choice, not tracked at all. This surfaced a
+real gap in the cascade model worth remembering: there's no way to have a
+context *suppress* an inherited default (only override-by-replacement, same
+identity wins) - removing a target from everyone's cascade means deleting it
+at its source (here, `default.toml`) rather than something a context or
+template can opt out of individually. Not worth solving generally until a
+concrete case needs one default suppressed while another context still
+wants it - today nothing does.
