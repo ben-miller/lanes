@@ -502,7 +502,7 @@ fn check_primary_targets(cfg: &lanes::config::Config) -> Check {
 /// Every lane's `layout_template` (if set) must resolve to a real file
 /// under `layout-templates/` - a `Fail`, not a `Warn`: a lane silently
 /// missing its whole template layer on a typo is an easy-to-miss bug, not a
-/// soft problem. See PLAN-layout-templates.md. `templates_dir` is always
+/// soft problem. `templates_dir` is always
 /// `config_dir().join("layout-templates")` outside tests - a parameter for
 /// the same hermeticity reason `config::load_lanes`'s `dir` is.
 fn check_layout_templates(cfg: &lanes::config::Config, templates_dir: &std::path::Path) -> Check {

@@ -22,7 +22,7 @@ order = ["sheetwork-sandbox", "lanes-dev", "infra"]
 
 If `drivers` is omitted, all built-in drivers run. A context missing from `order` still works at runtime (it sorts alphabetically after the listed ones), but `lanes doctor` flags it.
 
-`~/.config/lanes/layout-templates/default.toml` (same `[[targets]]` shape as a context's own `layout.toml` below) supplies window-placement defaults applied to every context, unconditionally. A context's own `layout.toml` can also opt into one named `layout-templates/<name>.toml` via `layout_template = "<name>"`, cascading in between. Each level overrides the previous one CSS-style: an entry for a given driver overrides the matching one from the level below rather than duplicating it; anything it doesn't mention still comes from there. See `PLAN-layout-templates.md` for the full design.
+`~/.config/lanes/layout-templates/default.toml` (same `[[targets]]` shape as a context's own `layout.toml` below) supplies window-placement defaults applied to every context, unconditionally. A context's own `layout.toml` can also opt into one named `layout-templates/<name>.toml` via `layout_template = "<name>"`, cascading in between. Each level overrides the previous one CSS-style: an entry for a given driver overrides the matching one from the level below rather than duplicating it; anything it doesn't mention still comes from there. See `DECISIONS.md` for why this is single-inheritance (no mixins) and why contexts/templates live in separate directories.
 
 ### Contexts
 
@@ -33,8 +33,8 @@ Each context is a directory under `~/.config/lanes/contexts/<id>/`. The director
   lanes.toml           # global config - see above
   layout-templates/
     default.toml       # window-placement defaults, applied to every context
-    dev.toml           # a named template a context can opt into - see
-                        # PLAN-layout-templates.md
+    dev.toml           # a named template a context can opt into via
+                        # layout_template = "dev"
   contexts/
     job-hunting/
       lane.toml         # switcher-UI view: display name, active/cyclable
@@ -76,7 +76,7 @@ kind = "zellij_session"
 session = "job-hunting"
 ```
 
-Example `layout.toml` (see `PLAN-layout-templates.md` for the cascade - same shape whether this is a context's own `contexts/<id>/layout.toml`, a `layout-templates/<name>.toml`, or `layout-templates/default.toml`):
+Example `layout.toml` (same shape whether this is a context's own `contexts/<id>/layout.toml`, a `layout-templates/<name>.toml`, or `layout-templates/default.toml` - see the "Contexts" section above for the cascade):
 
 ```toml
 [[targets]]

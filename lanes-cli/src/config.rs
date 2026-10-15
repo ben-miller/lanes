@@ -33,7 +33,7 @@ impl Config {
         let (drivers, monitors, order, cycle_policy) = load_global_config();
         // "default" is just a template like any other - it's the one every
         // context implicitly, unconditionally starts its cascade from (no
-        // opt-out) - see PLAN-layout-templates.md.
+        // opt-out).
         let templates_dir = config_dir().join("layout-templates");
         let default_targets = load_layout_template(&templates_dir, "default");
         let mut lanes = load_lanes(&config_dir().join("contexts"), &templates_dir, &default_targets);
@@ -195,10 +195,9 @@ struct TabToml {
 #[derive(Deserialize, Default)]
 struct LayoutToml {
     /// Name of a `layout-templates/<name>.toml` to cascade in between the
-    /// implicit `default.toml` and this file's own `targets` - see
-    /// PLAN-layout-templates.md. Single inheritance only, deliberately: see
-    /// that doc for why mixins (multiple templates) are out of scope for
-    /// now.
+    /// implicit `default.toml` and this file's own `targets`. Single
+    /// inheritance only, deliberately - see DECISIONS.md for why mixins
+    /// (multiple templates) are out of scope for now.
     #[serde(default)]
     layout_template: Option<String>,
     #[serde(default)]
