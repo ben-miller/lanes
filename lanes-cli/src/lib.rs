@@ -816,7 +816,7 @@ pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
         // this path always did before land_lane existed.
         match lane {
             Some(lane) => {
-                for w in land_lane(lane, zellij_pane_id) {
+                for w in land_lane(lane, zellij_pane_id, t0) {
                     eprintln!("warning: {w}");
                 }
             }
@@ -1434,8 +1434,10 @@ fn terminal_target_has_no_resolvable_session(driver: &model::TargetDriver, defau
 ///
 /// `default_session` - see `activate_target`.
 fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_session: Option<&str>) -> Vec<String> {
+    let t0 = std::time::Instant::now();
     let mut warnings = Vec::new();
     let mut placements = Vec::new();
+    let mut pending = Vec::new();
 
     for target in targets {
         if target.launch {
@@ -1478,12 +1480,47 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
             continue;
         }
 
-        // Only raise an `app` target's window when it isn't being placed,
-        // unless the target explicitly asks to be raised anyway (a "peek"
-        // app that also wants placement) - see activate_target's doc
-        // comment and Target::raise's doc comment for why.
-        let raise_app = target.monitor.is_none() || target.raise;
-        if let Err(e) = activate_target(&target.driver, raise_app, default_session) {
+        pending.push(target);
+    }
+
+    // Each pending target's activation is an independent blocking
+    // subprocess call (an `open` URI, a wezterm/zellij CLI round trip) that
+    // doesn't depend on any other target's - land_lane always runs after
+    // this and has the true final say on what ends up frontmost (see its
+    // own doc comment), so activation order here was never load-bearing for
+    // the end state. Running them concurrently rather than summing their
+    // durations one by one measurably shortens every lane switch -
+    // confirmed via perf.log (~420ms -> dominated by the slower of the two
+    // calls instead of their sum).
+    let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
+        let handles: Vec<_> = pending
+            .iter()
+            .map(|target| {
+                scope.spawn(move || {
+                    let target_t0 = std::time::Instant::now();
+                    // Only raise an `app` target's window when it isn't
+                    // being placed, unless the target explicitly asks to be
+                    // raised anyway (a "peek" app that also wants
+                    // placement) - see activate_target's doc comment and
+                    // Target::raise's doc comment for why.
+                    let raise_app = target.monitor.is_none() || target.raise;
+                    let result = activate_target(&target.driver, raise_app, default_session);
+                    logging::perf(
+                        "focus.target_activated",
+                        &format!("driver={} elapsed_us={}", target.driver.name(), target_t0.elapsed().as_micros()),
+                    );
+                    result
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .map(|h| h.join().unwrap_or_else(|_| Err("activation thread panicked".to_string())))
+            .collect()
+    });
+
+    for (target, result) in pending.into_iter().zip(results) {
+        if let Err(e) = result {
             let e = format!("target '{}': {e}", target.driver.name());
             eprintln!("warning: {e}");
             warnings.push(e);
@@ -1532,7 +1569,9 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
     }
 
     if !placements.is_empty() {
+        logging::perf("focus.wm_apply_start", &format!("count={} elapsed_us={}", placements.len(), t0.elapsed().as_micros()));
         warnings.extend(run_lanes_wm_apply(&placements));
+        logging::perf("focus.wm_apply_done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
     }
 
     warnings
@@ -1722,7 +1761,7 @@ fn preferred_pane(primary: Option<&model::Target>, explicit_pane_id: Option<u64>
     })
 }
 
-fn land_lane(lane: &model::Lane, explicit_pane_id: Option<u64>) -> Vec<String> {
+fn land_lane(lane: &model::Lane, explicit_pane_id: Option<u64>, t0: std::time::Instant) -> Vec<String> {
     let mut warnings = Vec::new();
     let primary = primary_target(&lane.targets);
 
@@ -1731,6 +1770,7 @@ fn land_lane(lane: &model::Lane, explicit_pane_id: Option<u64>) -> Vec<String> {
             eprintln!("warning: {}", e);
             warnings.push(e);
         } else {
+            logging::perf("focus.wezterm_activated", &format!("elapsed_us={}", t0.elapsed().as_micros()));
             let pane_id = preferred_pane(primary, explicit_pane_id)
                 .or_else(|| first_pane_id(session).map(|p| p as u64));
             if let Some(pane_id) = pane_id {
@@ -1739,6 +1779,7 @@ fn land_lane(lane: &model::Lane, explicit_pane_id: Option<u64>) -> Vec<String> {
                     warnings.push(e);
                 }
             }
+            logging::perf("focus.pane_focused", &format!("elapsed_us={}", t0.elapsed().as_micros()));
         }
     }
 
@@ -1749,6 +1790,7 @@ fn land_lane(lane: &model::Lane, explicit_pane_id: Option<u64>) -> Vec<String> {
                 eprintln!("warning: {e}");
                 warnings.push(e);
             }
+            logging::perf("focus.primary_target_activated", &format!("elapsed_us={}", t0.elapsed().as_micros()));
         }
     }
 
@@ -1756,11 +1798,27 @@ fn land_lane(lane: &model::Lane, explicit_pane_id: Option<u64>) -> Vec<String> {
 }
 
 pub fn focus_lane(lane_id: &str) -> Result<(), String> {
+    let t0 = std::time::Instant::now();
+    logging::perf("focus.trigger", &format!("lane={lane_id}"));
+
     let cfg = config::Config::load();
     let lane = match cfg.lanes.iter().find(|l| l.id == lane_id) {
         Some(l) => l,
         None => return Err(format!("lane not found: {}", lane_id)),
     };
+    logging::perf("focus.config_loaded", &format!("lane={lane_id} elapsed_us={}", t0.elapsed().as_micros()));
+
+    // Written and broadcast immediately, before the actual window-moving
+    // work below even starts - same reasoning as switch_claude_session's
+    // own optimistic write (see its doc comment): the UI's highlight should
+    // update as close to the keystroke as possible, not after waiting on
+    // apply_targets/land_lane's subprocess calls it doesn't actually depend
+    // on. Without the direct socket notify here, an already-running UI only
+    // learned the new focused lane via the state.kdl filesystem watcher's
+    // own floor latency - this is the ClaudeSessions cycle policy's fast
+    // path, previously missing entirely from the Lanes cycle policy.
+    state::set_focused_lane(lane_id);
+    notify_switch_socket(&format!("switch:{lane_id}|\n"));
 
     // Targets (Firefox, peek apps, etc.) are applied *before* land_lane -
     // each target's own activation step brings that app frontmost, so
@@ -1768,9 +1826,10 @@ pub fn focus_lane(lane_id: &str) -> Result<(), String> {
     // primary target) gets the true last word, not whichever target
     // happened to be activated last.
     let mut warnings = apply_targets(&lane.targets, &cfg, lane.terminal_session());
-    warnings.extend(land_lane(lane, None));
+    logging::perf("focus.targets_applied", &format!("lane={lane_id} elapsed_us={}", t0.elapsed().as_micros()));
+    warnings.extend(land_lane(lane, None, t0));
 
-    state::set_focused_lane(lane_id);
+    logging::perf("focus.complete", &format!("lane={lane_id} elapsed_us={}", t0.elapsed().as_micros()));
 
     if warnings.is_empty() {
         Ok(())
