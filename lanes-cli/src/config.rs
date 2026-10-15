@@ -18,29 +18,50 @@ pub struct Config {
     pub drivers: Option<Vec<String>>,
     /// Monitor handle -> config, from lanes.toml [monitors.*].
     pub monitors: HashMap<String, MonitorConfig>,
-    /// Lane display order, from lanes.toml `order` (list of lane ids). Lanes
-    /// not listed fall back to alphabetical-by-id, after any listed ones.
+    /// Context display order, from `contexts.toml`'s `order` (list of
+    /// context ids) - deliberately its own file, not lanes.toml: this is an
+    /// ordering over *contexts* in general (lane or not - e.g. a board-only
+    /// context like `development`), not something owned by "being a lane."
+    /// Contexts not listed fall back to alphabetical-by-id, after any listed
+    /// ones.
     pub order: Option<Vec<String>>,
     /// Which candidate list `lanes cycle` steps through - see
     /// `CyclePolicy`'s own doc comment.
     pub cycle_policy: CyclePolicy,
-    /// Discovered lane definitions.
+    /// Discovered lane definitions - only contexts that actually have a
+    /// `lane.toml` (see `load_lanes`). A context with no `lane.toml` simply
+    /// isn't a lane: it never appears here, regardless of what other facets
+    /// (`tab.toml`, `board.toml`) it has.
     pub lanes: Vec<Lane>,
+    /// Every context's Boards target (`board.toml`), read directly and
+    /// independently of `lanes` above - a context doesn't need a
+    /// `lane.toml` for Boards materialization/ordering to manage it (see
+    /// `context_board_targets`). `(context id, display name, target)`.
+    pub boards_targets: Vec<(String, String, Target)>,
+    /// Every context directory's id, regardless of which facets (if any) it
+    /// has - what `order` is actually checked against (see
+    /// `unregistered_contexts`), since a context doesn't have to be a lane
+    /// to need a place in that order.
+    pub context_ids: Vec<String>,
 }
 
 impl Config {
     pub fn load() -> Self {
-        let (drivers, monitors, order, cycle_policy) = load_global_config();
+        let (drivers, monitors, cycle_policy) = load_global_config();
+        let order = load_context_order();
         // "default" is just a template like any other - it's the one every
         // context implicitly, unconditionally starts its cascade from (no
         // opt-out).
         let templates_dir = config_dir().join("layout-templates");
         let default_targets = load_layout_template(&templates_dir, "default");
-        let mut lanes = load_lanes(&config_dir().join("contexts"), &templates_dir, &default_targets);
+        let contexts_dir = config_dir().join("contexts");
+        let mut lanes = load_lanes(&contexts_dir, &templates_dir, &default_targets);
+        let boards_targets = context_board_targets(&contexts_dir);
+        let context_ids = all_context_ids(&contexts_dir);
         if let Some(order) = &order {
             sort_by_order(&mut lanes, order);
         }
-        Self { drivers, monitors, order, cycle_policy, lanes }
+        Self { drivers, monitors, order, cycle_policy, lanes, boards_targets, context_ids }
     }
 
     pub fn monitor_uuid(&self, handle: &str) -> Option<&str> {
@@ -81,9 +102,9 @@ impl Config {
         let Some(order) = &self.order else {
             return Vec::new();
         };
-        self.lanes
+        self.context_ids
             .iter()
-            .map(|l| l.id.as_str())
+            .map(|id| id.as_str())
             .filter(|id| !order.iter().any(|o| o == id))
             .collect()
     }
@@ -122,6 +143,8 @@ impl Default for Config {
             order: None,
             cycle_policy: CyclePolicy::default(),
             lanes: Vec::new(),
+            boards_targets: Vec::new(),
+            context_ids: Vec::new(),
         }
     }
 }
@@ -149,8 +172,6 @@ struct GlobalConfig {
     #[serde(default)]
     monitors: HashMap<String, MonitorConfigRaw>,
     #[serde(default)]
-    order: Option<Vec<String>>,
-    #[serde(default)]
     cycle_policy: CyclePolicy,
 }
 
@@ -160,14 +181,26 @@ struct MonitorConfigRaw {
     name: Option<String>,
 }
 
-/// `<context>/lane.toml` - the switcher-facing facet. Entirely optional,
-/// same as every facet (see `load_lanes`): a context dir with no
-/// `lane.toml` still exists (and still gets a Zellij session / Boards
-/// project if `tab.toml`/`board.toml` are present), it just never renders
-/// a row in the Lanes Switch dashboard beyond the sensible defaults below.
-/// Identity (the old `id` field) isn't part of this anymore - it's the
-/// context directory's own name, which can't disagree with itself the way
-/// a hand-written `id` field could.
+/// `contexts.toml` - context order, kept separate from lanes.toml since it's
+/// an ordering over contexts in general, not something "being a lane" owns
+/// (see `Config::order`'s doc comment).
+#[derive(Deserialize, Default)]
+struct ContextsConfig {
+    #[serde(default)]
+    order: Option<Vec<String>>,
+}
+
+/// `<context>/lane.toml` - the switcher-facing facet, and the one thing
+/// that makes a context a *lane* at all. A context dir with no `lane.toml`
+/// is not a lane - it's invisible to `cfg.lanes`, the dashboard, and
+/// cycling entirely, even though its other facets (`tab.toml`,
+/// `board.toml`) are still read directly for their own purposes (see
+/// `context_board_targets`). Having *any* `lane.toml`, even an empty one,
+/// is what opts a context in - its own `active` key (if present) then only
+/// controls whether that real lane is currently shown/cycled to, same as
+/// before. Identity (the old `id` field) isn't part of this anymore - it's
+/// the context directory's own name, which can't disagree with itself the
+/// way a hand-written `id` field could.
 #[derive(Deserialize, Default)]
 struct LaneToml {
     name: Option<String>,
@@ -232,22 +265,31 @@ impl From<ScopeElementRaw> for ScopeElement {
 
 // --- Loaders ---
 
-type GlobalConfigLoaded = (Option<Vec<String>>, HashMap<String, MonitorConfig>, Option<Vec<String>>, CyclePolicy);
+type GlobalConfigLoaded = (Option<Vec<String>>, HashMap<String, MonitorConfig>, CyclePolicy);
 
 fn load_global_config() -> GlobalConfigLoaded {
     let path = config_dir().join("lanes.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return (None, HashMap::new(), None, CyclePolicy::default()),
+        Err(_) => return (None, HashMap::new(), CyclePolicy::default()),
     };
     let cfg: GlobalConfig = match toml::from_str(&content) {
         Ok(c) => c,
-        Err(_) => return (None, HashMap::new(), None, CyclePolicy::default()),
+        Err(_) => return (None, HashMap::new(), CyclePolicy::default()),
     };
     let monitors = cfg.monitors.into_iter()
         .map(|(k, v)| (k, MonitorConfig { uuid: v.uuid, name: v.name }))
         .collect();
-    (cfg.drivers, monitors, cfg.order, cfg.cycle_policy)
+    (cfg.drivers, monitors, cfg.cycle_policy)
+}
+
+/// `~/.config/lanes/contexts.toml`'s `order` - see `Config::order`'s doc
+/// comment for why this lives in its own file rather than lanes.toml.
+fn load_context_order() -> Option<Vec<String>> {
+    let path = config_dir().join("contexts.toml");
+    let content = std::fs::read_to_string(&path).ok()?;
+    let cfg: ContextsConfig = toml::from_str(&content).unwrap_or_default();
+    cfg.order
 }
 
 /// A target's identity for cascade purposes: a lane's own target overrides
@@ -339,12 +381,17 @@ fn read_board_target(path: &Path) -> Option<Target> {
 /// Every subdirectory of `dir` (always `config_dir().join("contexts")`
 /// outside tests - taken as a parameter purely so tests can point it at a
 /// throwaway tree instead of mutating `$HOME`, which would race every
-/// other test reading it) is one context; the directory name *is* its id
-/// (no separate field to hand-write, and so nothing to disagree with it -
-/// see LaneToml's doc comment). Inside, `lane.toml`, `tab.toml`, `layout.toml` and
-/// `board.toml` are each independently optional - a context can be just a
-/// tab, just a board, all of them, or (rare but valid) none, in which case
-/// it's an inert placeholder.
+/// other test reading it) is a *candidate* context; the directory name *is*
+/// its id (no separate field to hand-write, and so nothing to disagree with
+/// it - see LaneToml's doc comment). Only a context with an actual
+/// `lane.toml` becomes a `Lane` here - presence, not content, is what opts
+/// a context into being a lane at all (an empty `lane.toml` still counts;
+/// `read_facet` alone can't tell "file absent" apart from "file present but
+/// empty", both deserializing to `LaneToml::default()`, hence the separate
+/// existence check). A context with no `lane.toml` is simply not a lane: it
+/// never appears in the returned list, regardless of whether it has a
+/// `tab.toml`/`board.toml`/`layout.toml` - those facets are read directly by
+/// `context_board_targets` and friends for non-lane purposes instead.
 fn load_lanes(dir: &Path, templates_dir: &Path, default_targets: &[Target]) -> Vec<Lane> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
@@ -361,6 +408,9 @@ fn load_lanes(dir: &Path, templates_dir: &Path, default_targets: &[Target]) -> V
                 return None;
             }
             let path = e.path();
+            if !path.join("lane.toml").is_file() {
+                return None;
+            }
             let lane_toml: LaneToml = read_facet(&path.join("lane.toml"));
             let tab_toml: TabToml = read_facet(&path.join("tab.toml"));
             let layout_toml: LayoutToml = read_facet(&path.join("layout.toml"));
@@ -387,6 +437,49 @@ fn load_lanes(dir: &Path, templates_dir: &Path, default_targets: &[Target]) -> V
 
     lanes.sort_by(|a, b| a.id.cmp(&b.id));
     lanes
+}
+
+/// Every context directory's id under `dir`, regardless of which facets (if
+/// any) it has - what `order` (contexts.toml) is checked against, since a
+/// context doesn't need to be a lane to need a place in that order (e.g. a
+/// board-only context like `development`).
+fn all_context_ids(dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut ids: Vec<String> = entries
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|id| !id.contains(char::is_whitespace))
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// Every context's `board.toml` target, read directly - independent of
+/// `lane.toml`, so Boards materialization/ordering (`doctor`) still works
+/// for a context that isn't a lane at all. Display name falls back to the
+/// directory id when there's no `lane.toml` name to use (a board-only
+/// context has no `lane.toml` at all, so nowhere else to get a name from).
+fn context_board_targets(dir: &Path) -> Vec<(String, String, Target)> {
+    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let mut out = Vec::new();
+    for e in entries.filter_map(|e| e.ok()) {
+        let path = e.path();
+        if !path.is_dir() {
+            continue;
+        }
+        let id = e.file_name().to_string_lossy().into_owned();
+        if id.contains(char::is_whitespace) {
+            continue;
+        }
+        let Some(target) = read_board_target(&path.join("board.toml")) else {
+            continue;
+        };
+        let lane_toml: LaneToml = read_facet(&path.join("lane.toml"));
+        let name = lane_toml.name.unwrap_or_else(|| id.clone());
+        out.push((id, name, target));
+    }
+    out
 }
 
 #[cfg(test)]
@@ -429,12 +522,15 @@ mod tests {
     }
 
     fn config_with(lanes: Vec<Lane>, order: Option<Vec<&str>>) -> Config {
+        let context_ids = lanes.iter().map(|l| l.id.clone()).collect();
         Config {
             drivers: None,
             monitors: HashMap::new(),
             order: order.map(|o| o.into_iter().map(String::from).collect()),
             cycle_policy: CyclePolicy::default(),
             lanes,
+            boards_targets: Vec::new(),
+            context_ids,
         }
     }
 
@@ -454,6 +550,16 @@ mod tests {
     fn unregistered_contexts_lists_lanes_missing_from_order() {
         let cfg = config_with(vec![lane("infra"), lane("lanes-dev")], Some(vec!["infra"]));
         assert_eq!(cfg.unregistered_contexts(), vec!["lanes-dev"]);
+    }
+
+    #[test]
+    fn unregistered_contexts_includes_a_board_only_context_not_in_cfg_lanes() {
+        // A context with no lane.toml never appears in cfg.lanes, but it
+        // still needs a place in `order` - unregistered_contexts checks
+        // against context_ids, not lanes, so it still catches this.
+        let mut cfg = config_with(vec![lane("infra")], Some(vec!["infra"]));
+        cfg.context_ids.push("development".to_string());
+        assert_eq!(cfg.unregistered_contexts(), vec!["development"]);
     }
 
     #[test]
@@ -481,8 +587,8 @@ mod tests {
     }
 
     #[test]
-    fn parses_global_order() {
-        let cfg: super::GlobalConfig =
+    fn parses_contexts_config_order() {
+        let cfg: super::ContextsConfig =
             toml::from_str(r#"order = ["b", "a"]"#).unwrap();
         assert_eq!(cfg.order, Some(vec!["b".to_string(), "a".to_string()]));
     }
@@ -715,6 +821,8 @@ raise = true
             order: None,
             cycle_policy: CyclePolicy::default(),
             lanes: Vec::new(),
+            boards_targets: Vec::new(),
+            context_ids: Vec::new(),
         };
         assert!(cfg.driver_enabled("zellij"));
         assert!(cfg.driver_enabled("claude"));
@@ -753,6 +861,8 @@ raise = true
                     layout_template: None,
                 },
             ],
+            boards_targets: Vec::new(),
+            context_ids: Vec::new(),
         };
         let names = cfg.zellij_lane_names();
         assert_eq!(names.get("sheetwork").map(|s| s.as_str()), Some("Sheetwork"));
@@ -784,6 +894,8 @@ raise = true
                     layout_template: None,
                 },
             ],
+            boards_targets: Vec::new(),
+            context_ids: Vec::new(),
         };
         assert_eq!(cfg.lane_for_session("lanes").map(|l| l.id.as_str()), Some("lanes-dev"));
         assert_eq!(cfg.lane_for_session("sheetwork1").map(|l| l.id.as_str()), Some("sheetwork1"));
@@ -812,11 +924,12 @@ raise = true
             "driver = \"boards\"\nproject = \"Infra\"\nmonitor = \"main\"\nposition = \"full\"\n",
         ).unwrap();
 
-        // A bare context: just a directory, no facet files at all.
+        // A bare context: just a directory, no facet files at all - not a
+        // lane at all, since it has no lane.toml.
         std::fs::create_dir_all(root.join("placeholder")).unwrap();
 
         let lanes = load_lanes(&root, Path::new("/nonexistent"), &[]);
-        assert_eq!(lanes.len(), 2);
+        assert_eq!(lanes.len(), 1);
 
         let infra_lane = lanes.iter().find(|l| l.id == "infra").unwrap();
         assert_eq!(infra_lane.name, "Infra");
@@ -825,11 +938,31 @@ raise = true
         assert_eq!(infra_lane.targets.len(), 1);
         assert!(matches!(&infra_lane.targets[0].driver, crate::model::TargetDriver::Boards { project } if project == "Infra"));
 
-        let placeholder = lanes.iter().find(|l| l.id == "placeholder").unwrap();
-        assert_eq!(placeholder.name, "placeholder");
-        assert!(placeholder.active);
-        assert!(placeholder.scope.is_empty());
-        assert!(placeholder.targets.is_empty());
+        // No lane.toml at all -> not a lane, period - it never appears in
+        // load_lanes' output regardless of what else it might have.
+        assert!(lanes.iter().all(|l| l.id != "placeholder"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_lanes_an_empty_lane_toml_still_defaults_active_true() {
+        // Distinct from the placeholder case above: the file's mere
+        // *presence* is what opts a context in, regardless of whether it
+        // sets anything - an empty lane.toml is enough.
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-empty-lane-toml-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("ctx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lane.toml"), "").unwrap();
+
+        let lanes = load_lanes(&root, Path::new("/nonexistent"), &[]);
+        assert_eq!(lanes.len(), 1);
+        assert!(lanes[0].active);
 
         std::fs::remove_dir_all(&root).ok();
     }
@@ -844,6 +977,7 @@ raise = true
         let _ = std::fs::remove_dir_all(&root);
         std::fs::create_dir_all(root.join("has space")).unwrap();
         std::fs::create_dir_all(root.join("fine")).unwrap();
+        std::fs::write(root.join("fine").join("lane.toml"), "").unwrap();
 
         let lanes = load_lanes(&root, Path::new("/nonexistent"), &[]);
         assert_eq!(lanes.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), vec!["fine"]);
@@ -873,6 +1007,7 @@ raise = true
 
         let lane_dir = contexts_dir.join("lanes-dev");
         std::fs::create_dir_all(&lane_dir).unwrap();
+        std::fs::write(lane_dir.join("lane.toml"), "").unwrap();
         std::fs::write(
             lane_dir.join("layout.toml"),
             "layout_template = \"dev\"\n\n\
@@ -902,13 +1037,79 @@ raise = true
         ));
         let _ = std::fs::remove_dir_all(&root);
         let contexts_dir = root.join("contexts");
-        std::fs::create_dir_all(contexts_dir.join("infra")).unwrap();
+        let infra = contexts_dir.join("infra");
+        std::fs::create_dir_all(&infra).unwrap();
+        std::fs::write(infra.join("lane.toml"), "").unwrap();
 
         let default_targets = [wezterm_target("lg-right")];
         let lanes = load_lanes(&contexts_dir, Path::new("/nonexistent"), &default_targets);
         assert_eq!(lanes.len(), 1);
         assert_eq!(lanes[0].targets.len(), 1);
         assert_eq!(lanes[0].targets[0].monitor.as_deref(), Some("lg-right"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_lanes_skips_a_context_with_no_lane_toml_even_with_other_facets() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-no-lane-toml-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("development");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("board.toml"),
+            "driver = \"boards\"\nproject = \"Development\"\nmonitor = \"main\"\nposition = \"full\"\n",
+        ).unwrap();
+
+        let lanes = load_lanes(&root, Path::new("/nonexistent"), &[]);
+        assert!(lanes.is_empty(), "a board.toml-only context must never become a Lane");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn context_board_targets_reads_a_board_only_context_with_no_lane_toml() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-board-targets-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("development");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("board.toml"),
+            "driver = \"boards\"\nproject = \"Development\"\nmonitor = \"main\"\nposition = \"full\"\n",
+        ).unwrap();
+
+        let targets = context_board_targets(&root);
+        assert_eq!(targets.len(), 1);
+        let (id, name, target) = &targets[0];
+        assert_eq!(id, "development");
+        // No lane.toml at all -> falls back to the directory id as the name.
+        assert_eq!(name, "development");
+        assert!(matches!(&target.driver, crate::model::TargetDriver::Boards { project } if project == "Development"));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn all_context_ids_lists_every_context_dir_regardless_of_facets() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-all-context-ids-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("development")).unwrap();
+        std::fs::create_dir_all(root.join("infra")).unwrap();
+        std::fs::write(root.join("infra").join("lane.toml"), "").unwrap();
+
+        assert_eq!(all_context_ids(&root), vec!["development".to_string(), "infra".to_string()]);
 
         std::fs::remove_dir_all(&root).ok();
     }

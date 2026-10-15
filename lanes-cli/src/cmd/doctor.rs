@@ -32,6 +32,9 @@ pub fn run(fix: bool) {
         for project in materialize_boards_projects(&cfg, &boards_dir) {
             println!("created ~/boards/{project}/board.yaml");
         }
+        if write_boards_order(&cfg, &boards_dir).is_some() {
+            println!("wrote ~/boards/.order");
+        }
     }
 
     let mut checks = vec![
@@ -51,6 +54,7 @@ pub fn run(fix: bool) {
 
     if has_boards_target(&cfg) {
         checks.push(check_boards_projects(&cfg, &boards_dir));
+        checks.push(check_boards_order(&cfg, &boards_dir));
     }
 
     if cfg.driver_enabled("zellij") {
@@ -533,33 +537,36 @@ fn check_lane_order(cfg: &lanes::config::Config) -> Check {
     let order = match &cfg.order {
         None => {
             return Check {
-                label: "lane order",
+                label: "context order",
                 status: Status::Ok,
-                message: "no `order` configured in lanes.toml (falling back to alphabetical)".to_string(),
+                message: "no `order` configured in contexts.toml (falling back to alphabetical)".to_string(),
                 hint: None,
             };
         }
         Some(order) => order,
     };
 
+    // Checked against every context directory, not just `cfg.lanes` - a
+    // context doesn't need a lane.toml to need a place in `order` (e.g. a
+    // board-only context like `development`).
     let unknown: Vec<&str> = order.iter()
         .map(|id| id.as_str())
-        .filter(|id| !cfg.lanes.iter().any(|l| &l.id == id))
+        .filter(|id| !cfg.context_ids.iter().any(|c| c == id))
         .collect();
     let missing = cfg.unregistered_contexts();
 
     if unknown.is_empty() && missing.is_empty() {
         return Check {
-            label: "lane order",
+            label: "context order",
             status: Status::Ok,
-            message: "lanes.toml `order` covers exactly the configured lanes".to_string(),
+            message: "contexts.toml `order` covers exactly the configured contexts".to_string(),
             hint: None,
         };
     }
 
     let mut parts = Vec::new();
     if !unknown.is_empty() {
-        parts.push(format!("order lists unknown lane id(s): {}", unknown.join(", ")));
+        parts.push(format!("order lists unknown context id(s): {}", unknown.join(", ")));
     }
     if !missing.is_empty() {
         parts.push(format!("context(s) missing from order (sorted alphabetically last): {}", missing.join(", ")));
@@ -572,11 +579,11 @@ fn check_lane_order(cfg: &lanes::config::Config) -> Check {
     let status = if missing.is_empty() { Status::Warn } else { Status::Fail };
 
     Check {
-        label: "lane order",
+        label: "context order",
         status,
         message: parts.join("; "),
         hint: Some(
-            "not auto-fixed - edit `order` in ~/.config/lanes/lanes.toml by hand to match \
+            "not auto-fixed - edit `order` in ~/.config/lanes/contexts.toml by hand to match \
              the current set of context ids.".to_string()
         ),
     }
@@ -584,7 +591,7 @@ fn check_lane_order(cfg: &lanes::config::Config) -> Check {
 
 /// `ztabs`' own session order, straight from its config file - not a live
 /// query of anything. This is the other tool's core state, same class of
-/// thing as lanes.toml's `order`, just owned by a different tool.
+/// thing as contexts.toml's `order`, just owned by a different tool.
 fn ztabs_session_order() -> Option<Vec<String>> {
     let home = std::env::var("HOME").unwrap_or_default();
     let path = PathBuf::from(home).join(".config/infra/zellij-tabs.toml");
@@ -600,7 +607,7 @@ fn ztabs_session_order() -> Option<Vec<String>> {
 
 /// `order`, restricted to whichever entries also appear in `other`, keeping
 /// `order`'s own relative sequence. Used to compare two orderings that may
-/// not cover exactly the same set of sessions (e.g. lanes.toml has a lane
+/// not cover exactly the same set of sessions (e.g. contexts.toml has a lane
 /// ztabs doesn't manage) without that difference in *membership* being
 /// mistaken for a difference in *order*.
 fn restrict_to_common(order: &[String], other: &[String]) -> Vec<String> {
@@ -632,7 +639,7 @@ fn check_lane_order_vs_ztabs(cfg: &lanes::config::Config) -> Check {
         Check {
             label: "lane order vs ztabs",
             status: Status::Ok,
-            message: "lanes.toml `order` agrees with zellij-tabs.toml's session order".to_string(),
+            message: "contexts.toml `order` agrees with zellij-tabs.toml's session order".to_string(),
             hint: None,
         }
     } else {
@@ -640,12 +647,12 @@ fn check_lane_order_vs_ztabs(cfg: &lanes::config::Config) -> Check {
             label: "lane order vs ztabs",
             status: Status::Warn,
             message: format!(
-                "lanes.toml order gives {}, but zellij-tabs.toml gives {}",
+                "contexts.toml order gives {}, but zellij-tabs.toml gives {}",
                 lanes_side.join(", "),
                 ztabs_side.join(", ")
             ),
             hint: Some(
-                "not auto-fixed - edit `order` in ~/.config/lanes/lanes.toml or the tab order in \
+                "not auto-fixed - edit `order` in ~/.config/lanes/contexts.toml or the tab order in \
                  ~/.config/infra/zellij-tabs.toml so the two agree."
                     .to_string(),
             ),
@@ -850,18 +857,88 @@ fn boards_data_dir() -> PathBuf {
 }
 
 /// Every Boards project name named by a `board.toml` facet across every
-/// context - a context names at most one, since board.toml is a single
-/// target, not an array (see config.rs's read_board_target).
+/// context - read directly from `cfg.boards_targets`, independent of
+/// `cfg.lanes`, so a context with no `lane.toml` (e.g. `development`) is
+/// still managed here. Ordered by `cfg.order` (contexts.toml), same
+/// fallback (alphabetical-by-id, after any listed ones) `sort_by_order`
+/// uses for lanes - `cfg.boards_targets` itself carries no order of its own.
 fn boards_project_names(cfg: &lanes::config::Config) -> Vec<(&str, &str)> {
-    cfg.lanes
-        .iter()
-        .filter_map(|l| {
-            l.targets.iter().find_map(|t| match &t.driver {
-                lanes::model::TargetDriver::Boards { project } => Some((l.display_name(), project.as_str())),
-                _ => None,
-            })
+    let mut targets: Vec<&(String, String, lanes::model::Target)> = cfg.boards_targets.iter().collect();
+    if let Some(order) = &cfg.order {
+        targets.sort_by_key(|(id, ..)| order.iter().position(|o| o == id).unwrap_or(order.len()));
+    } else {
+        targets.sort_by(|(a, ..), (b, ..)| a.cmp(b));
+    }
+    targets
+        .into_iter()
+        .filter_map(|(_, name, t)| match &t.driver {
+            lanes::model::TargetDriver::Boards { project } => Some((name.as_str(), project.as_str())),
+            _ => None,
         })
         .collect()
+}
+
+/// Every Boards project name, in `boards_project_names`' own (context-)
+/// order, deduplicated keeping the first occurrence - two contexts can
+/// legitimately point at the same project (see e.g. sheetwork-dev/
+/// sheetwork-sandbox sharing one board historically) and it should only
+/// appear once, at whichever context names it first.
+fn derived_boards_order(cfg: &lanes::config::Config) -> Vec<&str> {
+    let mut seen = std::collections::HashSet::new();
+    boards_project_names(cfg)
+        .into_iter()
+        .map(|(_, project)| project)
+        .filter(|project| seen.insert(*project))
+        .collect()
+}
+
+/// `<data_dir>/.order` - one Boards project name per line, in lane order.
+/// Boards itself has no concept of "lane order" (deliberately - it's a
+/// standalone, general-purpose kanban app, see PLAN-window-targets.md's
+/// repo-boundary note); this file is lanes-cli pushing its own order to
+/// Boards without Boards needing to understand lanes' config at all - same
+/// pattern as ztabs maintaining zellij-tabs.toml as a derived cache rather
+/// than Zellij/WezTerm knowing anything about lanes.
+fn boards_order_path(data_dir: &std::path::Path) -> std::path::PathBuf {
+    data_dir.join(".order")
+}
+
+/// Writes the order file if its content would actually change (so `--fix`
+/// doesn't touch its mtime on every run for no reason). `None` if nothing
+/// was written (already current, or the write failed).
+fn write_boards_order(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Option<()> {
+    let order = derived_boards_order(cfg);
+    let content = order.join("\n");
+    let path = boards_order_path(data_dir);
+    if std::fs::read_to_string(&path).ok().as_deref() == Some(content.as_str()) {
+        return None;
+    }
+    std::fs::create_dir_all(data_dir).ok()?;
+    std::fs::write(&path, content).ok()
+}
+
+/// Flags when `.order` doesn't match what `contexts.toml`'s order currently
+/// derives - e.g. right after reordering lanes or adding a new board.toml,
+/// before the next `--fix`. Not itself a sign of anything broken in Boards;
+/// it just means the sidebar is showing a stale order until `--fix` runs.
+fn check_boards_order(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Check {
+    let expected = derived_boards_order(cfg).join("\n");
+    let actual = std::fs::read_to_string(boards_order_path(data_dir)).unwrap_or_default();
+    if actual == expected {
+        Check {
+            label: "boards order",
+            status: Status::Ok,
+            message: "~/boards/.order matches the current lane order".to_string(),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "boards order",
+            status: Status::Warn,
+            message: "~/boards/.order is stale or missing".to_string(),
+            hint: Some("run `lanes doctor --fix` to refresh it".to_string()),
+        }
+    }
 }
 
 fn has_boards_target(cfg: &lanes::config::Config) -> bool {
@@ -975,8 +1052,23 @@ mod tests {
     use lanes::scope::ScopeElement;
     use std::collections::{HashMap, HashSet};
 
+    /// Derives `boards_targets`/`context_ids` from the given lanes' own
+    /// targets/ids - real `Config::load()` reads these independently of
+    /// `lanes.targets` (see `context_board_targets`), but for a test config
+    /// built straight from `Lane`s it's simplest to mirror whatever Boards
+    /// target each lane already carries, same as before this distinction
+    /// existed.
     fn test_config(lanes: Vec<Lane>) -> Config {
-        Config { drivers: None, monitors: HashMap::new(), order: None, cycle_policy: lanes::model::CyclePolicy::default(), lanes }
+        let boards_targets = lanes.iter()
+            .filter_map(|l| {
+                l.targets.iter().find_map(|t| match &t.driver {
+                    lanes::model::TargetDriver::Boards { .. } => Some((l.id.clone(), l.name.clone(), t.clone())),
+                    _ => None,
+                })
+            })
+            .collect();
+        let context_ids = lanes.iter().map(|l| l.id.clone()).collect();
+        Config { drivers: None, monitors: HashMap::new(), order: None, cycle_policy: lanes::model::CyclePolicy::default(), lanes, boards_targets, context_ids }
     }
 
     fn lane(id: &str, name: &str, active: bool, session: &str) -> Lane {
@@ -1012,6 +1104,28 @@ mod tests {
             minimized: None,
             primary: false,
         }
+    }
+
+    /// A context's board.toml target is read for Boards management even
+    /// when that context is never a lane at all (no lane.toml) - this is
+    /// the actual scenario `development` represents.
+    fn config_with_board_only_context(id: &str, project: &str, order: Vec<&str>) -> Config {
+        Config {
+            drivers: None,
+            monitors: HashMap::new(),
+            order: Some(order.into_iter().map(String::from).collect()),
+            cycle_policy: lanes::model::CyclePolicy::default(),
+            lanes: Vec::new(),
+            boards_targets: vec![(id.to_string(), id.to_string(), boards_target(project))],
+            context_ids: vec![id.to_string()],
+        }
+    }
+
+    #[test]
+    fn boards_project_names_includes_a_board_only_context_with_no_lane_toml() {
+        let cfg = config_with_board_only_context("development", "Development", vec!["development"]);
+        assert_eq!(boards_project_names(&cfg), vec![("development", "Development")]);
+        assert!(has_boards_target(&cfg));
     }
 
     #[test]
@@ -1085,6 +1199,48 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("infra-board/board.yaml")).unwrap();
         assert!(content.contains("Custom"));
 
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn derived_boards_order_follows_lane_order_and_dedupes() {
+        let cfg = test_config(vec![
+            lane_with_targets("a", vec![boards_target("Shared")]),
+            lane_with_targets("b", vec![boards_target("Only-B")]),
+            lane_with_targets("c", vec![boards_target("Shared")]),
+        ]);
+        assert_eq!(derived_boards_order(&cfg), vec!["Shared", "Only-B"]);
+    }
+
+    #[test]
+    fn write_boards_order_creates_the_order_file() {
+        let dir = boards_test_dir("write-order-new");
+        let cfg = test_config(vec![
+            lane_with_targets("infra", vec![boards_target("Infra")]),
+            lane_with_targets("lanes-dev", vec![boards_target("Lanes")]),
+        ]);
+        assert!(write_boards_order(&cfg, &dir).is_some());
+        let content = std::fs::read_to_string(boards_order_path(&dir)).unwrap();
+        assert_eq!(content, "Infra\nLanes");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn write_boards_order_is_a_noop_when_already_current() {
+        let dir = boards_test_dir("write-order-noop");
+        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("Infra")])]);
+        assert!(write_boards_order(&cfg, &dir).is_some());
+        assert!(write_boards_order(&cfg, &dir).is_none(), "second write with no change should be a no-op");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn check_boards_order_warns_when_missing_then_ok_after_fix() {
+        let dir = boards_test_dir("check-order");
+        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("Infra")])]);
+        assert!(matches!(check_boards_order(&cfg, &dir).status, Status::Warn));
+        write_boards_order(&cfg, &dir);
+        assert!(matches!(check_boards_order(&cfg, &dir).status, Status::Ok));
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -1170,12 +1326,15 @@ mod tests {
     }
 
     fn test_config_with_order(lanes: Vec<Lane>, order: Vec<&str>) -> Config {
+        let context_ids = lanes.iter().map(|l| l.id.clone()).collect();
         Config {
             drivers: None,
             monitors: HashMap::new(),
             order: Some(order.into_iter().map(String::from).collect()),
             cycle_policy: lanes::model::CyclePolicy::default(),
             lanes,
+            boards_targets: Vec::new(),
+            context_ids,
         }
     }
 

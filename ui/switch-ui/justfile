@@ -1,0 +1,23 @@
+dev:
+	#!/usr/bin/env bash
+	set -e
+	# This app depends on lanes-cli as a local path dependency - `tauri dev`'s
+	# watcher only looks at src-tauri by default, so a lanes-cli-only change
+	# (no edit inside this app's own src-tauri) never triggers a rebuild and
+	# the running dev binary silently goes stale. `--additional-watch-folders`
+	# claims to fix this but doesn't actually trigger a rebuild in practice
+	# (tested directly against tauri-cli 2.11.1: it logs "Watching ... for
+	# changes" but a real content change in that folder never restarts the
+	# app) - kept here anyway since it's harmless and may start working in a
+	# future tauri-cli version, but don't trust it. The real fix today is
+	# still: after any lanes-cli change, kill and restart this process by
+	# hand (`pkill -f target/debug/lanes-ui`, then `just dev` again).
+	npm run tauri dev -- --additional-watch-folders ../../../lanes-cli
+
+install:
+	#!/usr/bin/env bash
+	set -e
+	npm run tauri build
+	APP="src-tauri/target/release/bundle/macos/Lanes Switch.app"
+	rm -rf "/Applications/Lanes Switch.app"
+	cp -R "$APP" /Applications/
