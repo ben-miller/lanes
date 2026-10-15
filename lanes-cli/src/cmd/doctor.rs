@@ -40,6 +40,7 @@ pub fn run(fix: bool) {
         check_wezterm_tab_cache(&cfg),
         check_session_naming(&cfg),
         check_primary_targets(&cfg),
+        check_layout_templates(&cfg, &lanes::config::config_dir().join("layout-templates")),
         check_lane_order(&cfg),
         check_lane_order_vs_ztabs(&cfg),
         check_git_default_branches(&cfg),
@@ -498,6 +499,36 @@ fn check_primary_targets(cfg: &lanes::config::Config) -> Check {
     }
 }
 
+/// Every lane's `layout_template` (if set) must resolve to a real file
+/// under `layout-templates/` - a `Fail`, not a `Warn`: a lane silently
+/// missing its whole template layer on a typo is an easy-to-miss bug, not a
+/// soft problem. See PLAN-layout-templates.md. `templates_dir` is always
+/// `config_dir().join("layout-templates")` outside tests - a parameter for
+/// the same hermeticity reason `config::load_lanes`'s `dir` is.
+fn check_layout_templates(cfg: &lanes::config::Config, templates_dir: &std::path::Path) -> Check {
+    let missing: Vec<String> = cfg.lanes.iter()
+        .filter_map(|l| l.layout_template.as_ref().map(|t| (l.id.as_str(), t.as_str())))
+        .filter(|(_, name)| !templates_dir.join(format!("{name}.toml")).is_file())
+        .map(|(id, name)| format!("{id} -> \"{name}\""))
+        .collect();
+
+    if missing.is_empty() {
+        Check {
+            label: "layout templates",
+            status: Status::Ok,
+            message: "every lane's layout_template (if any) resolves to a real file".to_string(),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "layout templates",
+            status: Status::Fail,
+            message: format!("layout_template doesn't resolve to a file under layout-templates/: {}", missing.join(", ")),
+            hint: Some(format!("create the missing file(s) under {:?}, or fix the typo in that lane's layout.toml", templates_dir)),
+        }
+    }
+}
+
 fn check_lane_order(cfg: &lanes::config::Config) -> Check {
     let order = match &cfg.order {
         None => {
@@ -623,7 +654,7 @@ fn check_lane_order_vs_ztabs(cfg: &lanes::config::Config) -> Check {
 }
 
 fn check_lanes_registry() -> Check {
-    let dir = lanes::config::config_dir();
+    let dir = lanes::config::config_dir().join("contexts");
 
     match std::fs::read_dir(&dir) {
         Err(_) => Check {
@@ -952,11 +983,16 @@ mod tests {
             active,
             scope: vec![ScopeElement::zellij_session(session)],
             targets: vec![],
+            layout_template: None,
         }
     }
 
     fn lane_with_targets(id: &str, targets: Vec<lanes::model::Target>) -> Lane {
         Lane { targets, ..lane(id, id, true, id) }
+    }
+
+    fn lane_with_layout_template(id: &str, layout_template: &str) -> Lane {
+        Lane { layout_template: Some(layout_template.to_string()), ..lane(id, id, true, id) }
     }
 
     fn monitor(uuid: &str) -> lanes::config::MonitorConfig {
@@ -1223,6 +1259,39 @@ mod tests {
         let check = check_primary_targets(&cfg);
         assert!(matches!(check.status, Status::Fail));
         assert!(check.message.contains("infra"));
+    }
+
+    #[test]
+    fn check_layout_templates_ok_when_no_lane_sets_one() {
+        let cfg = test_config(vec![lane("infra", "Infra", true, "infra")]);
+        let check = check_layout_templates(&cfg, std::path::Path::new("/nonexistent"));
+        assert!(matches!(check.status, Status::Ok));
+    }
+
+    #[test]
+    fn check_layout_templates_ok_when_the_referenced_file_exists() {
+        let dir = std::env::temp_dir().join(format!(
+            "lanes-doctor-test-layout-templates-ok-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("dev.toml"), "").unwrap();
+
+        let cfg = test_config(vec![lane_with_layout_template("lanes-dev", "dev")]);
+        let check = check_layout_templates(&cfg, &dir);
+        assert!(matches!(check.status, Status::Ok));
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn check_layout_templates_fails_when_the_referenced_file_is_missing() {
+        let cfg = test_config(vec![lane_with_layout_template("lanes-dev", "ghost")]);
+        let check = check_layout_templates(&cfg, std::path::Path::new("/nonexistent"));
+        assert!(matches!(check.status, Status::Fail));
+        assert!(check.message.contains("lanes-dev"));
+        assert!(check.message.contains("ghost"));
     }
 
     #[test]

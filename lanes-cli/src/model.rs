@@ -40,6 +40,13 @@ pub struct Lane {
     // observations and no real locator identity. See PLAN-window-targets.md.
     #[serde(default)]
     pub targets: Vec<Target>,
+    // The name of the `layout-templates/<name>.toml` this lane's own
+    // layout.toml opted into, if any - kept around purely so `doctor` can
+    // check it resolves to a real file; `targets` above already has the
+    // template's contribution merged in by the time this is set; see
+    // PLAN-layout-templates.md.
+    #[serde(default)]
+    pub layout_template: Option<String>,
 }
 
 fn default_true() -> bool {

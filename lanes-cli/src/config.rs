@@ -31,12 +31,12 @@ pub struct Config {
 impl Config {
     pub fn load() -> Self {
         let (drivers, monitors, order, cycle_policy) = load_global_config();
-        // Top-level layout.toml supplies the defaults every context's own
-        // layout.toml cascades on top of (merge_targets) - same file name
-        // at both levels, deliberately: one is "defaults", the other is
-        // "overrides" of the same thing, not two different concepts.
-        let default_targets: LayoutToml = read_facet(&config_dir().join("layout.toml"));
-        let mut lanes = load_lanes(&config_dir(), &default_targets.targets);
+        // "default" is just a template like any other - it's the one every
+        // context implicitly, unconditionally starts its cascade from (no
+        // opt-out) - see PLAN-layout-templates.md.
+        let templates_dir = config_dir().join("layout-templates");
+        let default_targets = load_layout_template(&templates_dir, "default");
+        let mut lanes = load_lanes(&config_dir().join("contexts"), &templates_dir, &default_targets);
         if let Some(order) = &order {
             sort_by_order(&mut lanes, order);
         }
@@ -96,7 +96,7 @@ impl Config {
 /// `load_lanes`), so a context that's never had one yet gets a fresh file
 /// containing just this one key, not an error.
 pub fn set_lane_active(lane_id: &str, active: bool) -> std::io::Result<()> {
-    let path = config_dir().join(lane_id).join("lane.toml");
+    let path = config_dir().join("contexts").join(lane_id).join("lane.toml");
     let mut doc = match std::fs::read_to_string(&path) {
         Ok(text) => text.parse::<toml_edit::DocumentMut>().map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
@@ -185,13 +185,22 @@ struct TabToml {
 
 /// `layout.toml` - window-placement targets applied on switch (app /
 /// obsidian / wezterm / zellij-placement / vscode /
-/// sourcetree). Same shape at two levels: a top-level `~/.config/lanes/layout.toml`
-/// supplies defaults applied to every context (see `load_global_config`),
-/// and a context's own `<id>/layout.toml` overrides/adds to them (see
-/// `merge_targets`). Boards is deliberately *not* included here - see
-/// `read_board_target` for why it gets its own facet file instead.
+/// sourcetree). Same shape at three cascade levels, each a plain
+/// `LayoutToml` merged on top of the previous one (`merge_targets`):
+/// `layout-templates/default.toml` (always applied - see
+/// `load_layout_template`), the named template a context opts into via
+/// `layout_template` (if any), then the context's own
+/// `contexts/<id>/layout.toml`. Boards is deliberately *not* included here -
+/// see `read_board_target` for why it gets its own facet file instead.
 #[derive(Deserialize, Default)]
 struct LayoutToml {
+    /// Name of a `layout-templates/<name>.toml` to cascade in between the
+    /// implicit `default.toml` and this file's own `targets` - see
+    /// PLAN-layout-templates.md. Single inheritance only, deliberately: see
+    /// that doc for why mixins (multiple templates) are out of scope for
+    /// now.
+    #[serde(default)]
+    layout_template: Option<String>,
     #[serde(default)]
     targets: Vec<Target>,
 }
@@ -270,6 +279,20 @@ fn merge_targets(defaults: &[Target], lane_targets: Vec<Target>) -> Vec<Target> 
     merged
 }
 
+/// `<templates_dir>/<name>.toml`'s targets - used both for the always-on
+/// `"default"` template (`Config::load`) and for a context's optional
+/// `layout_template` (`load_lanes`). `templates_dir` is always
+/// `config_dir().join("layout-templates")` outside tests - a parameter for
+/// the same reason `load_lanes`'s `dir` is (see its doc comment). Absent/
+/// malformed behaves exactly like any other facet file (`read_facet`) - a
+/// missing or broken template just contributes nothing, it's `doctor`'s job
+/// (not this function's) to flag a context referencing one that doesn't
+/// resolve.
+fn load_layout_template(templates_dir: &Path, name: &str) -> Vec<Target> {
+    let layout: LayoutToml = read_facet(&templates_dir.join(format!("{name}.toml")));
+    layout.targets
+}
+
 /// Read one optional facet file. Absent means "this facet doesn't apply to
 /// this context" - not an error, hence the `Default` rather than an
 /// `Option`/`Result`. A *present but malformed* file still only warns and
@@ -314,16 +337,16 @@ fn read_board_target(path: &Path) -> Option<Target> {
     }
 }
 
-/// Every subdirectory of `dir` (always `config_dir()` outside tests - taken
-/// as a parameter purely so tests can point it at a throwaway tree instead
-/// of mutating `$HOME`, which would race every other test reading it) is
-/// one context; the directory name *is* its id (no separate field to
-/// hand-write, and so nothing to disagree with it - see LaneToml's doc
-/// comment). Inside, `lane.toml`, `tab.toml`, `layout.toml` and
+/// Every subdirectory of `dir` (always `config_dir().join("contexts")`
+/// outside tests - taken as a parameter purely so tests can point it at a
+/// throwaway tree instead of mutating `$HOME`, which would race every
+/// other test reading it) is one context; the directory name *is* its id
+/// (no separate field to hand-write, and so nothing to disagree with it -
+/// see LaneToml's doc comment). Inside, `lane.toml`, `tab.toml`, `layout.toml` and
 /// `board.toml` are each independently optional - a context can be just a
 /// tab, just a board, all of them, or (rare but valid) none, in which case
 /// it's an inert placeholder.
-fn load_lanes(dir: &Path, default_targets: &[Target]) -> Vec<Lane> {
+fn load_lanes(dir: &Path, templates_dir: &Path, default_targets: &[Target]) -> Vec<Lane> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
@@ -343,6 +366,12 @@ fn load_lanes(dir: &Path, default_targets: &[Target]) -> Vec<Lane> {
             let tab_toml: TabToml = read_facet(&path.join("tab.toml"));
             let layout_toml: LayoutToml = read_facet(&path.join("layout.toml"));
 
+            let layout_template = layout_toml.layout_template.clone();
+            let templated_defaults = match &layout_template {
+                Some(name) => merge_targets(default_targets, load_layout_template(templates_dir, name)),
+                None => default_targets.to_vec(),
+            };
+
             let mut own_targets = layout_toml.targets;
             own_targets.extend(read_board_target(&path.join("board.toml")));
 
@@ -350,7 +379,8 @@ fn load_lanes(dir: &Path, default_targets: &[Target]) -> Vec<Lane> {
                 name: lane_toml.name.unwrap_or_else(|| id.clone()),
                 active: lane_toml.active.unwrap_or(true),
                 scope: tab_toml.scope.into_iter().map(ScopeElement::from).collect(),
-                targets: merge_targets(default_targets, own_targets),
+                targets: merge_targets(&templated_defaults, own_targets),
+                layout_template,
                 id,
             })
         })
@@ -371,6 +401,7 @@ mod tests {
             active: true,
             scope: Vec::new(),
             targets: Vec::new(),
+            layout_template: None,
         }
     }
 
@@ -712,6 +743,7 @@ raise = true
                     active: true,
                     scope: vec![ScopeElement::zellij_session("sheetwork")],
                     targets: vec![],
+                    layout_template: None,
                 },
                 Lane {
                     id: "lanes-dev".to_string(),
@@ -719,6 +751,7 @@ raise = true
                     active: true,
                     scope: vec![ScopeElement::zellij_session("lanes")],
                     targets: vec![],
+                    layout_template: None,
                 },
             ],
         };
@@ -741,6 +774,7 @@ raise = true
                     active: true,
                     scope: vec![ScopeElement::zellij_session("sheetwork1")],
                     targets: vec![],
+                    layout_template: None,
                 },
                 Lane {
                     id: "lanes-dev".to_string(),
@@ -748,6 +782,7 @@ raise = true
                     active: true,
                     scope: vec![ScopeElement::zellij_session("lanes")],
                     targets: vec![],
+                    layout_template: None,
                 },
             ],
         };
@@ -781,7 +816,7 @@ raise = true
         // A bare context: just a directory, no facet files at all.
         std::fs::create_dir_all(root.join("placeholder")).unwrap();
 
-        let lanes = load_lanes(&root, &[]);
+        let lanes = load_lanes(&root, Path::new("/nonexistent"), &[]);
         assert_eq!(lanes.len(), 2);
 
         let infra_lane = lanes.iter().find(|l| l.id == "infra").unwrap();
@@ -811,8 +846,70 @@ raise = true
         std::fs::create_dir_all(root.join("has space")).unwrap();
         std::fs::create_dir_all(root.join("fine")).unwrap();
 
-        let lanes = load_lanes(&root, &[]);
+        let lanes = load_lanes(&root, Path::new("/nonexistent"), &[]);
         assert_eq!(lanes.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), vec!["fine"]);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_lanes_cascades_through_a_layout_template() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-layout-template-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let contexts_dir = root.join("contexts");
+        let templates_dir = root.join("layout-templates");
+        std::fs::create_dir_all(&templates_dir).unwrap();
+
+        // The template overrides the global default's wezterm monitor, and
+        // adds a boards target of its own.
+        std::fs::write(
+            templates_dir.join("dev.toml"),
+            "[[targets]]\ndriver = \"wezterm\"\nmonitor = \"lg-left\"\nposition = \"full\"\n\n\
+             [[targets]]\ndriver = \"app\"\nname = \"Boards\"\nmonitor = \"lg-right\"\nposition = \"full\"\n",
+        ).unwrap();
+
+        let lane_dir = contexts_dir.join("lanes-dev");
+        std::fs::create_dir_all(&lane_dir).unwrap();
+        std::fs::write(
+            lane_dir.join("layout.toml"),
+            "layout_template = \"dev\"\n\n\
+             [[targets]]\ndriver = \"app\"\nname = \"Boards\"\nmonitor = \"main\"\nposition = \"full\"\n",
+        ).unwrap();
+
+        let default_targets = [wezterm_target("lg-right")];
+        let lanes = load_lanes(&contexts_dir, &templates_dir, &default_targets);
+        assert_eq!(lanes.len(), 1);
+        let targets = &lanes[0].targets;
+
+        let wezterm = targets.iter().find(|t| matches!(t.driver, crate::model::TargetDriver::Wezterm { .. })).unwrap();
+        assert_eq!(wezterm.monitor.as_deref(), Some("lg-left"), "the template should override the global default");
+
+        let boards = targets.iter().find(|t| matches!(&t.driver, crate::model::TargetDriver::App { name, .. } if name == "Boards")).unwrap();
+        assert_eq!(boards.monitor.as_deref(), Some("main"), "the context's own target should override the template");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_lanes_uses_only_the_default_targets_when_no_layout_template_is_set() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-no-layout-template-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let contexts_dir = root.join("contexts");
+        std::fs::create_dir_all(contexts_dir.join("infra")).unwrap();
+
+        let default_targets = [wezterm_target("lg-right")];
+        let lanes = load_lanes(&contexts_dir, Path::new("/nonexistent"), &default_targets);
+        assert_eq!(lanes.len(), 1);
+        assert_eq!(lanes[0].targets.len(), 1);
+        assert_eq!(lanes[0].targets[0].monitor.as_deref(), Some("lg-right"));
 
         std::fs::remove_dir_all(&root).ok();
     }

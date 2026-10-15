@@ -2046,6 +2046,7 @@ mod tests {
             active: true,
             scope: vec![],
             targets: vec![target],
+            layout_template: None,
         }
     }
 
@@ -2202,6 +2203,7 @@ mod tests {
             active: true,
             scope: vec![crate::scope::ScopeElement::zellij_session(session)],
             targets: vec![],
+            layout_template: None,
         }
     }
 
@@ -2271,6 +2273,7 @@ mod tests {
             active: false,
             scope: vec![scope::ScopeElement::zellij_session("infra")],
             targets: vec![],
+            layout_template: None,
         }]);
         assert!(session_belongs_to_reachable_lane(Some("some-other-session"), &cfg));
         assert!(session_belongs_to_reachable_lane(None, &cfg));

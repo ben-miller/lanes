@@ -601,6 +601,7 @@ mod tests {
                 crate::scope::ScopeElement::repo("/p/infra"),
             ],
             targets: vec![],
+            layout_template: None,
         }
     }
 
