@@ -3,9 +3,14 @@
 //! shell-specific half of that driver (see drivers/shell.rs); it normalises
 //! to the one record schema the driver reads.
 
-/// Phase 1: `done` / `failed` only, via fish's `$CMD_DURATION`. No timer,
-/// no background process. Phase 2 adds a `running` chip (needs a timer).
-const FISH_HOOK: &str = r####"# lanes shell-init fish - long-running-command signal (Phase 1: done/failed)
+/// `done`/`failed` via fish's `$CMD_DURATION`, no timer, no background
+/// process. `running` is written here too, unconditionally on every
+/// command (not just ones that turn out long) - the hook can't know in
+/// advance how long a command will take, so it can't gate the write the
+/// way `done`/`failed` gate on `LANES_SHELL_LATCH_SECS`. The "don't flash
+/// a chip for `ls`" floor (`LANES_SHELL_NOTICE_SECS`) is enforced
+/// Lanes-side instead, on read - see `command_signal` in `lib.rs`.
+const FISH_HOOK: &str = r####"# lanes shell-init fish - long-running-command signal
 # Source from ~/.config/fish/config.fish:  lanes shell-init fish | source
 
 set -q LANES_SHELL_LATCH_SECS; or set -g LANES_SHELL_LATCH_SECS 30
@@ -20,28 +25,32 @@ function __lanes_shell_path
 end
 
 function __lanes_shell_preexec --on-event fish_preexec
-    # Running a new command supersedes any latched done/failed chip here.
-    set -l p (__lanes_shell_path); and rm -f "$p"
+    set -l p (__lanes_shell_path); or return
     set -g __lanes_shell_cmd $argv[1]
     set -g __lanes_shell_started (date -u +%Y-%m-%dT%H:%M:%SZ)
+
+    mkdir -p "$__lanes_shell_dir"
+    set -l cmd (string replace -a '\\' '\\\\' -- "$__lanes_shell_cmd" | string replace -a '"' '\\"')
+    set -l argv0 (string split -- ' ' "$__lanes_shell_cmd")[1]
+    printf '{"v":1,"shell":"fish","session":"%s","pane":%s,"argv0":"%s","cmd":"%s","started_at":"%s","state":"running","ended_at":null,"exit_code":null}\n' \
+        "$ZELLIJ_SESSION_NAME" "$ZELLIJ_PANE_ID" "$argv0" "$cmd" "$__lanes_shell_started" >"$p"
 end
 
 function __lanes_shell_postexec --on-event fish_postexec
     set -l code $status
-    set -l ms "$CMD_DURATION"
-    test -z "$ms"; and return
-    test "$ms" -lt (math "$LANES_SHELL_LATCH_SECS * 1000"); and return
-
     set -l p (__lanes_shell_path); or return
-    mkdir -p "$__lanes_shell_dir"
+    set -l ms "$CMD_DURATION"
 
-    # Signal-terminated (Ctrl-C a dev server, SIGTERM) - you stopped it on
-    # purpose, so clear the record rather than latching a "failed" chip.
-    if test $code -gt 128
+    # No duration, signal-terminated (Ctrl-C a dev server - stopped on
+    # purpose), or under the latch threshold - clear the running record
+    # preexec wrote rather than leaving a stale "running" chip with nothing
+    # left to ever update or remove it.
+    if test -z "$ms"; or test $code -gt 128; or test "$ms" -lt (math "$LANES_SHELL_LATCH_SECS * 1000")
         rm -f "$p"
         return
     end
 
+    mkdir -p "$__lanes_shell_dir"
     set -l state done
     test $code -ne 0; and set state failed
 
@@ -84,6 +93,17 @@ mod tests {
         // record carries the schema version the driver expects
         assert!(FISH_HOOK.contains(r#""v":1"#));
         assert!(FISH_HOOK.contains(r#""state":"%s""#));
+        // preexec writes a running record unconditionally, every command -
+        // the "don't flash for `ls`" floor is enforced Lanes-side on read,
+        // not by withholding the write (the hook can't know in advance how
+        // long a command will take).
+        assert!(FISH_HOOK.contains(r#""state":"running""#));
+        // postexec clears (not just skips) the running record on every
+        // early-return path, or a fast/killed command would leave a stale
+        // "running" chip with nothing left to update or remove it.
+        let postexec = FISH_HOOK.split("function __lanes_shell_postexec").nth(1).unwrap();
+        let early_return = postexec.split("mkdir -p").next().unwrap();
+        assert!(early_return.contains(r#"rm -f "$p""#));
     }
 
     #[test]

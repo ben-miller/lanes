@@ -280,6 +280,33 @@ pub fn snapshot_from_mirror(cfg: &Config, m: &Mirror) -> LanewiseSnapshot {
     }
 }
 
+/// `(session, pane, seconds_remaining)` for every `running` shell record
+/// that exists right now but hasn't crossed `shell_notice_secs()` yet - so
+/// its signal is correctly absent from `snapshot_from_mirror`'s output.
+/// Nothing re-diffs a fact that hasn't itself changed, so without this
+/// there'd be no second look once the floor actually passes - a command
+/// that's still running at exactly the 3s mark would just never get a chip
+/// until something unrelated happens to trigger a refetch. The caller
+/// (switch-ui's Tauri backend) arms a one-shot timer per key this returns;
+/// `seconds_remaining` is clamped to 0 defensively but should never
+/// actually be negative, since this is the same elapsed-time check
+/// `command_signal` itself uses to decide visibility.
+pub fn pending_running_commands(cfg: &Config, m: &Mirror) -> Vec<(String, u32, i64)> {
+    let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
+    cfg.lanes
+        .iter()
+        .filter_map(|lane| Some((lane.id.as_str(), lane.terminal_session()?)))
+        .flat_map(|(lane_id, session)| command_records(m, lane_id, session))
+        .filter(|rec| rec.state == "running")
+        .filter_map(|rec| {
+            let started = chrono::DateTime::parse_from_rfc3339(rec.started_at.as_deref()?).ok()?;
+            let elapsed = (now - started).num_seconds();
+            let remaining = crate::shell_notice_secs() - elapsed;
+            (remaining > 0).then_some((rec.session, rec.pane, remaining))
+        })
+        .collect()
+}
+
 fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror) -> LaneSnapshot {
     let nav_session = lane.scope.iter().find_map(|el| el.zellij_session_name());
     let mut facets: Vec<FacetSnapshot> = lane
@@ -330,7 +357,7 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror) -> LaneSnapshot {
             if crate::state::is_signal_dismissed(&rec.occurrence_id()) {
                 continue;
             }
-            if let Some(sig) = crate::command_signal(&rec) {
+            if let Some(sig) = crate::command_signal(&rec, chrono::Utc::now().into()) {
                 signals.push(sig);
             }
         }
@@ -682,15 +709,69 @@ mod tests {
             row("lanes_command_cmd", json!(["l", "z", 3, "cargo test"])),
             row("lanes_command_exit", json!(["l", "z", 3, 101])),
             row("lanes_command_ended", json!(["l", "z", 3, "2026-01-01T00:00:07Z"])),
+            // Long since past shell_notice_secs() (real time has moved on
+            // from this fixed timestamp), so this one does become a signal
+            // too - see running_command_only_becomes_a_signal_past_the_
+            // notice_floor for the still-fresh case.
             row("lanes_command", json!(["l", "z", 7, "running", "2026-01-01T00:00:00Z"])),
+            row("lanes_command_cmd", json!(["l", "z", 7, "vite"])),
         ]);
         let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
         let (_, _, signals) = terminal(&snap);
         let cmds: Vec<_> = signals.iter().filter(|sg| sg.kind() == crate::model::SignalKind::Command).collect();
-        assert_eq!(cmds.len(), 1, "running commands are not signals");
-        assert_eq!(cmds[0].detail.as_deref(), Some("cargo test · exit 101 · 7s"));
-        assert_eq!(cmds[0].dismiss_id.as_deref(), Some("command:z--3--2026-01-01T00:00:00Z"));
-        assert!(cmds[0].visible && !cmds[0].cyclable);
+        assert_eq!(cmds.len(), 2);
+        let failed = cmds.iter().find(|sg| matches!(sg.reason, SignalReason::Command(crate::model::CommandReason::Failed))).unwrap();
+        assert_eq!(failed.detail.as_deref(), Some("cargo test · exit 101 · 7s"));
+        assert_eq!(failed.dismiss_id.as_deref(), Some("command:z--3--2026-01-01T00:00:00Z"));
+        assert!(failed.visible && !failed.cyclable);
+        let running = cmds.iter().find(|sg| matches!(sg.reason, SignalReason::Command(crate::model::CommandReason::Running))).unwrap();
+        assert!(running.visible && !running.cyclable);
+    }
+
+    #[test]
+    fn running_command_only_becomes_a_signal_past_the_notice_floor() {
+        let mut rows = live_rows();
+        let just_started = chrono::Utc::now().to_rfc3339();
+        rows.extend([row("lanes_command", json!(["l", "z", 7, "running", just_started]))]);
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let (_, _, signals) = terminal(&snap);
+        assert!(
+            !signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command),
+            "just started - under the notice floor, no chip yet"
+        );
+    }
+
+    #[test]
+    fn pending_running_commands_finds_fresh_running_records_under_the_floor() {
+        let mut rows = live_rows();
+        let just_started = chrono::Utc::now().to_rfc3339();
+        rows.extend([row("lanes_command", json!(["l", "z", 7, "running", just_started]))]);
+        let cfg = cfg_with(lane());
+        let pending = pending_running_commands(&cfg, &mirror(rows));
+        assert_eq!(pending.len(), 1);
+        let (session, pane, remaining) = &pending[0];
+        assert_eq!(session, "z");
+        assert_eq!(*pane, 7);
+        assert!((1..=3).contains(remaining), "remaining={remaining}");
+    }
+
+    #[test]
+    fn pending_running_commands_excludes_one_already_past_the_floor() {
+        let mut rows = live_rows();
+        // Started well over shell_notice_secs() ago - already a real
+        // signal, not pending.
+        rows.extend([row("lanes_command", json!(["l", "z", 7, "running", "2026-01-01T00:00:00Z"]))]);
+        let cfg = cfg_with(lane());
+        assert!(pending_running_commands(&cfg, &mirror(rows)).is_empty());
+    }
+
+    #[test]
+    fn pending_running_commands_ignores_done_and_failed_records() {
+        let mut rows = live_rows();
+        let just_started = chrono::Utc::now().to_rfc3339();
+        rows.extend([row("lanes_command", json!(["l", "z", 7, "done", just_started]))]);
+        let cfg = cfg_with(lane());
+        assert!(pending_running_commands(&cfg, &mirror(rows)).is_empty());
     }
 
     #[test]

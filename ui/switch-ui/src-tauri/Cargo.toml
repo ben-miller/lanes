@@ -18,3 +18,7 @@ serde_json = "1"
 lanes = { path = "../../../lanes-cli" }
 notify = "6"
 ignore = "0.4"
+# Just for tokio::time::sleep (arming the running-chip notice-floor timer -
+# see arm_pending_running in lib.rs). Runs on tauri::async_runtime's own
+# already-running tokio runtime, not a separate one.
+tokio = { version = "1", features = ["time"] }

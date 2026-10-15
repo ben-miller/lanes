@@ -1,12 +1,45 @@
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use notify::{RecursiveMode, Watcher};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tauri::menu::{CheckMenuItem, MenuBuilder, MenuItem};
 use tauri::tray::TrayIconBuilder;
 use tauri::{Emitter, Manager};
+
+/// `(session, pane)` keys with an armed one-shot timer for a `running` shell
+/// command still under `shell_notice_secs()` - see `arm_pending_running`.
+/// Tauri-managed state, one instance for the app's lifetime.
+#[derive(Default, Clone)]
+struct RunningTimers(Arc<Mutex<HashSet<(String, u32)>>>);
+
+/// Arms a one-shot timer per pane in `pending` that doesn't already have one
+/// running, so a command still under the notice floor gets a second look
+/// once it crosses it - nothing else would, since lensd only re-diffs a
+/// fact that's actually changed, and "N seconds have now elapsed" isn't a
+/// fact change on its own. No cancellation: if the command finishes before
+/// the timer fires, the resulting refetch just shows `done`/`failed`
+/// instead of `running`, which is correct, not a bug.
+fn arm_pending_running(handle: &tauri::AppHandle, timers: &RunningTimers, pending: Vec<(String, u32, i64)>) {
+    for (session, pane, remaining_secs) in pending {
+        let key = (session.clone(), pane);
+        {
+            let mut armed = timers.0.lock().unwrap();
+            if !armed.insert(key.clone()) {
+                continue;
+            }
+        }
+        let handle = handle.clone();
+        let timers = timers.clone();
+        tauri::async_runtime::spawn(async move {
+            tokio::time::sleep(Duration::from_secs(remaining_secs.max(0) as u64)).await;
+            timers.0.lock().unwrap().remove(&key);
+            handle.emit("sessions-changed", ()).ok();
+        });
+    }
+}
 
 /// Listens on a local Unix socket for direct notifications from the `lanes`
 /// CLI, so latency-sensitive updates (a switch's new lane, show/hide) don't
@@ -85,23 +118,31 @@ fn start_switch_socket(
 /// Signals come from lensd's live mirror; with lensd down the answer is
 /// `{"lensd_connected": false}` and there is no fallback.
 #[tauri::command]
-async fn get_snapshot(lensd: tauri::State<'_, lanes::lensd::Client>) -> Result<serde_json::Value, ()> {
+async fn get_snapshot(
+    handle: tauri::AppHandle,
+    lensd: tauri::State<'_, lanes::lensd::Client>,
+    running_timers: tauri::State<'_, RunningTimers>,
+) -> Result<serde_json::Value, ()> {
     let lensd = lensd.inner().clone();
-    Ok(tauri::async_runtime::spawn_blocking(move || {
+    let running_timers = running_timers.inner().clone();
+    let (value, pending) = tauri::async_runtime::spawn_blocking(move || {
         let t0 = std::time::Instant::now();
         lanes::logging::perf("ui.get_snapshot.start", "");
         let Some(mirror) = lensd.current() else {
-            return serde_json::json!({ "lensd_connected": false });
+            return (serde_json::json!({ "lensd_connected": false }), Vec::new());
         };
         let cfg = lanes::config::Config::load();
         let snapshot = lanes::lensd::snapshot_from_mirror(&cfg, &mirror);
+        let pending = lanes::lensd::pending_running_commands(&cfg, &mirror);
         lanes::logging::perf("ui.get_snapshot.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
         // Always returns every lane: inactive-lane filtering is the
         // frontend's job (App.svelte's visibleLanes).
-        serde_json::to_value(&snapshot).unwrap()
+        (serde_json::to_value(&snapshot).unwrap(), pending)
     })
     .await
-    .expect("get_snapshot blocking task panicked"))
+    .expect("get_snapshot blocking task panicked");
+    arm_pending_running(&handle, &running_timers, pending);
+    Ok(value)
 }
 
 /// Lets the frontend add its own entries to perf.log - the only way it can,
@@ -565,6 +606,7 @@ pub fn run() {
                 lensd_handle.emit("sessions-changed", ()).ok();
             });
             app.manage(lensd);
+            app.manage(RunningTimers::default());
 
             let pinned_at_startup = lanes::state::read_switch_pinned();
             let pin_item = CheckMenuItem::with_id(app, "pin", "Pin on Top", true, pinned_at_startup, None::<&str>)?;

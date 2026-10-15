@@ -232,7 +232,7 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
                 if state::is_signal_dismissed(&rec.occurrence_id()) {
                     continue;
                 }
-                if let Some(sig) = command_signal(rec) {
+                if let Some(sig) = command_signal(rec, chrono::Utc::now().into()) {
                     signals.push(sig);
                 }
             }
@@ -390,22 +390,50 @@ fn signal_visible(kind: model::SignalKind, cyclable: bool) -> bool {
     matches!(kind, model::SignalKind::Command | model::SignalKind::Lanes) || cyclable
 }
 
-/// A `done`/`failed` Command signal from one shell-hook record, or `None`
-/// if the record is a `running` one (Phase 2). Dismissal is checked by the
-/// caller (against `dismiss_id`), kept out of here so this stays a pure
-/// function. The chip is not cyclable - the correction pass leaves it that
-/// way since `signal_cyclable` only ever says yes to ClaudeSession - but it
-/// *is* visible via `signal_visible`.
-fn command_signal(rec: &drivers::shell::CommandRecord) -> Option<model::Signal> {
+/// Seconds a command must have been running before it gets a chip at all -
+/// below this, a fast command (`ls`, `cd`) never shows one, same floor
+/// `LANES_SHELL_LATCH_SECS` is for `done`/`failed` but checked here instead
+/// of hook-side, since the hook now writes a `running` record for every
+/// command unconditionally (it can't know in advance how long one will
+/// take). Read once per call rather than cached - this is only evaluated
+/// on an already-infrequent path (a fs-watch event or the backend's own
+/// debounce timer), not a hot loop.
+fn shell_notice_secs() -> i64 {
+    std::env::var("LANES_SHELL_NOTICE_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(3)
+}
+
+/// A Command signal from one shell-hook record, or `None` if there's
+/// nothing to show yet - either the record's `state` isn't one of the three
+/// known values, or it's `running` but hasn't crossed `shell_notice_secs()`
+/// (`now` injected rather than read internally, so this stays a pure,
+/// deterministically-testable function). Dismissal is checked by the caller
+/// (against `dismiss_id`), kept out of here. The chip is not cyclable - the
+/// correction pass leaves it that way since `signal_cyclable` only ever
+/// says yes to ClaudeSession - but it *is* visible via `signal_visible`.
+fn command_signal(rec: &drivers::shell::CommandRecord, now: chrono::DateTime<chrono::FixedOffset>) -> Option<model::Signal> {
     let reason = match rec.state.as_str() {
+        "running" => {
+            let started = chrono::DateTime::parse_from_rfc3339(rec.started_at.as_deref()?).ok()?;
+            if (now - started).num_seconds() < shell_notice_secs() {
+                return None;
+            }
+            model::CommandReason::Running
+        }
         "done" => model::CommandReason::Done,
         "failed" => model::CommandReason::Failed,
-        _ => return None, // "running" is Phase 2
+        _ => return None,
     };
     let id = rec.occurrence_id();
 
     let cmd = rec.cmd.clone().or_else(|| rec.argv0.clone()).unwrap_or_else(|| "command".to_string());
-    let dur = rec.duration_secs().map(drivers::shell::fmt_duration);
+    let dur = match reason {
+        model::CommandReason::Running => rec
+            .started_at
+            .as_deref()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+            .map(|started| drivers::shell::fmt_duration((now - started).num_seconds().max(0))),
+        _ => rec.duration_secs().map(drivers::shell::fmt_duration),
+    };
     let detail = match (reason, rec.exit_code, dur) {
         (model::CommandReason::Failed, Some(code), Some(d)) => format!("{cmd} · exit {code} · {d}"),
         (model::CommandReason::Failed, Some(code), None) => format!("{cmd} · exit {code}"),
@@ -1813,21 +1841,36 @@ mod tests {
         })).unwrap()
     }
 
+    fn rfc3339(s: &str) -> chrono::DateTime<chrono::FixedOffset> {
+        chrono::DateTime::parse_from_rfc3339(s).unwrap()
+    }
+
     #[test]
     fn command_signal_maps_state_and_exit_to_reason_and_detail() {
-        let done = command_signal(&shell_record("done", Some(0))).unwrap();
+        let now = rfc3339("2026-09-04T10:03:12Z");
+        let done = command_signal(&shell_record("done", Some(0)), now).unwrap();
         assert!(matches!(done.reason, model::SignalReason::Command(model::CommandReason::Done)));
         assert_eq!(done.detail.as_deref(), Some("cargo test --workspace · 3m12s"));
         assert_eq!(done.lifecycle, model::Lifecycle::Latched);
         assert_eq!(done.dismiss_id.as_deref(), Some("command:lanes--3--2026-09-04T10:00:00Z"));
         assert!(matches!(done.action, Some(model::SignalAction::FocusPane { pane: 3, .. })));
 
-        let failed = command_signal(&shell_record("failed", Some(1))).unwrap();
+        let failed = command_signal(&shell_record("failed", Some(1)), now).unwrap();
         assert!(matches!(failed.reason, model::SignalReason::Command(model::CommandReason::Failed)));
         assert_eq!(failed.detail.as_deref(), Some("cargo test --workspace · exit 1 · 3m12s"));
+    }
 
-        // "running" is Phase 2 - no signal yet.
-        assert!(command_signal(&shell_record("running", None)).is_none());
+    #[test]
+    fn command_signal_running_is_gated_on_shell_notice_secs() {
+        let started = rfc3339("2026-09-04T10:00:00Z");
+        // 2s in - under the 3s default floor, no chip yet.
+        assert!(command_signal(&shell_record("running", None), started + chrono::Duration::seconds(2)).is_none());
+
+        // 3s in - crosses the floor.
+        let sig = command_signal(&shell_record("running", None), started + chrono::Duration::seconds(3)).unwrap();
+        assert!(matches!(sig.reason, model::SignalReason::Command(model::CommandReason::Running)));
+        assert_eq!(sig.detail.as_deref(), Some("cargo test --workspace · 3s"));
+        assert_eq!(sig.lifecycle, model::Lifecycle::Live);
     }
 
     #[test]
@@ -1845,7 +1888,7 @@ mod tests {
     #[test]
     fn command_signals_are_visible_but_not_cyclable_after_the_correction_pass() {
         // mirrors the per-signal correction gather_lanes() runs
-        let mut s = command_signal(&shell_record("failed", Some(2))).unwrap();
+        let mut s = command_signal(&shell_record("failed", Some(2)), rfc3339("2026-09-04T10:03:12Z")).unwrap();
         s.cyclable = signal_cyclable(s.kind(), true /* lane cyclable */, false);
         s.visible = signal_visible(s.kind(), s.cyclable);
         assert!(!s.cyclable, "a finished command is never a cycle target");

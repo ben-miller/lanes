@@ -12,14 +12,23 @@ hook, the `shell` driver, `Lifecycle` (`Live`/`Latched`), the
 shell-init fish`, and a doctor check. Enable with `drivers = [..., "shell"]`
 and `lanes shell-init fish | source` in config.fish.
 
-**Phase 2 not started, and now blocked on `PLAN-incremental-signals.md`.**
-The live `running` chip, `lane-last-focused` + "focused at completion"
+**Phase 2 (live `running` chip): implemented** (2026-10-15), via `lensd`
+rather than the `gather_lanes()`-splitting design `PLAN-incremental-signals.md`
+described - that plan's blocker no longer applies. `lensd`'s shell source
+and `lanes.dl` rule were already fully generic over `state` (built for
+`done`/`failed`, happened to need zero changes for `running`), so the only
+new work was: `fish_preexec` writes a `running` record unconditionally on
+every command (the hook can't know in advance how long one will take);
+`command_signal` gates visibility on elapsed time (`LANES_SHELL_NOTICE_SECS`,
+default 3s), injected `now` for testability; `lensd::pending_running_commands`
+surfaces still-under-the-floor records; the Tauri backend arms a one-shot
+`tokio::time::sleep` per newly-seen pane (`arm_pending_running`), since
+nothing else re-diffs a fact that hasn't itself changed. Frontend needed no
+changes - the chip renderer was already reason-agnostic.
+
+**Still not started:** `lane-last-focused` + "focused at completion"
 courtesy, the `claude-session-disabled` → `signal-muted` rename,
-`bash`/`zsh` hooks. Design settled (2026-09-05): the fish hook stays
-fork-free - `fish_preexec` writes a `running` record with a plain `printf`
-redirect; the "3s elapsed, still running" moment is handled Lanes-side by a
-`tokio` task spawned when the fs-watcher first sees the record. See the
-Phasing section and `PLAN-incremental-signals.md`.
+`bash`/`zsh` hooks.
 
 ## Principles (settled in design discussion)
 
@@ -147,12 +156,13 @@ function __lanes_preexec --on-event fish_preexec
 end
 ```
 
-**`running` is Phase 2 and does NOT use a hook-side timer** (rejected -
-see Phasing). `fish_preexec` writes a `{"state":"running"}` record with a
-plain `printf >` redirect (no fork); the "3s elapsed" moment is a
-`tokio::time::sleep` task on the Lanes Switch backend, armed when the
-fs-watcher first sees the record. `LANES_SHELL_NOTICE_SECS` (default 3s)
-is checked Lanes-side, not in the hook.
+**`running` deliberately does NOT use a hook-side timer** (rejected - see
+Phasing). `fish_preexec` writes a `{"state":"running"}` record with a plain
+`printf >` redirect (no fork); the "3s elapsed" moment is a
+`tokio::time::sleep` task on the Lanes Switch backend
+(`arm_pending_running`), armed from `pending_running_commands`'s result on
+each `get_snapshot`. `LANES_SHELL_NOTICE_SECS` (default 3s) is checked
+Lanes-side, not in the hook.
 
 ## Component 2 — `drivers/shell.rs`
 
@@ -170,7 +180,7 @@ Mirrors `drivers/claude.rs`:
 ## Component 3 — signal model (`model.rs`)
 
 - `SignalKind::Command` (driver is `shell`; the kind is domain-named, like `Repo`).
-- `SignalReason::Command(CommandReason)` with `CommandReason { Done, Failed }` (Running is Phase 2)
+- `SignalReason::Command(CommandReason)` with `CommandReason { Running, Done, Failed }`
   (adjacently-tagged, same as the other three domains).
 - `SignalAction::FocusPane { session: String, pane: String }` - new variant
   (existing `FocusRepoPane` takes a path, not a pane id).
@@ -225,7 +235,7 @@ whose lane was focused at completion - needs `lane-last-focused`.)
 ## Component 6 — UI (`App.svelte`)
 
 - Render `SHELL` chips: `[SHELL] cargo test · done 3m12s` /
-  `· failed (exit 1) 3m12s` (Phase 2 adds `· running 0:52`). Duration +
+  `· failed (exit 1) 3m12s` / `· running 0:52`. Duration +
   exit from the record, shown without a click.
 - Click → `FocusPane` action: jump to that pane (same machinery as
   `focus_lane` / `switch_claude_session` - WezTerm tab activate + zellij
@@ -257,29 +267,30 @@ wiring + `catch_unwind`, `lanes shell-init fish`, doctor check,
 `LANES_SHELL_LATCH_SECS`. Lowest-risk slice that delivers "your long
 command finished / failed, go look."
 
-**Phase 2 — `running` state.** *Blocked on the incremental-signals refactor
-— see `PLAN-incremental-signals.md`.* Design settled in discussion
-(2026-09-05):
+**Phase 2 — `running` state: implemented** (2026-10-15), through `lensd`
+rather than the originally-planned `gather_lanes()` incremental refactor -
+see Status above. What actually shipped, close to the original design:
 
-- **The fish hook stays fork-free.** No disowned-sleep timer (rejected as
-  absurd - nobody spawns a process per command; every mainstream tool
-  notifies on completion only). `fish_preexec` writes a
-  `{"state":"running", "started_at":…}` record with a plain `printf >`
-  redirect, every command. `fish_postexec` rewrites it to `done`/`failed`,
-  or `rm`s it (signal-killed, or under `LANES_SHELL_LATCH_SECS`).
-- **The "3s elapsed, still running" moment is handled Lanes-side.** No fish
-  event fires then, and no fs event either (the file hasn't changed). When
-  the fs-watcher sees a new `running` record, the Lanes Switch backend
-  `tauri::async_runtime::spawn`s a task (a tokio coroutine, not a thread or
-  process) that captures the record's `started_at`, `tokio::time::sleep`s
-  `LANES_SHELL_NOTICE_SECS`, then re-reads the file. If it's still the same
-  `running` command → emit the chip. If it's gone / `done` / superseded →
-  the task just returns. No cancellation bookkeeping; `ls` arms a task that
-  wakes to find nothing and no-ops.
+- **The fish hook stays fork-free.** No disowned-sleep timer. `fish_preexec`
+  writes a `{"state":"running", "started_at":…}` record with a plain
+  `printf >` redirect, every command. `fish_postexec` rewrites it to
+  `done`/`failed`, or `rm`s it (signal-killed, or under
+  `LANES_SHELL_LATCH_SECS`) - including the case that didn't exist in
+  Phase 1: a fast command must now also clear the `running` record preexec
+  just wrote, or it'd be left stale forever.
+- **The "3s elapsed, still running" moment is handled Lanes-side** - not by
+  a per-record fs-watch task as originally planned (lensd now owns
+  fs-watching the shell dir, lanes-cli never sees the raw file), but by
+  `lensd::pending_running_commands` surfacing every still-under-the-floor
+  record on each `get_snapshot`, and the Tauri backend
+  (`arm_pending_running`) arming a `tokio::time::sleep` per newly-seen pane
+  key to the remaining time, then re-emitting `sessions-changed`. No
+  cancellation bookkeeping; `ls` arms a task that wakes to find nothing (the
+  record's long gone) and no-ops.
 - **`done`/`failed` need no timer** - the file rewrite fires its own fs
-  event.
+  event (via lensd, then pushed to the client).
 - The live chip shows an elapsed counter (`vite · running 1m40s`), updated
-  on whatever refresh traffic already exists.
+  on whatever refresh traffic already exists - not its own ticking clock.
 
 Also in Phase 2: rename `claude-session-disabled` → `signal-muted` and
 unify the mute path; add `lane-last-focused id=<x> at=<rfc3339>` (updated

@@ -324,11 +324,15 @@ pub enum SignalReason {
     Command(CommandReason),
 }
 
-/// A long-running foreground shell command, past its finish. `Running` is
-/// deliberately absent for now - Phase 2 (see PLAN-shell-signal.md).
+/// A long-running foreground shell command, either still running or past
+/// its finish.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CommandReason {
+    /// Still running, past `LANES_SHELL_NOTICE_SECS` - gated on elapsed
+    /// time in `lib.rs`'s `command_signal`, not here; this variant only
+    /// ever exists once that gate has already passed.
+    Running,
     /// Exited 0 after running longer than the latch threshold.
     Done,
     /// Exited non-zero (a signal-terminated command - Ctrl-C'd server -
@@ -447,6 +451,9 @@ impl SignalReason {
             SignalReason::Repo(RepoReason::NonDefaultBranch) => Urgency::Warning,
             SignalReason::Lanes(LanesReason::SessionMissing) => Urgency::Blocking,
             SignalReason::Lanes(LanesReason::SessionNotRunning) => Urgency::Warning,
+            // Ambient status, same tier as an active (not idle) Claude
+            // session - it's informational, nothing here is asking for you.
+            SignalReason::Command(CommandReason::Running) => Urgency::Info,
             // Done is a "ready for you, go look" state, same green tier as a
             // pending commit or an idle Claude session. A failed command is
             // "something's off," one tier up but not blocking you the way a
