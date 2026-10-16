@@ -271,7 +271,7 @@ fn repo_signals(m: &Mirror, lane: &str, resolved_path: &str, raw_path: &str, ses
 /// (dismissals, disabled sessions, `cyclable`, `visible`, lifecycle) is
 /// applied here, never by lensd.
 pub fn snapshot_from_mirror(cfg: &Config, m: &Mirror) -> LanewiseSnapshot {
-    let lanes = cfg.lanes.iter().map(|lane| lane_from_mirror(lane, m)).collect();
+    let lanes = cfg.lanes.iter().map(|lane| lane_from_mirror(lane, m, &cfg.shell_ignored_commands)).collect();
     LanewiseSnapshot {
         taken_at: chrono::Utc::now().to_rfc3339(),
         lanes,
@@ -298,6 +298,7 @@ pub fn pending_running_commands(cfg: &Config, m: &Mirror) -> Vec<(String, u32, i
         .filter_map(|lane| Some((lane.id.as_str(), lane.terminal_session()?)))
         .flat_map(|(lane_id, session)| command_records(m, lane_id, session))
         .filter(|rec| rec.state == "running")
+        .filter(|rec| !crate::is_shell_signal_ignored(rec.cmd.as_deref(), rec.argv0.as_deref(), &cfg.shell_ignored_commands))
         .filter_map(|rec| {
             let started = chrono::DateTime::parse_from_rfc3339(rec.started_at.as_deref()?).ok()?;
             let elapsed = (now - started).num_seconds();
@@ -307,7 +308,7 @@ pub fn pending_running_commands(cfg: &Config, m: &Mirror) -> Vec<(String, u32, i
         .collect()
 }
 
-fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror) -> LaneSnapshot {
+fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_commands: &[String]) -> LaneSnapshot {
     let nav_session = lane.scope.iter().find_map(|el| el.zellij_session_name());
     let mut facets: Vec<FacetSnapshot> = lane
         .scope
@@ -355,6 +356,9 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror) -> LaneSnapshot {
         }
         for rec in command_records(m, &lane.id, session) {
             if crate::state::is_signal_dismissed(&rec.occurrence_id()) {
+                continue;
+            }
+            if crate::is_shell_signal_ignored(rec.cmd.as_deref(), rec.argv0.as_deref(), shell_ignored_commands) {
                 continue;
             }
             if let Some(sig) = crate::command_signal(&rec, chrono::Utc::now().into()) {
@@ -615,7 +619,7 @@ mod tests {
     }
 
     fn cfg_with(lane: crate::model::Lane) -> Config {
-        Config { drivers: None, monitors: HashMap::new(), order: None, cycle_policy: crate::model::CyclePolicy::default(), lanes: vec![lane], boards_targets: Vec::new(), context_ids: Vec::new() }
+        Config { drivers: None, monitors: HashMap::new(), order: None, cycle_policy: crate::model::CyclePolicy::default(), lanes: vec![lane], boards_targets: Vec::new(), context_ids: Vec::new(), shell_ignored_commands: Vec::new() }
     }
 
     fn lane() -> crate::model::Lane {
@@ -739,6 +743,41 @@ mod tests {
             !signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command),
             "just started - under the notice floor, no chip yet"
         );
+    }
+
+    #[test]
+    fn lane_from_mirror_honors_shell_ignored_commands_not_just_gather_lanes() {
+        // Regression: lane_from_mirror (the actual live-dashboard path via
+        // snapshot_from_mirror) used to build Command signals through its
+        // own direct crate::command_signal call, bypassing
+        // is_shell_signal_ignored entirely - a config entry excluding a
+        // command worked for `lanes snapshot` (gather_lanes) but not for
+        // the running switch-ui app, which only ever calls this path.
+        let mut rows = live_rows();
+        rows.extend([
+            row("lanes_command", json!(["l", "z", 7, "failed", "2026-01-01T00:00:00Z"])),
+            row("lanes_command_cmd", json!(["l", "z", 7, "claude --resume boards"])),
+            row("lanes_command_exit", json!(["l", "z", 7, 1])),
+            row("lanes_command_ended", json!(["l", "z", 7, "2026-01-01T00:00:07Z"])),
+        ]);
+        let mut cfg = cfg_with(lane());
+        cfg.shell_ignored_commands = vec!["claude*".to_string()];
+        let snap = snapshot_from_mirror(&cfg, &mirror(rows));
+        let (_, _, signals) = terminal(&snap);
+        assert!(!signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command));
+    }
+
+    #[test]
+    fn pending_running_commands_excludes_an_ignored_command_even_under_the_floor() {
+        let mut rows = live_rows();
+        let just_started = chrono::Utc::now().to_rfc3339();
+        rows.extend([
+            row("lanes_command", json!(["l", "z", 7, "running", just_started])),
+            row("lanes_command_cmd", json!(["l", "z", 7, "claude --resume boards"])),
+        ]);
+        let mut cfg = cfg_with(lane());
+        cfg.shell_ignored_commands = vec!["claude*".to_string()];
+        assert!(pending_running_commands(&cfg, &mirror(rows)).is_empty());
     }
 
     #[test]

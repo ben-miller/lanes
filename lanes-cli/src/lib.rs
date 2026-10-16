@@ -232,6 +232,9 @@ pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
                 if state::is_signal_dismissed(&rec.occurrence_id()) {
                     continue;
                 }
+                if is_shell_signal_ignored(rec.cmd.as_deref(), rec.argv0.as_deref(), &cfg.shell_ignored_commands) {
+                    continue;
+                }
                 if let Some(sig) = command_signal(rec, chrono::Utc::now().into()) {
                     signals.push(sig);
                 }
@@ -576,6 +579,42 @@ pub(crate) fn file_age_secs(path: &std::path::Path) -> Option<u64> {
 
 fn is_claude_command(cmd: &str) -> bool {
     cmd.trim().rsplit('/').next().unwrap_or("") == "claude"
+}
+
+/// A `HISTIGNORE`-style glob: `*` matches any run of characters (including
+/// none), `?` matches exactly one, everything else matches literally.
+/// Deliberately this small a subset (no `[...]` classes, no `&` previous-
+/// command reference) - lanes.toml's `ignored_shell_commands` only needs
+/// "starts with"/"contains" style patterns like `ssh *` or `claude*`, not
+/// full shell glob semantics. Matched against the *whole* command line
+/// (see `is_shell_signal_ignored`), the same thing `HISTIGNORE` matches
+/// against - not just argv0 - so `ssh *` can exclude only some hosts
+/// while `tail -f *` only excludes a `tail` that's actually following
+/// something.
+fn glob_match(pattern: &str, text: &str) -> bool {
+    fn inner(p: &[u8], t: &[u8]) -> bool {
+        match p.first() {
+            None => t.is_empty(),
+            Some(b'*') => inner(&p[1..], t) || (!t.is_empty() && inner(p, &t[1..])),
+            Some(b'?') => !t.is_empty() && inner(&p[1..], &t[1..]),
+            Some(&c) => t.first() == Some(&c) && inner(&p[1..], &t[1..]),
+        }
+    }
+    inner(pattern.as_bytes(), text.as_bytes())
+}
+
+/// Whether a shell-hook record's command should never produce a Command
+/// signal at all, regardless of how long it's run - checked before
+/// `command_signal` even looks at state/timing, so an ignored command never
+/// flashes a chip even briefly. Entirely config-driven (lanes.toml's
+/// `ignored_shell_commands`, HISTIGNORE-style globs) - nothing is excluded
+/// by name in code, Claude included. Claude's generic "running" chip is
+/// always redundant with its own dedicated ClaudeSession signal, but that's
+/// a reason to put a `claude*` entry in the config, not to hardcode it here
+/// invisibly - see the real lanes.toml for the actual default list.
+fn is_shell_signal_ignored(cmd: Option<&str>, argv0: Option<&str>, ignored: &[String]) -> bool {
+    let Some(cmd) = cmd.or(argv0) else { return false };
+    ignored.iter().any(|pattern| glob_match(pattern, cmd))
 }
 
 fn process_info(pid: u32) -> Option<ProcInfo> {
@@ -2174,7 +2213,7 @@ mod tests {
     }
 
     fn test_config(lanes: Vec<model::Lane>) -> config::Config {
-        config::Config { drivers: None, monitors: std::collections::HashMap::new(), order: None, cycle_policy: model::CyclePolicy::default(), lanes, boards_targets: Vec::new(), context_ids: Vec::new() }
+        config::Config { drivers: None, monitors: std::collections::HashMap::new(), order: None, cycle_policy: model::CyclePolicy::default(), lanes, boards_targets: Vec::new(), context_ids: Vec::new(), shell_ignored_commands: Vec::new() }
     }
 
     fn lane_with_target(id: &str, target: model::Target) -> model::Lane {
@@ -2689,6 +2728,63 @@ mod tests {
         assert!(!is_claude_command("claude-code-helper"));
         assert!(!is_claude_command("bash"));
         assert!(!is_claude_command(""));
+    }
+
+    #[test]
+    fn glob_match_literal_with_no_wildcards_requires_exact_equality() {
+        assert!(glob_match("ssh", "ssh"));
+        assert!(!glob_match("ssh", "ssh prod-box"));
+        assert!(!glob_match("ssh", "sshd"));
+    }
+
+    #[test]
+    fn glob_match_star_matches_any_run_including_empty() {
+        assert!(glob_match("ssh *", "ssh prod-box"));
+        assert!(glob_match("ssh*", "ssh"));
+        assert!(glob_match("claude*", "claude --resume boards"));
+        assert!(!glob_match("ssh *", "ssh"));
+    }
+
+    #[test]
+    fn glob_match_star_in_the_middle_matches_across_the_gap() {
+        assert!(glob_match("tail -f *", "tail -f /var/log/app.log"));
+        assert!(!glob_match("tail -f *", "tail /var/log/app.log"));
+    }
+
+    #[test]
+    fn glob_match_question_mark_matches_exactly_one_char() {
+        assert!(glob_match("l?", "ls"));
+        assert!(!glob_match("l?", "ls -la"));
+        assert!(!glob_match("l?", "l"));
+    }
+
+    #[test]
+    fn is_shell_signal_ignored_is_entirely_config_driven_claude_included() {
+        // Nothing is excluded by name in code - with an empty list, even
+        // claude itself shows a chip. Excluding it is lanes.toml's own
+        // `ignored_shell_commands` entry (see config.rs), not a hardcoded
+        // special case here.
+        assert!(!is_shell_signal_ignored(Some("claude --resume boards"), Some("claude"), &[]));
+        let ignored = vec!["claude*".to_string()];
+        assert!(is_shell_signal_ignored(Some("claude --resume boards"), Some("claude"), &ignored));
+    }
+
+    #[test]
+    fn is_shell_signal_ignored_matches_a_configured_glob_against_the_full_command() {
+        let ignored = vec!["ssh *".to_string()];
+        assert!(is_shell_signal_ignored(Some("ssh prod-box"), Some("ssh"), &ignored));
+        assert!(!is_shell_signal_ignored(Some("cargo build"), Some("cargo"), &ignored));
+    }
+
+    #[test]
+    fn is_shell_signal_ignored_falls_back_to_argv0_when_cmd_is_absent() {
+        let ignored = vec!["ssh".to_string()];
+        assert!(is_shell_signal_ignored(None, Some("ssh"), &ignored));
+    }
+
+    #[test]
+    fn is_shell_signal_ignored_false_when_nothing_matches_and_no_command_name_at_all() {
+        assert!(!is_shell_signal_ignored(None, None, &["ssh".to_string()]));
     }
 
     #[test]

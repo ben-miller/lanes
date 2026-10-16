@@ -1068,7 +1068,7 @@ mod tests {
             })
             .collect();
         let context_ids = lanes.iter().map(|l| l.id.clone()).collect();
-        Config { drivers: None, monitors: HashMap::new(), order: None, cycle_policy: lanes::model::CyclePolicy::default(), lanes, boards_targets, context_ids }
+        Config { drivers: None, monitors: HashMap::new(), order: None, cycle_policy: lanes::model::CyclePolicy::default(), lanes, boards_targets, context_ids, shell_ignored_commands: Vec::new() }
     }
 
     fn lane(id: &str, name: &str, active: bool, session: &str) -> Lane {
@@ -1118,6 +1118,7 @@ mod tests {
             lanes: Vec::new(),
             boards_targets: vec![(id.to_string(), id.to_string(), boards_target(project))],
             context_ids: vec![id.to_string()],
+            shell_ignored_commands: Vec::new(),
         }
     }
 
@@ -1335,6 +1336,7 @@ mod tests {
             lanes,
             boards_targets: Vec::new(),
             context_ids,
+            shell_ignored_commands: Vec::new(),
         }
     }
 

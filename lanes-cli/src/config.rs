@@ -43,11 +43,20 @@ pub struct Config {
     /// `unregistered_contexts`), since a context doesn't have to be a lane
     /// to need a place in that order.
     pub context_ids: Vec<String>,
+    /// `HISTIGNORE`-style glob patterns (`*`/`?` only - see `glob_match`),
+    /// each matched against a shell-hook record's whole command line, that
+    /// the `shell` driver should never surface a Command signal for. From
+    /// lanes.toml's `ignored_shell_commands`. Nothing is excluded by name
+    /// in code - not even Claude, whose chip is otherwise genuinely
+    /// redundant with its own dedicated ClaudeSession signal; excluding it
+    /// is an entry in this list (the real lanes.toml's default), not a
+    /// special case `is_shell_signal_ignored` knows about.
+    pub shell_ignored_commands: Vec<String>,
 }
 
 impl Config {
     pub fn load() -> Self {
-        let (drivers, monitors, cycle_policy) = load_global_config();
+        let (drivers, monitors, cycle_policy, shell_ignored_commands) = load_global_config();
         let order = load_context_order();
         // "default" is just a template like any other - it's the one every
         // context implicitly, unconditionally starts its cascade from (no
@@ -61,7 +70,7 @@ impl Config {
         if let Some(order) = &order {
             sort_by_order(&mut lanes, order);
         }
-        Self { drivers, monitors, order, cycle_policy, lanes, boards_targets, context_ids }
+        Self { drivers, monitors, order, cycle_policy, lanes, boards_targets, context_ids, shell_ignored_commands }
     }
 
     pub fn monitor_uuid(&self, handle: &str) -> Option<&str> {
@@ -145,6 +154,7 @@ impl Default for Config {
             lanes: Vec::new(),
             boards_targets: Vec::new(),
             context_ids: Vec::new(),
+            shell_ignored_commands: Vec::new(),
         }
     }
 }
@@ -173,6 +183,8 @@ struct GlobalConfig {
     monitors: HashMap<String, MonitorConfigRaw>,
     #[serde(default)]
     cycle_policy: CyclePolicy,
+    #[serde(default)]
+    ignored_shell_commands: Vec<String>,
 }
 
 #[derive(Deserialize)]
@@ -265,22 +277,22 @@ impl From<ScopeElementRaw> for ScopeElement {
 
 // --- Loaders ---
 
-type GlobalConfigLoaded = (Option<Vec<String>>, HashMap<String, MonitorConfig>, CyclePolicy);
+type GlobalConfigLoaded = (Option<Vec<String>>, HashMap<String, MonitorConfig>, CyclePolicy, Vec<String>);
 
 fn load_global_config() -> GlobalConfigLoaded {
     let path = config_dir().join("lanes.toml");
     let content = match std::fs::read_to_string(&path) {
         Ok(s) => s,
-        Err(_) => return (None, HashMap::new(), CyclePolicy::default()),
+        Err(_) => return (None, HashMap::new(), CyclePolicy::default(), Vec::new()),
     };
     let cfg: GlobalConfig = match toml::from_str(&content) {
         Ok(c) => c,
-        Err(_) => return (None, HashMap::new(), CyclePolicy::default()),
+        Err(_) => return (None, HashMap::new(), CyclePolicy::default(), Vec::new()),
     };
     let monitors = cfg.monitors.into_iter()
         .map(|(k, v)| (k, MonitorConfig { uuid: v.uuid, name: v.name }))
         .collect();
-    (cfg.drivers, monitors, cfg.cycle_policy)
+    (cfg.drivers, monitors, cfg.cycle_policy, cfg.ignored_shell_commands)
 }
 
 /// `~/.config/lanes/contexts.toml`'s `order` - see `Config::order`'s doc
@@ -531,6 +543,7 @@ mod tests {
             lanes,
             boards_targets: Vec::new(),
             context_ids,
+            shell_ignored_commands: Vec::new(),
         }
     }
 
@@ -823,6 +836,7 @@ raise = true
             lanes: Vec::new(),
             boards_targets: Vec::new(),
             context_ids: Vec::new(),
+            shell_ignored_commands: Vec::new(),
         };
         assert!(cfg.driver_enabled("zellij"));
         assert!(cfg.driver_enabled("claude"));
@@ -863,6 +877,7 @@ raise = true
             ],
             boards_targets: Vec::new(),
             context_ids: Vec::new(),
+            shell_ignored_commands: Vec::new(),
         };
         let names = cfg.zellij_lane_names();
         assert_eq!(names.get("sheetwork").map(|s| s.as_str()), Some("Sheetwork"));
@@ -896,6 +911,7 @@ raise = true
             ],
             boards_targets: Vec::new(),
             context_ids: Vec::new(),
+            shell_ignored_commands: Vec::new(),
         };
         assert_eq!(cfg.lane_for_session("lanes").map(|l| l.id.as_str()), Some("lanes-dev"));
         assert_eq!(cfg.lane_for_session("sheetwork1").map(|l| l.id.as_str()), Some("sheetwork1"));
