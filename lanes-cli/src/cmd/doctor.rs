@@ -30,10 +30,10 @@ pub fn run(fix: bool) {
     let boards_dir = boards_data_dir();
     if fix {
         for project in materialize_boards_projects(&cfg, &boards_dir) {
-            println!("created ~/boards/{project}/board.yaml");
+            println!("created {}/board.yaml", boards_dir.join(&project).display());
         }
         if write_boards_order(&cfg, &boards_dir).is_some() {
-            println!("wrote ~/boards/.order");
+            println!("wrote {}", boards_order_path(&boards_dir).display());
         }
     }
 
@@ -833,11 +833,12 @@ fn check_monitor_config(cfg: &lanes::config::Config) -> Check {
 }
 
 /// Boards' own data-root resolution order (BOARDS_DATA_DIR env var, then
-/// `data_dir` in ~/.config/boards/config.yaml, then ~/boards) - duplicated
-/// here deliberately rather than linking against Boards, which is a
-/// separate Tauri app with no library to depend on. Boards' own README is
-/// the source of truth for this order; keep it in sync if that ever
-/// changes.
+/// `data_dir` in ~/.config/boards/config.yaml, then
+/// ~/.local/share/bmiller/boards) - duplicated here deliberately rather
+/// than linking against Boards, which is a separate Tauri app with no
+/// library to depend on. Boards' own `src-tauri/src/data_dir.rs` is the
+/// source of truth for this order; keep it in sync if that ever changes
+/// (as it did when the default moved off ~/boards).
 fn boards_data_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("BOARDS_DATA_DIR") {
         return PathBuf::from(lanes::expand_tilde(&dir));
@@ -853,7 +854,7 @@ fn boards_data_dir() -> PathBuf {
             }
         }
     }
-    PathBuf::from(lanes::expand_tilde("~/boards"))
+    PathBuf::from(lanes::expand_tilde("~/.local/share/bmiller/boards"))
 }
 
 /// Every Boards project name named by a `board.toml` facet across every
@@ -923,19 +924,20 @@ fn write_boards_order(cfg: &lanes::config::Config, data_dir: &std::path::Path) -
 /// it just means the sidebar is showing a stale order until `--fix` runs.
 fn check_boards_order(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Check {
     let expected = derived_boards_order(cfg).join("\n");
-    let actual = std::fs::read_to_string(boards_order_path(data_dir)).unwrap_or_default();
+    let order_path = boards_order_path(data_dir);
+    let actual = std::fs::read_to_string(&order_path).unwrap_or_default();
     if actual == expected {
         Check {
             label: "boards order",
             status: Status::Ok,
-            message: "~/boards/.order matches the current lane order".to_string(),
+            message: format!("{} matches the current lane order", order_path.display()),
             hint: None,
         }
     } else {
         Check {
             label: "boards order",
             status: Status::Warn,
-            message: "~/boards/.order is stale or missing".to_string(),
+            message: format!("{} is stale or missing", order_path.display()),
             hint: Some("run `lanes doctor --fix` to refresh it".to_string()),
         }
     }
