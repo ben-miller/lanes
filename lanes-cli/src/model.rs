@@ -481,9 +481,10 @@ impl SignalReason {
             // permission prompt is - same tier as a non-default branch.
             SignalReason::Command(CommandReason::Done) => Urgency::Attention,
             SignalReason::Command(CommandReason::Failed) => Urgency::Warning,
-            // Same tier as a pending commit - something ready for you to
-            // deal with, not a problem.
-            SignalReason::Boards(BoardsReason::InboxNonEmpty) => Urgency::Attention,
+            // Warning, not Attention/"ready" - unlike a pending commit
+            // (your own doing, resolved by committing), an unprocessed
+            // Inbox is more of a "this is piling up" nudge.
+            SignalReason::Boards(BoardsReason::InboxNonEmpty) => Urgency::Warning,
         }
     }
 }

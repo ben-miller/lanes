@@ -488,7 +488,7 @@
                       class:is-unreachable={isUnreachable(signal)}
                       on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
                       on:click|stopPropagation
-                    ><span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}{#if (signal.kind === "command" || signal.kind === "boards") && signal.detail} · {signal.detail}{/if}</button>
+                    >{#if signal.kind === "boards"}Inbox: {signal.detail}{:else}<span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}{#if signal.kind === "command" && signal.detail} · {signal.detail}{/if}{/if}</button>
                     <!-- Only for an active lane - an inactive one is already
                          excluded from cycling entirely (the lane-level
                          toggle above), so a per-session cycling toggle here

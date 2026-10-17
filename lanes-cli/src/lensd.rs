@@ -266,7 +266,7 @@ fn board_signals(m: &Mirror, lane: &str, project: &str) -> Vec<Signal> {
         Some(n) if n > 0 => vec![Signal::new(
             SignalReason::Boards(crate::model::BoardsReason::InboxNonEmpty),
             None,
-            Some(format!("{n} in Inbox")),
+            Some(n.to_string()),
         )],
         _ => vec![],
     }
@@ -768,7 +768,7 @@ mod tests {
         assert_eq!(project, "Boards");
         assert_eq!(signals.len(), 1);
         assert!(matches!(signals[0].reason, SignalReason::Boards(crate::model::BoardsReason::InboxNonEmpty)));
-        assert_eq!(signals[0].detail.as_deref(), Some("3 in Inbox"));
+        assert_eq!(signals[0].detail.as_deref(), Some("3"));
     }
 
     #[test]
