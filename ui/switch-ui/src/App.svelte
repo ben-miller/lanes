@@ -289,6 +289,7 @@
     if (signal.kind === "repo") return "git";
     if (signal.kind === "lanes") return "lanes";
     if (signal.kind === "command") return "shell";
+    if (signal.kind === "boards") return "boards";
     return signal.kind;
   }
 
@@ -303,6 +304,7 @@
     if (signal.reason === "session_not_running") return "no zellij session";
     if (signal.reason === "done") return "done";
     if (signal.reason === "failed") return "failed";
+    if (signal.reason === "inbox_non_empty") return "inbox";
     return signal.reason;
   }
 
@@ -482,11 +484,11 @@
                       class="signal urgency-{signal.urgency}"
                       class:is-active={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.focused_claude_session}
                       class:is-cyclable={signal.cyclable}
-                      class:is-command={signal.kind === "command"}
+                      class:is-command={signal.kind === "command" || signal.kind === "boards"}
                       class:is-unreachable={isUnreachable(signal)}
                       on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
                       on:click|stopPropagation
-                    ><span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}{#if signal.kind === "command" && signal.detail} · {signal.detail}{/if}</button>
+                    ><span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}{#if (signal.kind === "command" || signal.kind === "boards") && signal.detail} · {signal.detail}{/if}</button>
                     <!-- Only for an active lane - an inactive one is already
                          excluded from cycling entirely (the lane-level
                          toggle above), so a per-session cycling toggle here
@@ -874,11 +876,12 @@
   .signal.is-active { box-shadow: 0 0 0 2px var(--accent); }
   /* A non-cyclable chip recedes rather than looking like something hypo+J/K
      would jump to. Mostly seen in edit mode (non-edit filters most
-     non-cyclable chips out), but Command chips are the exception - they're
-     visible in non-edit mode and must NOT be dimmed: a "failed" chip is a
-     come-look, the opposite of "de-emphasised." Opacity, not a background
-     swap like the lane-level treatment: these chips still need their full
-     urgency color to read. */
+     non-cyclable chips out), but Command and Boards chips are the
+     exception (`.is-command`, applied to both - see the template): they're
+     visible in non-edit mode and must NOT be dimmed. A "failed" chip or a
+     non-empty Inbox is a come-look, the opposite of "de-emphasised."
+     Opacity, not a background swap like the lane-level treatment: these
+     chips still need their full urgency color to read. */
   .signal:not(.is-cyclable):not(.is-command) { opacity: var(--signal-dim-opacity); }
   .signal .kind {
     font-size: 0.6rem;

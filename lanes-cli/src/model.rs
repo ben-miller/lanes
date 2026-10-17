@@ -216,6 +216,15 @@ pub enum SignalKind {
     /// kinds: the data comes from a shell hook Lanes itself ships, not from
     /// adapting to an external tool's interface.
     Command,
+    /// A lane's Boards project reporting a non-empty Inbox - something to
+    /// triage, same category as a pending git commit. Sourced via lensd's
+    /// `boards` source (a live socket Boards itself runs, not a file) - see
+    /// `boards/PLAN-inbox-signal.md`. Only ever populated through
+    /// `lane_from_mirror`; `gather_lanes()`'s own CLI path has no avenue to
+    /// this data (no file to read, and it doesn't maintain a live
+    /// connection to anything), so a plain `lanes snapshot` never shows
+    /// this signal even when the live dashboard does.
+    Boards,
 }
 
 /// How a signal's existence is governed - the axis that decides whether a
@@ -322,6 +331,7 @@ pub enum SignalReason {
     Repo(RepoReason),
     Lanes(LanesReason),
     Command(CommandReason),
+    Boards(BoardsReason),
 }
 
 /// A long-running foreground shell command, either still running or past
@@ -366,6 +376,16 @@ pub enum RepoReason {
     /// toggle to show/hide this per se, it's just never generated at all
     /// when you're already on the default branch.
     NonDefaultBranch,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BoardsReason {
+    /// The lane's Boards project has one or more cards in its Inbox column
+    /// right now. Only ever constructed when the count is nonzero - a
+    /// board with an empty Inbox produces no signal at all, same as a
+    /// clean repo never produces `RepoReason::PendingCommit`.
+    InboxNonEmpty,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
@@ -420,6 +440,7 @@ impl SignalReason {
             SignalReason::Repo(_) => SignalKind::Repo,
             SignalReason::Lanes(_) => SignalKind::Lanes,
             SignalReason::Command(_) => SignalKind::Command,
+            SignalReason::Boards(_) => SignalKind::Boards,
         }
     }
 
@@ -460,6 +481,9 @@ impl SignalReason {
             // permission prompt is - same tier as a non-default branch.
             SignalReason::Command(CommandReason::Done) => Urgency::Attention,
             SignalReason::Command(CommandReason::Failed) => Urgency::Warning,
+            // Same tier as a pending commit - something ready for you to
+            // deal with, not a problem.
+            SignalReason::Boards(BoardsReason::InboxNonEmpty) => Urgency::Attention,
         }
     }
 }
@@ -510,6 +534,14 @@ pub enum FacetSnapshot {
     },
     Target { driver: String },
     Repo { path: String, signals: Vec<Signal> },
+    /// A lane's Boards target, with its own signals - parallel to `Repo`
+    /// above, not folded into `Target` (which carries no signals at all)
+    /// since a board's inbox state is observed live data, the same
+    /// category of thing a repo's dirty/branch state is, not just a
+    /// static driver name. Only ever populated by `lane_from_mirror` - see
+    /// `SignalKind::Boards`'s doc comment for why `gather_lanes()` never
+    /// produces this facet at all.
+    Board { project: String, signals: Vec<Signal> },
 }
 
 impl FacetSnapshot {
@@ -517,6 +549,7 @@ impl FacetSnapshot {
         match self {
             FacetSnapshot::Terminal { signals, .. } => signals,
             FacetSnapshot::Repo { signals, .. } => signals,
+            FacetSnapshot::Board { signals, .. } => signals,
             _ => &[],
         }
     }

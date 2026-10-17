@@ -3,14 +3,28 @@
 # relations on <server dir>/lanes.sock. Lanes maps the raw states below to
 # signal reasons and applies its own dismissals (state.kdl) client-side.
 #
-# Every lane's repo is watched: the watch_repo rule below asks lensd to watch
-# it, tagged with the lane id as its "project". lanes_repo_watched says which
-# lane repos lensd has scanned so far.
+# Every lane's repo must ALSO be watched via lensd/rules.d/repos.dl's own
+# hand-maintained watch_repo list (that file is the single owner of the
+# watch_repo control relation - see its own header comment). This set used
+# to also derive watch_repo itself (`watch_repo(Path, Lane) :-
+# lane_repo_path(Lane, Path).`), which silently raced repos.dl's own
+# definition of the same relation on every startup: the engine treats two
+# rule sets defining the same head as a conflict and drops the LOSING
+# SET ENTIRELY (not just that one rule) - "left out", per its own
+# rules_error wording - non-deterministically, by load order. That used to
+# just mean this whole set sometimes silently went dark; once lensd's core
+# `lanes` source started always emitting facts (like lane_boards_project,
+# below) that only this set's own rules consume, losing that race started
+# hard-crashing the daemon instead (any fact for a relation no loaded rule
+# references is a panic - see engine.rs). Removed the derivation here
+# rather than fix the race, since repos.dl already needs to be the lane-
+# repo source of truth anyway (it also watches several non-lane repos).
+# lanes_repo_watched below still works off existing git facts regardless
+# of which rule set asked for them.
 # Not derivable without negation (done client-side): "lane's Zellij session is
 # not running" = lanes_session minus lanes_session_running, and "lane has no
 # WezTerm tab" (SessionMissing) = lanes_session minus lanes_tab.
 
-watch_repo(Path, Lane) :- lane_repo_path(Lane, Path).
 lanes_session(Lane, Zellij) :- lane_zellij(Lane, Zellij).
 lanes_session_running(Lane, Zellij) :- lane_zellij(Lane, Zellij), zellij_session(Zellij).
 lanes_claude(Lane, SessionId, State, Pane, Zellij) :- lane_zellij(Lane, Zellij), zellij_session(Zellij), claude_zellij(SessionId, Zellij, Pane), claude_session(SessionId, State).
@@ -26,3 +40,4 @@ lanes_repo_watched(Lane, Repo, Path) :- lane_repo_path(Lane, Path), repo_path(Re
 lanes_repo_dirty(Lane, Repo, Path) :- lane_repo_path(Lane, Path), repo_path(Repo, Path), dirty(Repo).
 lanes_repo_branch(Lane, Repo, Current, Default, Path) :- lane_repo_path(Lane, Path), repo_path(Repo, Path), branch(Repo, Current), default_branch(Repo, Default), Current != Default.
 lanes_tab(Lane, Tab) :- lane_zellij(Lane, Zellij), wezterm_tab_session(Tab, Zellij).
+lanes_inbox_count(Lane, Project, Count) :- lane_boards_project(Lane, Project), board_inbox_count(Project, Count).

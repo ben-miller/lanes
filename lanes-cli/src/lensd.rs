@@ -250,6 +250,28 @@ fn claude_signals(m: &Mirror, lane: &str, session: &str) -> Vec<Signal> {
         .collect()
 }
 
+/// `lanes_inbox_count(Lane, Project, Count)` for this lane, if any - a
+/// signal only when the count is nonzero (an empty Inbox is a clean state,
+/// not a problem, same as a clean repo never producing `PendingCommit`).
+/// `None` entirely absent is distinct from `Some(0)` only in that the
+/// caller already knows whether this lane has a Boards target at all
+/// (from config, same as `repo_signals`' presence is driven by scope, not
+/// by what the mirror happens to contain).
+fn board_signals(m: &Mirror, lane: &str, project: &str) -> Vec<Signal> {
+    let count = m
+        .rows("lanes_inbox_count")
+        .find(|r| s(&r[0]) == lane && s(&r[1]) == project)
+        .map(|r| int(&r[2]));
+    match count {
+        Some(n) if n > 0 => vec![Signal::new(
+            SignalReason::Boards(crate::model::BoardsReason::InboxNonEmpty),
+            None,
+            Some(format!("{n} in Inbox")),
+        )],
+        _ => vec![],
+    }
+}
+
 fn repo_signals(m: &Mirror, lane: &str, resolved_path: &str, raw_path: &str, session: Option<&str>) -> Vec<Signal> {
     let action = || session.map(|session| SignalAction::FocusRepoPane { session: session.to_string(), path: raw_path.to_string() });
     let mut out = Vec::new();
@@ -330,6 +352,12 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_command
         })
         .collect();
     facets.extend(lane.targets.iter().map(|t| FacetSnapshot::Target { driver: t.driver.name().to_string() }));
+    facets.extend(lane.targets.iter().find_map(|t| match &t.driver {
+        crate::model::TargetDriver::Boards { project } => {
+            Some(FacetSnapshot::Board { project: project.clone(), signals: board_signals(m, &lane.id, project) })
+        }
+        _ => None,
+    }));
 
     // "Reachable" is now whether a WezTerm tab is showing the lane's session
     // right now (lensd's wezterm source), not Lanes' cached tab id.
@@ -636,6 +664,32 @@ mod tests {
         }
     }
 
+    fn lane_with_boards_target(project: &str) -> crate::model::Lane {
+        crate::model::Lane {
+            targets: vec![crate::model::Target {
+                driver: crate::model::TargetDriver::Boards { project: project.to_string() },
+                monitor: None,
+                position: None,
+                launch: false,
+                raise: false,
+                minimized: None,
+                primary: false,
+            }],
+            ..lane()
+        }
+    }
+
+    fn board_facet(snap: &LanewiseSnapshot) -> (&str, &Vec<Signal>) {
+        snap.lanes[0]
+            .facets
+            .iter()
+            .find_map(|f| match f {
+                FacetSnapshot::Board { project, signals } => Some((project.as_str(), signals)),
+                _ => None,
+            })
+            .expect("expected a Board facet")
+    }
+
     fn live_rows() -> Vec<Value> {
         vec![
             row("lanes_session", json!(["l", "z"])),
@@ -703,6 +757,42 @@ mod tests {
         let (running, panes, signals) = terminal(&snap);
         assert!(!*running && panes.is_empty());
         assert!(signals.iter().any(|sg| matches!(sg.reason, SignalReason::Lanes(LanesReason::SessionNotRunning))));
+    }
+
+    #[test]
+    fn a_nonempty_inbox_count_becomes_a_boards_signal() {
+        let mut rows = live_rows();
+        rows.push(row("lanes_inbox_count", json!(["l", "Boards", 3])));
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(rows));
+        let (project, signals) = board_facet(&snap);
+        assert_eq!(project, "Boards");
+        assert_eq!(signals.len(), 1);
+        assert!(matches!(signals[0].reason, SignalReason::Boards(crate::model::BoardsReason::InboxNonEmpty)));
+        assert_eq!(signals[0].detail.as_deref(), Some("3 in Inbox"));
+    }
+
+    #[test]
+    fn a_zero_inbox_count_produces_no_signal() {
+        let mut rows = live_rows();
+        rows.push(row("lanes_inbox_count", json!(["l", "Boards", 0])));
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(rows));
+        let (project, signals) = board_facet(&snap);
+        assert_eq!(project, "Boards");
+        assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn no_inbox_count_row_at_all_still_yields_the_board_facet_with_no_signal() {
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()));
+        let (project, signals) = board_facet(&snap);
+        assert_eq!(project, "Boards");
+        assert!(signals.is_empty());
+    }
+
+    #[test]
+    fn a_lane_with_no_boards_target_has_no_board_facet() {
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()));
+        assert!(!snap.lanes[0].facets.iter().any(|f| matches!(f, FacetSnapshot::Board { .. })));
     }
 
     #[test]

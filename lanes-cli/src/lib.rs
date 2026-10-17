@@ -273,6 +273,7 @@ pub(crate) fn correct_signals(facets: &mut [model::FacetSnapshot], cyclable: boo
         let signals = match facet {
             model::FacetSnapshot::Terminal { signals, .. } => signals,
             model::FacetSnapshot::Repo { signals, .. } => signals,
+            model::FacetSnapshot::Board { signals, .. } => signals,
             model::FacetSnapshot::Target { .. } => continue,
         };
         for s in signals.iter_mut() {
@@ -388,11 +389,14 @@ fn signal_cyclable(kind: model::SignalKind, lane_cyclable: bool, session_disable
 ///     and sessions went EXITED) into a silent "no signals" - the exact
 ///     opposite of what a status chip is for. They're never noise you
 ///     manage away in edit mode.
+///   - `Boards` - a non-empty Inbox is a come-look, same category as a
+///     finished build; whether this lane happens to be cyclable right now
+///     has nothing to do with whether there's something to triage.
 ///
 /// Everything else (git chips, off-cycle Claude sessions) keeps the old
 /// behaviour: visible iff cyclable.
 fn signal_visible(kind: model::SignalKind, cyclable: bool) -> bool {
-    matches!(kind, model::SignalKind::Command | model::SignalKind::Lanes) || cyclable
+    matches!(kind, model::SignalKind::Command | model::SignalKind::Lanes | model::SignalKind::Boards) || cyclable
 }
 
 /// Seconds a command must have been running before it gets a chip at all -
