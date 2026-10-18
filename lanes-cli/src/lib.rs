@@ -1272,10 +1272,25 @@ pub fn navigate_to_repo_pane(session: &str, path: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The newest `gui-sock-*` in WezTerm's data dir that's actually accepting
+/// connections right now - not just the newest by mtime. A GUI that dies
+/// without cleanup leaves its socket file behind; until a new GUI starts
+/// and replaces it, the dead one has the newest mtime and would otherwise
+/// win, pointing every caller at a socket nobody is listening on (see
+/// BUG-wezterm-stale-socket.md). Each candidate costs microseconds to
+/// probe (connect, then immediately drop - no data sent), so trying every
+/// candidate newest-first is cheap even though in practice only the
+/// newest ever matters.
 pub fn wezterm_socket() -> Option<String> {
     let home = std::env::var("HOME").unwrap_or_default();
     let dir = std::path::PathBuf::from(home).join(".local/share/wezterm");
-    let mut socks: Vec<_> = std::fs::read_dir(&dir).ok()?
+    wezterm_socket_in(&dir)
+}
+
+/// [`wezterm_socket`]'s logic against an arbitrary directory, so a test can
+/// point it at a throwaway one instead of the real `~/.local/share/wezterm`.
+fn wezterm_socket_in(dir: &std::path::Path) -> Option<String> {
+    let mut socks: Vec<_> = std::fs::read_dir(dir).ok()?
         .filter_map(|e| e.ok())
         .filter(|e| e.file_name().to_string_lossy().starts_with("gui-sock-"))
         .filter_map(|e| {
@@ -1285,7 +1300,10 @@ pub fn wezterm_socket() -> Option<String> {
         })
         .collect();
     socks.sort_by(|a, b| b.0.cmp(&a.0));
-    socks.into_iter().next().map(|(_, p)| p.to_string_lossy().into_owned())
+    socks.into_iter()
+        .map(|(_, p)| p)
+        .find(|p| std::os::unix::net::UnixStream::connect(p).is_ok())
+        .map(|p| p.to_string_lossy().into_owned())
 }
 
 fn activate_wezterm_tab(session: &str, focus: bool) -> Result<(), String> {
@@ -1293,7 +1311,15 @@ fn activate_wezterm_tab(session: &str, focus: bool) -> Result<(), String> {
         format!("no cached WezTerm tab for session '{}' - run `lanes tabs set {} <id>`", session, session)
     })?;
 
-    let sock = wezterm_socket();
+    // No live GUI at all is its own case, not a wezterm-cli failure to
+    // surface - distinguishing it here means failing in microseconds
+    // instead of the ~2.5s "spawn a mux server and retry" detour
+    // `wezterm cli` takes on a refused socket (see
+    // BUG-wezterm-stale-socket.md), and skips a confusing error that
+    // blames the tab cache for something that isn't the tab cache's fault.
+    let Some(sock) = wezterm_socket() else {
+        return Err("WezTerm isn't running".to_string());
+    };
 
     // Deliberately not verifying the cached tab still exists via a `wezterm
     // cli list` round-trip first - that's a full extra subprocess+socket
@@ -1307,17 +1333,24 @@ fn activate_wezterm_tab(session: &str, focus: bool) -> Result<(), String> {
         spawn_detached(std::process::Command::new("open").args(["-a", "WezTerm"])).ok();
     }
 
+    // --no-auto-start: same reasoning as wezterm_socket() above - a refused
+    // socket must never trigger wezterm's own "spawn a mux server" detour.
+    // With a live socket already confirmed, this only matters if the GUI
+    // dies in the gap between the two calls, but there's no reason to
+    // leave the slow path reachable at all. lensd already does this.
     let mut cmd = std::process::Command::new("/opt/homebrew/bin/wezterm");
-    cmd.args(["cli", "activate-tab", "--tab-id", &cached.to_string()]);
-    if let Some(ref s) = sock {
-        cmd.env("WEZTERM_UNIX_SOCKET", s);
-    }
+    cmd.args(["cli", "--no-auto-start", "activate-tab", "--tab-id", &cached.to_string()]);
+    cmd.env("WEZTERM_UNIX_SOCKET", &sock);
     let output = cmd.output().map_err(|e| format!("wezterm activate-tab: {}", e))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
+        // The last ERROR line, not the whole multi-line wezterm log - the
+        // rest (connection attempts, mux-server spawn chatter) is noise a
+        // Hammerspoon alert shouldn't have to show.
+        let last_error = stderr.lines().rev().find(|l| l.contains("ERROR")).unwrap_or_else(|| stderr.trim());
         return Err(format!(
-            "wezterm activate-tab failed for cached tab {} (session '{}'), it may no longer exist - run `lanes tabs set {} <id>`: {}",
-            cached, session, session, stderr.trim()
+            "wezterm activate-tab failed for cached tab {} (session '{}') - WezTerm may have restarted since tabs were cached; run `ztabs up`: {}",
+            cached, session, last_error.trim()
         ));
     }
 
@@ -2723,6 +2756,54 @@ mod tests {
         assert_eq!(bg.age_secs, 120);
         assert_eq!(bg.comm, "claude bg-spare");
         assert!(parse_ps_line("").is_none());
+    }
+
+    fn wezterm_test_dir(label: &str) -> std::path::PathBuf {
+        // Unix socket paths are capped at ~104 bytes (SUN_LEN) - keep this
+        // short rather than the usual long descriptive temp-dir name.
+        let dir = std::path::PathBuf::from("/tmp").join(format!("lwtsock-{label}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn wezterm_socket_skips_a_dead_socket_file_even_with_the_newest_mtime() {
+        let dir = wezterm_test_dir("dead-newest");
+
+        // The live one, created first (older mtime).
+        let live_path = dir.join("gui-sock-111");
+        let listener = std::os::unix::net::UnixListener::bind(&live_path).unwrap();
+
+        // A dead one: a plain file at the right name, nothing listening -
+        // created after, so it has the newer mtime and would win under the
+        // old mtime-only rule.
+        std::thread::sleep(std::time::Duration::from_millis(10));
+        std::fs::write(dir.join("gui-sock-222"), b"").unwrap();
+
+        let found = wezterm_socket_in(&dir);
+        assert_eq!(found, Some(live_path.to_string_lossy().into_owned()));
+
+        drop(listener);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wezterm_socket_is_none_when_every_candidate_is_dead() {
+        let dir = wezterm_test_dir("all-dead");
+        std::fs::write(dir.join("gui-sock-333"), b"").unwrap();
+        std::fs::write(dir.join("gui-sock-444"), b"").unwrap();
+
+        assert_eq!(wezterm_socket_in(&dir), None);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wezterm_socket_is_none_when_the_directory_does_not_exist() {
+        let dir = std::env::temp_dir().join("lanes-wezterm-sock-test-does-not-exist");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(wezterm_socket_in(&dir), None);
     }
 
     #[test]

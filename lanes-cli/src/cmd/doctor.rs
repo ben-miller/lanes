@@ -50,6 +50,7 @@ pub fn run(fix: bool) {
         check_lanes_wm(),
         check_monitor_config(&cfg),
         check_target_binaries(&cfg),
+        check_wezterm_gui_sockets(),
     ];
 
     if has_boards_target(&cfg) {
@@ -330,7 +331,7 @@ fn classify_tab_cache(
 
 fn live_wezterm_tab_ids() -> std::collections::HashSet<u64> {
     let mut cmd = Command::new("/opt/homebrew/bin/wezterm");
-    cmd.args(["cli", "list", "--format", "json"]);
+    cmd.args(["cli", "--no-auto-start", "list", "--format", "json"]);
     if let Some(sock) = lanes::wezterm_socket() {
         cmd.env("WEZTERM_UNIX_SOCKET", sock);
     }
@@ -761,6 +762,73 @@ fn check_lanes_wm() -> Check {
             message: "found on PATH, but not trusted for Accessibility".to_string(),
             hint: Some("run `lanes-wm request-access` and click Allow - see lanes-wm's README for why this can silently drop after a rebuild".to_string()),
         },
+    }
+}
+
+/// Flags dead `gui-sock-*` files (a WezTerm GUI that died without cleanup)
+/// and a stray `wezterm-mux-server` process - both symptoms of
+/// BUG-wezterm-stale-socket.md. `wezterm_socket()` already skips dead
+/// sockets at switch time, so this is purely diagnostic (nothing here
+/// would otherwise cause a failure), but a pile of dead socket files or a
+/// mux server nobody's using is worth surfacing rather than silently
+/// accumulating `wezterm-log-*.txt` files on every poll.
+fn check_wezterm_gui_sockets() -> Check {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let dir = PathBuf::from(&home).join(".local/share/wezterm");
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => {
+            return Check {
+                label: "wezterm gui sockets",
+                status: Status::Ok,
+                message: format!("no {} directory - WezTerm has never run here", dir.display()),
+                hint: None,
+            };
+        }
+    };
+
+    let mut dead = Vec::new();
+    let mut live_count = 0;
+    for entry in entries.filter_map(|e| e.ok()) {
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if !name.starts_with("gui-sock-") {
+            continue;
+        }
+        if std::os::unix::net::UnixStream::connect(entry.path()).is_ok() {
+            live_count += 1;
+        } else {
+            dead.push(name);
+        }
+    }
+
+    let mux_running = Command::new("pgrep").args(["-f", "wezterm-mux-server"]).output()
+        .is_ok_and(|o| o.status.success());
+
+    if dead.is_empty() && !mux_running {
+        return Check {
+            label: "wezterm gui sockets",
+            status: Status::Ok,
+            message: format!("{live_count} live socket(s), no dead ones, no stray mux server"),
+            hint: None,
+        };
+    }
+
+    let mut parts = Vec::new();
+    let mut hints = Vec::new();
+    if !dead.is_empty() {
+        parts.push(format!("{} dead socket file(s): {}", dead.len(), dead.join(", ")));
+        hints.push(format!("safe to remove: rm {}/{{{}}}", dir.display(), dead.join(",")));
+    }
+    if mux_running {
+        parts.push("a wezterm-mux-server process is running".to_string());
+        hints.push("if unix_domains isn't configured in wezterm.lua, nothing talks to this - find and kill it (ps -o pid,lstart,command -ax | grep wezterm-mux-server)".to_string());
+    }
+
+    Check {
+        label: "wezterm gui sockets",
+        status: Status::Warn,
+        message: parts.join("; "),
+        hint: Some(hints.join(". ")),
     }
 }
 
