@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, HashMap, HashSet};
+use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
@@ -187,9 +187,9 @@ fn fetch_via_single_flight(session: &str) -> Vec<RawPaneInfo> {
     }
 }
 
-/// Every caller of `list-panes` (cycling's ambiguous-session lookup,
-/// gather_lanes()'s per-session shape+position fetch) goes through this one
-/// function, each as its own OS process with no shared memory - so a rapid
+/// Every caller of `list-panes` (currently just cycling's ambiguous-session
+/// lookup, `pane_positions`) goes through this one function, each as its
+/// own OS process with no shared memory - so a rapid
 /// burst of switches (each spawning its own `lanes` process) plus the UI's
 /// own post-switch refresh all independently ask Zellij the same question
 /// about the same session within the same fraction of a second. Caching
@@ -221,37 +221,6 @@ fn positions_from_panes(panes: &[RawPaneInfo]) -> HashMap<u32, (usize, i64, i64)
         .filter(|p| !p.is_plugin)
         .map(|p| (p.id, (p.tab_position, p.pane_y, p.pane_x)))
         .collect()
-}
-
-/// A session's TerminalShape (for the UI's per-pane display) and every
-/// pane's on-screen position (see `pane_positions`), from a single
-/// `list-panes` call - `gather_lanes()` used to make a separate
-/// `dump-layout` call for the shape alone, on top of `list-panes` for
-/// position, doubling the per-session subprocess round-trips on every
-/// refresh (measured ~600-700ms total vs ~220ms for the shape alone; see
-/// perf.log's `gather_lanes.subprocess_batch_done`). `list-panes --all
-/// --json` already carries everything `dump-layout`'s KDL gave us
-/// (command, cwd, focus) plus real geometry and pane ids, so one call
-/// produces both.
-pub fn shape_and_positions_for_session(session: &str) -> (TerminalShape, HashMap<u32, (usize, i64, i64)>) {
-    let panes = list_panes(session);
-    (shape_from_panes(&panes), positions_from_panes(&panes))
-}
-
-fn shape_from_panes(panes: &[RawPaneInfo]) -> TerminalShape {
-    let mut by_tab: BTreeMap<usize, TabInfo> = BTreeMap::new();
-    for p in panes.iter().filter(|p| !p.is_plugin) {
-        let tab = by_tab.entry(p.tab_position).or_insert_with(|| TabInfo {
-            name: p.tab_name.clone(),
-            focused: false,
-            panes: Vec::new(),
-        });
-        if p.is_focused {
-            tab.focused = true;
-        }
-        tab.panes.push(PaneInfo { command: p.pane_command.clone(), focused: p.is_focused, cwd: p.pane_cwd.clone() });
-    }
-    TerminalShape { cwd: None, tabs: by_tab.into_values().collect() }
 }
 
 /// `--short` lists a session name regardless of whether it's actually
@@ -440,24 +409,6 @@ mod tests {
         assert_eq!(positions.len(), 2);
         assert!(positions.contains_key(&0));
         assert!(positions.contains_key(&3));
-    }
-
-    #[test]
-    fn shape_from_panes_groups_by_tab_position_excluding_plugins() {
-        let panes = vec![
-            raw_pane(0, true, false, 0, "Tab #1", None, None),
-            raw_pane(0, false, true, 0, "Tab #1", Some("claude"), Some("/a")),
-            raw_pane(1, false, false, 0, "Tab #1", None, Some("/b")),
-            raw_pane(3, false, false, 1, "Tab #2", Some("claude"), Some("/a")),
-        ];
-        let shape = shape_from_panes(&panes);
-        assert_eq!(shape.tabs.len(), 2);
-        assert_eq!(shape.tabs[0].name, "Tab #1");
-        assert_eq!(shape.tabs[0].panes.len(), 2);
-        assert_eq!(shape.tabs[0].panes[0].command.as_deref(), Some("claude"));
-        assert!(shape.tabs[0].panes[0].focused);
-        assert_eq!(shape.tabs[1].name, "Tab #2");
-        assert_eq!(shape.tabs[1].panes.len(), 1);
     }
 
     #[test]

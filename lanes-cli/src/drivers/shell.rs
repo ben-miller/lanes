@@ -6,8 +6,11 @@
 //! hook writing the same schema feeds this same driver unchanged.
 //!
 //! Every read is lenient - a malformed or wrong-version file is skipped
-//! with a warning, never propagated - so a bad record can't break a
-//! `gather_lanes()` refresh. See PLAN-shell-signal.md.
+//! with a warning, never propagated - so a bad record can't break
+//! `lanes doctor`'s shell-driver health check (its only remaining caller;
+//! the live dashboard and `lanes snapshot`/`signals` read the same records
+//! via lensd's own `shell_command` relation instead). See
+//! PLAN-shell-signal.md.
 
 use serde::Deserialize;
 

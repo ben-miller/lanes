@@ -1,7 +1,8 @@
 //! Client for lensd's `lanes` socket. [`Client`] keeps a [`Mirror`] of the
 //! rule set's rows current on a background thread and reconnects when lensd
-//! goes away. The rest of the file is the spike that compares what lensd
-//! implies against `gather_lanes()` (`lensd-compare`), removed with it.
+//! goes away. [`snapshot_from_mirror`] builds a `LanewiseSnapshot` from that
+//! `Mirror` plus Lanes' own config - the one place lane snapshots get built,
+//! used by `switch-ui` and by `lanes snapshot`/`lanes signals`.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
 use std::io::{BufRead, BufReader};
@@ -232,7 +233,7 @@ fn claude_signals(m: &Mirror, lane: &str, session: &str) -> Vec<Signal> {
         .map(|r| (int(&r[2]), (int(&r[3]), int(&r[6]), int(&r[5]))))
         .collect();
     let mut rows: Vec<&Row> = m.rows("lanes_claude").filter(|r| s(&r[0]) == lane && s(&r[4]) == session).collect();
-    // Same reading order as the on-screen panes, as gather_lanes() does.
+    // Same reading order as the on-screen panes.
     rows.sort_by_key(|r| (positions.get(&int(&r[3])).copied().unwrap_or((i64::MAX, i64::MAX, i64::MAX)), s(&r[1]).to_string()));
     rows.into_iter()
         .map(|r| {

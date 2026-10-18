@@ -1,6 +1,9 @@
 // The scope element model - what a lane's scope is made of, replacing the
 // old Facet concept. model::Lane.scope is Vec<ScopeElement>; config loading
-// (config.rs) parses TOML into it, gather_lanes() resolves it.
+// (config.rs) parses TOML into it. NOTE: as of the gather_lanes() removal,
+// nothing in this crate calls observe()/signals_from() below anymore - see
+// the session notes flagging this for a decision on whether to keep, port
+// to lensd, or delete.
 //
 // A ScopeElement is a concrete reference to something a lane's scope
 // includes, not a predicate. Granularity ("point at a whole project" vs

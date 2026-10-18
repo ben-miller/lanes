@@ -280,21 +280,21 @@ fn is_relevant_change(
     if path.starts_with(state_dir) {
         // *.log files (perf.log, switch-ui.log, hammerspoon.log) live in
         // this same directory but are never state a refresh should react
-        // to - perf.log in particular is written on every single
-        // gather_lanes() call (see logging::perf), so treating it as
-        // "relevant" turned every refresh into a self-triggering loop: log
-        // the refresh -> watcher sees perf.log change -> refresh again.
+        // to - perf.log in particular is written on every logging::perf
+        // call, so treating it as "relevant" turned every refresh into a
+        // self-triggering loop: log the refresh -> watcher sees perf.log
+        // change -> refresh again.
         //
         // state_dir/cache/ (the list-panes TTL cache - see
-        // drivers::zellij::list_panes) is the same story: gather_lanes()
-        // itself is one of the things that populates it, so treating a
-        // cache write as relevant would trigger the exact refresh that just
-        // populated it.
+        // drivers::zellij::list_panes) is the same story: cycling a lane
+        // (cycle_claude_session_impl's pane-position tiebreak) is one of
+        // the things that populates it, so treating a cache write as
+        // relevant would trigger a refresh right after a cycle.
         if path.starts_with(state_dir.join("cache")) {
             return false;
         }
-        // (*.tmp already excluded above.) *.log files - perf.log especially,
-        // written on every gather_lanes() - would self-trigger a refresh loop.
+        // (*.tmp already excluded above.) *.log files - perf.log especially -
+        // would self-trigger a refresh loop.
         return path.extension().and_then(|e| e.to_str()) != Some("log");
     }
     for watch in watches {
@@ -335,10 +335,10 @@ mod tests {
 
     #[test]
     fn log_files_in_state_dir_are_never_relevant() {
-        // Regression test: perf.log is written on every single gather_lanes()
-        // call (see logging::perf) - if the watcher ever treats a *.log
-        // write in state_dir as relevant again, every refresh re-triggers
-        // itself forever (log the refresh -> watcher fires -> refresh again).
+        // Regression test: perf.log is written on every single logging::perf
+        // call - if the watcher ever treats a *.log write in state_dir as
+        // relevant again, every refresh re-triggers itself forever (log the
+        // refresh -> watcher fires -> refresh again).
         let state_dir = Path::new("/home/x/.local/state/lanes");
         for name in ["perf.log", "switch-ui.log", "hammerspoon.log"] {
             assert!(

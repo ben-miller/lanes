@@ -173,35 +173,44 @@ records are landing.
 Phase 2 (see `PLAN-shell-signal.md`) will add a live `running` chip and
 `bash`/`zsh` hooks.
 
-## lensd spike (experimental)
+## lensd
 
 `lensd/lanes.dl` is Lanes' rule set for the lensd daemon (see the lensd repo's
 README). Copy or symlink it into lensd's rules directory
 (`~/.config/lensd/rules.d/lanes.dl`); lensd then serves it on
 `~/.local/state/lensd/lanes.sock`. It exposes `lanes_session`,
-`lanes_session_running`, `lanes_claude` and `lanes_command` rows.
+`lanes_session_running`, `lanes_claude` and `lanes_command` rows, among
+others.
 
-`lanes lensd-compare [--socket PATH]` reads one snapshot from that socket and
-diffs the signals it implies (Claude session, Command and SessionNotRunning)
-against `gather_lanes()`, printing `only in lanes` / `only in lensd` lines.
+This is the only path left that turns facts into lane signals.
+`gather_lanes()` - a second, independently-drifting implementation that did
+the same thing without lensd, by shelling out to git/zellij/wezterm and
+reading the claude/shell registry files directly - is gone; it was the
+confirmed root cause of at least two bugs needing duplicate fixes. `lanes
+snapshot`/`lanes signals` and Lanes Switch's dashboard all go through
+`lensd::snapshot_from_mirror` now, which means `lanes snapshot`/`lanes
+signals` require a live lensd connection - they used to work standalone.
+
 `src/lensd.rs` holds the client. `lensd::Client::start(path, on_change)` keeps a
 `Mirror` of the rows current on a background thread, reconnects with backoff
 (100ms doubling to 5s), bumps `version()` on every change and calls
 `on_change`. `current()` is `None` while lensd is not running: there is no
-stale data and no fallback. The UI does not use it yet.
+stale data and no fallback.
 
 `lensd::snapshot_from_mirror(cfg, mirror)` builds a `LanewiseSnapshot` from the
 live rows plus Lanes' lane config. Layout (lane order, scope) comes from the
 config; panes and signals come from the `lanes_*` relations in
-`lensd/lanes.dl`, and `watch_repo` is derived there from each lane's repo
-path. Policy stays in Lanes: the shared `correct_signals` pass sets
+`lensd/lanes.dl`, and each lane's repo watch is derived there too, via
+`lane_watch_repo` (a second, non-colliding name for the same `watch_repo`
+control relation lensd's `rules.d/repos.dl` uses for repos no lane declares
+- see lensd's own README for why they can't share one relation name).
+Policy stays in Lanes: the shared `correct_signals` pass sets
 `cyclable`, `visible`, `lifecycle` and the Awaiting-to-Ready upgrade, and
 dismissals and latched command state still come from `state.kdl`.
 `SessionMissing` is "session exists but `lanes_tab` has no WezTerm tab for
 it". Panes are ordered top to bottom, then left to right. Gap: cycling and tab
 activation still use the cached tab id, so `cyclable` (live tab) can disagree
 with what activation does.
-Repo signals in `lensd-compare` still only cover repos also listed in lensd's `lensd.toml`.
 
 ## Snapshot format
 
@@ -227,7 +236,7 @@ Each resource has a `selector` (durable handle for re-finding it), a `locator` (
 
 ## Diagnostics
 
-Every lane/session switch, and every `gather_lanes()` refresh (the CLI's `snapshot`/`signals`, and Lanes Switch's dashboard), writes microsecond-timestamped lines to `~/.local/state/lanes/perf.log` - the full keystroke -> tab change -> Lanes Switch UI update timeline:
+Every lane/session switch, and every lensd-backed refresh (the CLI's `snapshot`/`signals`, and Lanes Switch's dashboard), writes microsecond-timestamped lines to `~/.local/state/lanes/perf.log` - the full keystroke -> tab change -> Lanes Switch UI update timeline:
 
 1. `keystroke` - the hypo+J/K hotkey firing, logged from Hammerspoon itself (`hs-profiles/lanesswitch.lua` in infra) before it spawns anything - the only point that captures everything upstream of the `lanes` binary itself (hs.task dispatch, process fork/exec, `bash -l`). In practice that upstream overhead turned out to be negligible (~10-20ms, measured directly) - the real gap between `keystroke` and `switch.trigger` was `cycle_claude_session()`'s own work (see `cycle.*` below), not anything before the binary started.
 2. `cycle.enumerated` / `.filtered` / `.ambiguous_sessions` / `.positions_resolved` / `.target_resolved` - only logged for `sessions next`/`prev` (cycling, not a direct `sessions switch`): enumerating live Claude sessions, filtering to reachable lanes, deciding which Zellij sessions actually need a `list-panes` call to break a same-lane tie (`sessions_needing_pane_positions`), running those calls, then picking the cycle target. This used to run one `list-panes` call per distinct live Zellij session unconditionally and sequentially, ahead of every single switch - `.positions_resolved`'s jump from `.ambiguous_sessions` is what that now-restricted, now-concurrent cost looks like.
@@ -235,7 +244,18 @@ Every lane/session switch, and every `gather_lanes()` refresh (the CLI's `snapsh
 4. `switch.tab_activated` / `switch.pane_focused` / `switch.complete` - the actual tab change: WezTerm's `activate-tab` and Zellij's `focus-pane-id`, logged separately so a slow switch shows which of the two is responsible, not just their total.
 5. `ui.socket_received` / `ui.emitted_lane_changed` / `ui.rendered_lane_changed` - Lanes Switch's socket listener receiving and re-emitting the change, and the frontend actually applying it (the fast highlight-only path, not a full refresh).
 
-Full-refresh cost is broken out too (`gather_lanes.start`/`.subprocess_batch_done`/`.done`, `ui.get_snapshot.start`/`.done`, `ui.refresh.start`/`.done`) - this is the expensive path (one `list-panes` per running Zellij session, plus one `git status` per repo, run concurrently but each an external process round-trip), and the one most likely to explain a noticeably laggy switch. Measured cost: `zellij action list-panes` alone runs ~120-170ms per session even sequentially (vs. ~10ms for a trivial action like `current-tab-info`) - that floor is inherent to the action itself, not something request flags change, and 5 concurrent sessions only partially parallelize against each other rather than all finishing in that same ~150ms. A switch's own highlight update (`switch.trigger` -> `ui.rendered_lane_changed`) is unaffected by any of this and lands in single-digit milliseconds over the direct socket path; the refresh this section measures is what runs afterward, triggered by the `state.kdl` write every switch makes.
+Full-refresh cost is broken out too (`ui.get_snapshot.start`/`.done`,
+`ui.refresh.start`/`.done`) - `ui.get_snapshot` wraps
+`lensd::snapshot_from_mirror`, which reads from the already-live `Mirror`
+kept current by a background thread rather than making any subprocess
+calls of its own, so this is now cheap. (It used to be the expensive path,
+back when it ran one `list-panes` per running Zellij session plus one `git
+status` per repo on every single refresh - `gather_lanes()`'s own
+subprocess-batching, since replaced entirely by lensd's live facts.) A
+switch's own highlight update (`switch.trigger` -> `ui.rendered_lane_changed`)
+lands in single-digit milliseconds over the direct socket path, independent
+of the refresh this section measures, which runs afterward, triggered by
+the `state.kdl` write every switch makes.
 
 ```
 lanes diagnostics status       # on/off

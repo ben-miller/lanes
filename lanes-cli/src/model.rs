@@ -26,8 +26,8 @@ pub struct Lane {
     // from `focused_lane` (which one you're looking at right now) - a lane
     // can be inactive while still being the one recorded as focused, since
     // nothing forces a jump away from it on deactivation (see
-    // gather_lanes/state::read_focused_lane). Defaults to true so existing
-    // lane files without this field keep behaving exactly as before.
+    // state::read_focused_lane). Defaults to true so existing lane files
+    // without this field keep behaving exactly as before.
     #[serde(default = "default_true")]
     pub active: bool,
     #[serde(default)]
@@ -220,10 +220,8 @@ pub enum SignalKind {
     /// triage, same category as a pending git commit. Sourced via lensd's
     /// `boards` source (a live socket Boards itself runs, not a file) - see
     /// `boards/PLAN-inbox-signal.md`. Only ever populated through
-    /// `lane_from_mirror`; `gather_lanes()`'s own CLI path has no avenue to
-    /// this data (no file to read, and it doesn't maintain a live
-    /// connection to anything), so a plain `lanes snapshot` never shows
-    /// this signal even when the live dashboard does.
+    /// `lane_from_mirror`, which is the only lane-snapshot path there is -
+    /// see `lensd::snapshot_from_mirror`.
     Boards,
 }
 
@@ -258,7 +256,7 @@ pub struct Signal {
     // Whether this signal renders as a chip in the dashboard's normal
     // (non-edit) view. Not the same question as `cyclable`: a running
     // command is visible but not a cycle target. Placeholder at
-    // construction, corrected in gather_lanes() alongside `cyclable`.
+    // construction, corrected in correct_signals() alongside `cyclable`.
     pub visible: bool,
     // Stable per-occurrence id for a `Latched` signal, echoed back by the
     // UI's dismiss control (see state::set_signal_dismissed). `None` for
@@ -269,7 +267,7 @@ pub struct Signal {
     // would actually land on - see lib.rs's signal_cyclable(). Not known at
     // construction time (signal_for() builds signals before a lane's
     // reachability is resolved), so every construction site sets this to
-    // `false` as a placeholder; gather_lanes() corrects it once the lane's
+    // `false` as a placeholder; correct_signals() corrects it once the lane's
     // own cyclable fact is known. Never trust this field on a Signal that
     // didn't pass through that correction pass.
     pub cyclable: bool,
@@ -295,8 +293,8 @@ impl Signal {
 
     /// Build a signal from its reason plus optional action/detail. `urgency`
     /// and `lifecycle` follow from the reason; `cyclable`/`visible` are left
-    /// as placeholders for gather_lanes()'s correction pass to set once the
-    /// lane's own facts are known.
+    /// as placeholders for correct_signals()'s correction pass to set once
+    /// the lane's own facts are known.
     pub fn new(reason: SignalReason, action: Option<SignalAction>, detail: Option<String>) -> Self {
         Signal {
             urgency: reason.urgency(),
@@ -358,8 +356,8 @@ pub enum ClaudeSessionReason {
     Permission,
     /// Never constructed directly by signal_for() - lane cyclability isn't
     /// known yet at that point in the pipeline. Only ever synthesized
-    /// downstream, by gather_lanes() upgrading an Awaiting signal once its
-    /// lane turns out cyclable (see lib.rs's upgrade_awaiting_to_ready) -
+    /// downstream, by correct_signals() upgrading an Awaiting signal once
+    /// its lane turns out cyclable (see lib.rs's upgrade_awaiting_to_ready) -
     /// same precedent as `cyclable` itself being a correction-pass-only
     /// fact. An idle Claude session that's actually part of the cycling
     /// rotation, as opposed to one sitting idle off to the side.
@@ -539,9 +537,7 @@ pub enum FacetSnapshot {
     /// above, not folded into `Target` (which carries no signals at all)
     /// since a board's inbox state is observed live data, the same
     /// category of thing a repo's dirty/branch state is, not just a
-    /// static driver name. Only ever populated by `lane_from_mirror` - see
-    /// `SignalKind::Boards`'s doc comment for why `gather_lanes()` never
-    /// produces this facet at all.
+    /// static driver name. Only ever populated by `lane_from_mirror`.
     Board { project: String, signals: Vec<Signal> },
 }
 
@@ -563,7 +559,7 @@ pub struct LaneSnapshot {
     pub active: bool,
     // Whether this lane would actually be visited by `sessions next`/`prev`
     // right now - active, reachable, and hosting at least one live Claude
-    // session. Computed in gather_lanes() via the same
+    // session. Computed via lib.rs's lane_cyclable(), which reuses the same
     // reachable_lane_decision() cycle_claude_session's own filter uses, not
     // a UI-side guess re-derived from `active`/`facets` - see that
     // function's doc comment.

@@ -152,7 +152,7 @@ fn check_claude() -> Check {
 /// A Claude session whose process is genuinely alive but whose registry
 /// entry names a Zellij session that no longer exists - most likely
 /// because that session was renamed after this Claude session started.
-/// `session_is_live` (and thus everything gather_lanes() shows) already
+/// `session_is_live` (and thus everything a lane snapshot shows) already
 /// excludes this entry entirely, since its recorded zellij_session isn't
 /// live - so unlike a real dead session, this one is a live process
 /// silently invisible to every lane until it's noticed and fixed.
@@ -257,8 +257,10 @@ fn check_logs() -> Check {
 /// - stale: a cached id for a lane that's active and tracked, but the id
 ///   doesn't match any currently-open WezTerm tab - needs one live
 ///   `wezterm cli list` round trip. Fine here specifically: doctor is a
-///   manual, on-demand command, not the 10s polling path gather_lanes()
-///   deliberately avoids hitting WezTerm from.
+///   manual, on-demand command, not the live dashboard's own refresh path,
+///   which deliberately avoids hitting WezTerm directly and trusts the
+///   cache instead (see `lensd.rs`'s reachability computation, which reads
+///   the same cache).
 fn check_wezterm_tab_cache(cfg: &lanes::config::Config) -> Check {
     let cached = lanes::state::all_wezterm_tab_ids();
     let live_ids = live_wezterm_tab_ids();
@@ -360,14 +362,15 @@ fn is_kebab_case(s: &str) -> bool {
 }
 
 /// The one check in this file that makes a real network call, deliberately
-/// - gather_lanes()'s hot refresh path reads a repo's cached
-/// refs/remotes/origin/HEAD purely locally (see lib.rs's
-/// git_default_branch), which is fast but can silently go stale if the
-/// remote's own default branch changes after clone (git has no hook that
-/// fires on that, and a plain `git fetch` doesn't refresh this ref either -
-/// only `git remote set-head origin -a` does). There's no way to detect
-/// that staleness without actually asking the remote, so it belongs here -
-/// an occasional, manually-run diagnostic - not on every UI refresh.
+/// - the live dashboard's own non-default-branch signal (lensd's
+/// `default_branch` relation) reads a repo's cached
+/// refs/remotes/origin/HEAD purely locally, which is fast but can silently
+/// go stale if the remote's own default branch changes after clone (git has
+/// no hook that fires on that, and a plain `git fetch` doesn't refresh this
+/// ref either - only `git remote set-head origin -a` does). There's no way
+/// to detect that staleness without actually asking the remote, so it
+/// belongs here - an occasional, manually-run diagnostic - not on every UI
+/// refresh.
 fn check_git_default_branches(cfg: &lanes::config::Config) -> Check {
     let repo_paths: std::collections::HashSet<String> = cfg.lanes.iter()
         .flat_map(|l| l.scope.iter())
