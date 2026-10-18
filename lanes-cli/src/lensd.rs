@@ -460,56 +460,6 @@ fn resolve_path(path: &str) -> String {
     std::fs::canonicalize(trimmed).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|_| trimmed.to_string())
 }
 
-/// The same keys from `gather_lanes()`, limited to the kinds lensd covers so far.
-/// Repo signals are kept only for repos in `watched`; the rest are returned
-/// separately since lensd cannot know about them.
-/// `Ready` is `Awaiting` upgraded by lane cyclability, which lensd does not model.
-pub fn keys_from_snapshot(snap: &LanewiseSnapshot, watched: &HashMap<String, String>) -> (BTreeSet<String>, BTreeSet<String>) {
-    let mut keys = BTreeSet::new();
-    let mut unwatched = BTreeSet::new();
-    for lane in &snap.lanes {
-        for facet in &lane.facets {
-            if let FacetSnapshot::Repo { path, signals } = facet {
-                let resolved = resolve_path(path);
-                for sig in signals {
-                    let reason = match &sig.reason {
-                        SignalReason::Repo(RepoReason::PendingCommit) => "pending_commit",
-                        SignalReason::Repo(RepoReason::NonDefaultBranch) => "non_default_branch",
-                        _ => continue,
-                    };
-                    match watched.get(&resolved) {
-                        Some(name) => {
-                            keys.insert(format!("{}|repo|{reason}|{name}", lane.id));
-                        }
-                        None => {
-                            unwatched.insert(path.clone());
-                        }
-                    }
-                }
-                continue;
-            }
-            for sig in facet.signals() {
-                let v = serde_json::to_value(sig).unwrap_or_default();
-                let kind = s(&v["kind"]);
-                let mut reason = s(&v["reason"]).to_string();
-                let subject = match (kind, &sig.action) {
-                    ("claude_session", Some(SignalAction::SwitchClaudeSession { session_id })) => {
-                        if reason == "ready" {
-                            reason = "awaiting".into();
-                        }
-                        session_id.clone()
-                    }
-                    ("command", Some(SignalAction::FocusPane { session, pane })) => format!("{session}:{pane}"),
-                    ("lanes", _) if reason == "session_not_running" => String::new(),
-                    _ => continue,
-                };
-                keys.insert(format!("{}|{kind}|{reason}|{subject}", lane.id));
-            }
-        }
-    }
-    (keys, unwatched)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;

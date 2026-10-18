@@ -3,24 +3,17 @@
 # relations on <server dir>/lanes.sock. Lanes maps the raw states below to
 # signal reasons and applies its own dismissals (state.kdl) client-side.
 #
-# Every lane's repo must ALSO be watched via lensd/rules.d/repos.dl's own
-# hand-maintained watch_repo list (that file is the single owner of the
-# watch_repo control relation - see its own header comment). This set used
-# to also derive watch_repo itself (`watch_repo(Path, Lane) :-
-# lane_repo_path(Lane, Path).`), which silently raced repos.dl's own
-# definition of the same relation on every startup: the engine treats two
-# rule sets defining the same head as a conflict and drops the LOSING
-# SET ENTIRELY (not just that one rule) - "left out", per its own
-# rules_error wording - non-deterministically, by load order. That used to
-# just mean this whole set sometimes silently went dark; once lensd's core
-# `lanes` source started always emitting facts (like lane_boards_project,
-# below) that only this set's own rules consume, losing that race started
-# hard-crashing the daemon instead (any fact for a relation no loaded rule
-# references is a panic - see engine.rs). Removed the derivation here
-# rather than fix the race, since repos.dl already needs to be the lane-
-# repo source of truth anyway (it also watches several non-lane repos).
-# lanes_repo_watched below still works off existing git facts regardless
-# of which rule set asked for them.
+# Every lane's repo is watched via lane_watch_repo below, a control relation
+# the git source picks up the same way it picks up repos.dl's own watch_repo
+# (see source/mod.rs's watch_changes, which now matches either relation
+# name). This set used to derive watch_repo itself under that same name,
+# which raced repos.dl's own definition of it on every startup: the engine
+# treats two rule sets defining the same head as a conflict and drops the
+# LOSING SET ENTIRELY (not just that one rule) - "left out", per its own
+# rules_error wording - non-deterministically, by load order. Using a
+# differently-named relation for lane-tied repos avoids the collision
+# entirely; repos.dl now only hand-lists genuinely context-less repos (ones
+# no lane's tab.toml declares).
 # Not derivable without negation (done client-side): "lane's Zellij session is
 # not running" = lanes_session minus lanes_session_running, and "lane has no
 # WezTerm tab" (SessionMissing) = lanes_session minus lanes_tab.
@@ -41,3 +34,4 @@ lanes_repo_dirty(Lane, Repo, Path) :- lane_repo_path(Lane, Path), repo_path(Repo
 lanes_repo_branch(Lane, Repo, Current, Default, Path) :- lane_repo_path(Lane, Path), repo_path(Repo, Path), branch(Repo, Current), default_branch(Repo, Default), Current != Default.
 lanes_tab(Lane, Tab) :- lane_zellij(Lane, Zellij), wezterm_tab_session(Tab, Zellij).
 lanes_inbox_count(Lane, Project, Count) :- lane_boards_project(Lane, Project), board_inbox_count(Project, Count).
+lane_watch_repo(Path, Lane) :- lane_repo_path(Lane, Path).

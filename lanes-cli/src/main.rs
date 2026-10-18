@@ -61,13 +61,6 @@ enum Command {
     /// List lanes that have signals requiring attention
     Signals,
 
-    /// Compare the signals lensd's `lanes` rule set implies against gather_lanes()
-    LensdCompare {
-        /// Socket path (default ~/.local/state/lensd/lanes.sock)
-        #[arg(long)]
-        socket: Option<std::path::PathBuf>,
-    },
-
     /// Print the currently focused lane ID
     Current {
         /// Print the lane's display name instead of its id
@@ -294,6 +287,25 @@ enum TabsCommand {
     Clear { session: String },
 }
 
+/// `snapshot`/`signals` used to build this from `gather_lanes()`, a second,
+/// independently-drifting implementation of "turn facts into lane
+/// signals" alongside `lensd::snapshot_from_mirror` (the one `switch-ui`
+/// uses). Collapsed to one: this now requires a live lensd connection,
+/// where it used to work standalone - a real behavior change, not just a
+/// refactor.
+fn lanes_snapshot_from_lensd() -> lanes::model::LanewiseSnapshot {
+    let cfg = lanes::config::Config::load();
+    let path = lanes::lensd::default_socket();
+    let mirror = match lanes::lensd::read_snapshot(&path, std::time::Duration::from_secs(5)) {
+        Ok(m) => m,
+        Err(e) => {
+            eprintln!("error: cannot read lensd socket {}: {e}", path.display());
+            std::process::exit(1);
+        }
+    };
+    lanes::lensd::snapshot_from_mirror(&cfg, &mirror)
+}
+
 fn main() {
     let cli = Cli::parse();
 
@@ -350,8 +362,7 @@ fn main() {
         }
 
         Command::Snapshot { out } => {
-            let cfg = lanes::config::Config::load();
-            let snapshot = lanes::gather_lanes(&cfg);
+            let snapshot = lanes_snapshot_from_lensd();
             let json = serde_json::to_string_pretty(&snapshot).expect("serialization failed");
             match out {
                 Some(path) => std::fs::write(&path, &json).expect("failed to write output file"),
@@ -359,35 +370,8 @@ fn main() {
             }
         }
 
-        Command::LensdCompare { socket } => {
-            let cfg = lanes::config::Config::load();
-            let path = socket.unwrap_or_else(lanes::lensd::default_socket);
-            let mirror = match lanes::lensd::read_snapshot(&path, std::time::Duration::from_secs(5)) {
-                Ok(m) => m,
-                Err(e) => {
-                    eprintln!("error: cannot read lensd socket {}: {e}", path.display());
-                    std::process::exit(1);
-                }
-            };
-            let from_lensd = lanes::lensd::keys_from_mirror(&mirror, lanes::state::is_signal_dismissed);
-            let (from_lanes, unwatched) =
-                lanes::lensd::keys_from_snapshot(&lanes::gather_lanes(&cfg), &lanes::lensd::watched_repos(&mirror));
-            if !unwatched.is_empty() {
-                println!("skipped repo signals for repos not in lensd.toml: {}", unwatched.into_iter().collect::<Vec<_>>().join(", "));
-            }
-            for k in from_lanes.difference(&from_lensd) {
-                println!("only in lanes: {k}");
-            }
-            for k in from_lensd.difference(&from_lanes) {
-                println!("only in lensd: {k}");
-            }
-            println!("{} common, {} only lanes, {} only lensd", from_lanes.intersection(&from_lensd).count(),
-                from_lanes.difference(&from_lensd).count(), from_lensd.difference(&from_lanes).count());
-        }
-
         Command::Signals => {
-            let cfg = lanes::config::Config::load();
-            let snapshot = lanes::gather_lanes(&cfg);
+            let snapshot = lanes_snapshot_from_lensd();
             let signaled: Vec<_> = snapshot.lanes.iter()
                 .filter(|l| l.has_signals())
                 .collect();

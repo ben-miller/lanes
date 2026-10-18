@@ -38,236 +38,14 @@ pub fn possibly_renamed_claude_sessions() -> Vec<RenamedCandidate> {
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 
-pub fn gather_lanes(cfg: &config::Config) -> model::LanewiseSnapshot {
-    let t0 = std::time::Instant::now();
-    logging::perf("gather_lanes.start", "");
-
-    let running = drivers::zellij::running_sessions();
-    let claude = claude_sessions_by_zellij();
-
-    // Opt-in and fully isolated: not in the default `drivers` list, and a
-    // panic in the driver degrades to "no command chips this refresh"
-    // rather than a broken snapshot. Reading files only - no subprocesses -
-    // so this adds negligible cost even when enabled. See
-    // PLAN-shell-signal.md.
-    let shell_records: Vec<drivers::shell::CommandRecord> = if cfg.driver_enabled("shell") {
-        std::panic::catch_unwind(drivers::shell::enumerate).unwrap_or_else(|_| {
-            logging::append_line("switch-ui.log", "error", "shell driver panicked; skipping this refresh");
-            Vec::new()
-        })
-    } else {
-        Vec::new()
-    };
-
-    let running_sessions: Vec<&str> = cfg.lanes.iter()
-        .flat_map(|lane| lane.scope.iter())
-        .filter_map(|el| el.zellij_session_name().filter(|s| running.contains(*s)))
-        .collect();
-
-    let repo_paths: Vec<String> = cfg.lanes.iter()
-        .flat_map(|lane| lane.scope.iter())
-        .filter_map(|el| el.repo_path().map(expand_tilde))
-        .collect();
-
-    // One list-panes call per session (giving both the pane shape for
-    // display and each pane's on-screen position - see
-    // shape_and_positions_for_session) plus one git-status call per repo,
-    // each a separate subprocess round-trip independent of every other one
-    // - fetch them all concurrently in one batch rather than once per lane
-    // in sequence (this used to be the dominant cost of every UI refresh,
-    // worse still when this used to be two separate per-session calls -
-    // dump-layout and list-panes - see perf.log's
-    // gather_lanes.subprocess_batch_done and the "Diagnostics" section of
-    // the README).
-    let (layouts, pane_positions, git_status): (
-        HashMap<String, model::TerminalShape>,
-        HashMap<String, HashMap<u32, (usize, i64, i64)>>,
-        HashMap<String, RepoStatus>,
-    ) = std::thread::scope(|scope| {
-        let pane_handles: Vec<_> = running_sessions.into_iter()
-            .map(|s| (s.to_string(), scope.spawn(move || drivers::zellij::shape_and_positions_for_session(s))))
-            .collect();
-        let git_handles: Vec<_> = repo_paths.into_iter()
-            .map(|p| (p.clone(), scope.spawn(move || git_repo_status(&p))))
-            .collect();
-
-        let mut layouts = HashMap::new();
-        let mut pane_positions = HashMap::new();
-        for (s, handle) in pane_handles {
-            let (shape, positions) = handle.join().unwrap_or_default();
-            layouts.insert(s.clone(), shape);
-            pane_positions.insert(s, positions);
-        }
-        let git_status = git_handles.into_iter()
-            .map(|(p, handle)| (p, handle.join().unwrap_or_default()))
-            .collect();
-        (layouts, pane_positions, git_status)
-    });
-    logging::perf("gather_lanes.subprocess_batch_done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
-
-    let lanes = cfg.lanes.iter().map(|lane| {
-        // This lane's scope elements + already-known observations, built
-        // from the parallel-fetched layouts/git_status and claude map above
-        // rather than through scope::observe() - that would re-run the same
-        // subprocess calls a second time, one lane at a time, undoing the
-        // whole point of prefetching them together.
-        let mut resolved: Vec<(scope::ScopeElement, Vec<scope::Observation>)> = Vec::new();
-        for el in &lane.scope {
-            if let Some(session) = el.zellij_session_name().filter(|s| running.contains(*s)) {
-                resolved.push((el.clone(), vec![]));
-                let positions = pane_positions.get(session);
-                let mut claude_sessions: Vec<&drivers::claude::ClaudeSession> =
-                    claude.get(session).into_iter().flatten().collect();
-                // Signals render in this same order in the UI - match it to
-                // each session's on-screen tab/pane position, same as
-                // cycling, rather than registry-file enumeration order.
-                claude_sessions.sort_by_key(|c| pane_position_rank(positions, c.zellij_pane_id));
-                for c in claude_sessions {
-                    resolved.push((
-                        scope::ScopeElement::claude_session(&c.session_id),
-                        vec![scope::Observation {
-                            kind: scope::KIND_CLAUDE_SESSION_STATE.to_string(),
-                            data: serde_json::json!({ "state": c.state }),
-                        }],
-                    ));
-                }
-            } else if let Some(path) = el.repo_path() {
-                let status = git_status.get(&expand_tilde(path));
-                let mut obs = Vec::new();
-                if status.is_some_and(|s| s.dirty) {
-                    obs.push(scope::Observation { kind: scope::KIND_GIT_DIRTY.to_string(), data: serde_json::json!({}) });
-                }
-                if let Some((current, default)) = status.and_then(|s| s.non_default_branch.as_ref()) {
-                    obs.push(scope::Observation {
-                        kind: scope::KIND_GIT_NON_DEFAULT_BRANCH.to_string(),
-                        data: serde_json::json!({ "current": current, "default": default }),
-                    });
-                }
-                resolved.push((el.clone(), obs));
-            }
-        }
-        let lane_signals = scope::signals_from(&resolved);
-
-        let mut facets: Vec<model::FacetSnapshot> = lane.scope.iter().map(|el| {
-            if let Some(session) = el.zellij_session_name() {
-                let is_running = running.contains(session);
-                let (panes, signals) = if is_running {
-                    let shape = layouts.get(session).cloned();
-                    let panes = build_terminal_panes(shape, &claude, session);
-                    let session_ids: HashSet<&str> = claude.get(session)
-                        .map(|refs| refs.iter().map(|c| c.session_id.as_str()).collect())
-                        .unwrap_or_default();
-                    let signals = lane_signals.iter()
-                        .filter(|s| matches!(
-                            &s.action,
-                            Some(model::SignalAction::SwitchClaudeSession { session_id })
-                                if session_ids.contains(session_id.as_str())
-                        ))
-                        .cloned()
-                        .collect();
-                    (panes, signals)
-                } else {
-                    (vec![], vec![])
-                };
-                model::FacetSnapshot::Terminal {
-                    session: session.to_string(),
-                    running: is_running,
-                    panes,
-                    signals,
-                }
-            } else {
-                // Repo - the only other kind gather_lanes() puts in scope.
-                let path = el.repo_path().unwrap_or_default();
-                let signals = lane_signals.iter()
-                    .filter(|s| matches!(
-                        &s.action,
-                        Some(model::SignalAction::FocusRepoPane { path: p, .. }) if p == path
-                    ))
-                    .cloned()
-                    .collect();
-                model::FacetSnapshot::Repo { path: path.to_string(), signals }
-            }
-        }).collect();
-
-        facets.extend(lane.targets.iter().map(|t| model::FacetSnapshot::Target {
-            driver: t.driver.name().to_string(),
-        }));
-
-        let reachable = lane_reachable(&facets);
-        let terminal_running = lane_terminal_running(&facets);
-
-        // Both of these used to be their own bool fields, read separately
-        // from every other "this needs you" fact (session_missing on
-        // LaneSnapshot; terminal_running lived only inside the Terminal
-        // facet itself, surfaced nowhere). They're both just Lanes-kind
-        // signals now, pushed into the Terminal facet's own signals list -
-        // the one list the UI already reads for everything else.
-        if let Some(model::FacetSnapshot::Terminal { session, signals, .. }) =
-            facets.iter_mut().find(|f| matches!(f, model::FacetSnapshot::Terminal { .. }))
-        {
-            if lane_session_missing(lane.active, reachable) {
-                signals.push(model::Signal::new(
-                    model::SignalReason::Lanes(model::LanesReason::SessionMissing),
-                    None,
-                    Some(format!("no cached WezTerm tab for zellij session \"{session}\"")),
-                ));
-            }
-            if terminal_running == Some(false) {
-                signals.push(model::Signal::new(
-                    model::SignalReason::Lanes(model::LanesReason::SessionNotRunning),
-                    None,
-                    Some(format!("expected zellij session \"{session}\" to be running")),
-                ));
-            }
-            // Command-kind signals for long-running commands that finished /
-            // failed in one of this session's panes. Reconciled against the
-            // session's live pane ids (a record for a pane that's since
-            // closed is dropped) and filtered by signal-dismissed. Empty
-            // unless the `shell` driver is enabled.
-            let live_panes = pane_positions.get(session);
-            for rec in shell_records.iter().filter(|r| r.session == *session) {
-                if live_panes.is_none_or(|p| !p.contains_key(&rec.pane)) {
-                    continue;
-                }
-                if state::is_signal_dismissed(&rec.occurrence_id()) {
-                    continue;
-                }
-                if is_shell_signal_ignored(rec.cmd.as_deref(), rec.argv0.as_deref(), &cfg.shell_ignored_commands) {
-                    continue;
-                }
-                if let Some(sig) = command_signal(rec, chrono::Utc::now().into()) {
-                    signals.push(sig);
-                }
-            }
-        }
-
-        let has_claude_signal = facets.iter()
-            .any(|f| f.signals().iter().any(|s| s.kind() == model::SignalKind::ClaudeSession));
-        let cyclable = lane_cyclable(lane.active, reachable, has_claude_signal);
-
-        correct_signals(&mut facets, cyclable);
-
-        model::LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), active: lane.active, cyclable, facets }
-    }).collect();
-
-    logging::perf("gather_lanes.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
-
-    model::LanewiseSnapshot {
-        taken_at: chrono::Utc::now().to_rfc3339(),
-        lanes,
-        focused_lane: state::read_focused_lane(),
-        focused_claude_session: state::read_claude_cursor(),
-    }
-}
-
 /// Every signal is constructed with cyclable=false as a placeholder (a
 /// lane's own reachability isn't known until all its facets are built).
 /// Corrects them all once lane-level `cyclable` is known, so the UI reads it
 /// straight off each signal instead of re-deriving "is this chip something a
 /// cycle would land on" from signal.kind() and lane.cyclable itself. The same
 /// pass upgrades Awaiting -> Ready (see `upgrade_awaiting_to_ready`), which
-/// depends on that same fact. Shared by `gather_lanes` and
-/// `lensd::snapshot_from_mirror`.
+/// depends on that same fact. Called from `lensd::snapshot_from_mirror`,
+/// the one place lane snapshots get built.
 pub(crate) fn correct_signals(facets: &mut [model::FacetSnapshot], cyclable: bool) {
     for facet in facets.iter_mut() {
         let signals = match facet {
@@ -295,8 +73,8 @@ pub(crate) fn correct_signals(facets: &mut [model::FacetSnapshot], cyclable: boo
 /// A lane you're treating as active, but that isn't actually reachable
 /// right now - distinct from an inactive lane (a deliberate choice, nothing
 /// "wrong" about it) and from a lane with no terminal facet at all (`None`,
-/// from `lane_reachable` - nothing to be missing). Only meaningful for lanes
-/// that declare a terminal.
+/// nothing to be missing). Only meaningful for lanes that declare a
+/// terminal.
 ///
 /// "Reachable" means state.kdl has a cached wezterm-tab-id for this
 /// session - not whether the Zellij session itself is alive, and not a
@@ -315,29 +93,14 @@ fn lane_session_missing_decision(active: bool, reachable: bool) -> bool {
     active && !reachable
 }
 
-/// This lane's terminal reachability - state.kdl has a cached WezTerm
-/// tab-id for its Zellij session - or None if it has no terminal facet at
-/// all (nothing to be reachable or not). The single place that reads
-/// state.kdl for this fact; both `lane_session_missing` and gather_lanes()'s
-/// `cyclable` computation go through it rather than each re-deriving
-/// reachability their own way.
-fn lane_reachable(facets: &[model::FacetSnapshot]) -> Option<bool> {
-    let session = facets.iter().find_map(|f| match f {
-        model::FacetSnapshot::Terminal { session, .. } => Some(session.as_str()),
-        _ => None,
-    })?;
-    Some(state::get_wezterm_tab_id(session).is_some())
-}
-
 /// Whether this lane's declared Zellij session is an actually-running
 /// process right now - or `None` if it has no terminal facet at all
-/// (nothing to be running or not). Distinct from `lane_reachable`: that's a
-/// WezTerm-tab-caching fact, this is "does the Zellij session itself exist"
-/// - a lane can in principle be reachable (a cached tab-id) while its
-/// session has since died, or vice versa. Sourced from `FacetSnapshot::
-/// Terminal.running`, already computed earlier in `gather_lanes()` from
-/// `drivers::zellij::running_sessions()` - this doesn't re-derive it, just
-/// reads back the one Terminal facet a lane can have.
+/// (nothing to be running or not). Distinct from reachability (a
+/// WezTerm-tab-caching fact): this is "does the Zellij session itself
+/// exist" - a lane can in principle be reachable (a cached tab-id) while
+/// its session has since died, or vice versa. Sourced from `FacetSnapshot::
+/// Terminal.running`, read back from the one Terminal facet a lane can
+/// have rather than re-derived.
 fn lane_terminal_running(facets: &[model::FacetSnapshot]) -> Option<bool> {
     facets.iter().find_map(|f| match f {
         model::FacetSnapshot::Terminal { running, .. } => Some(*running),
@@ -354,8 +117,8 @@ fn lane_terminal_running(facets: &[model::FacetSnapshot]) -> Option<bool> {
 /// session is the other half: a reachable lane with only a pending-commit
 /// signal still has nothing for a cycle to land on.
 fn lane_cyclable(active: bool, reachable: Option<bool>, has_claude_signal: bool) -> bool {
-    // reachable is Some only when lane_reachable found a Terminal facet at
-    // all, so has_terminal_session is unconditionally true here too.
+    // reachable is Some only when the lane has a Terminal facet at all, so
+    // has_terminal_session is unconditionally true here too.
     reachable.is_some_and(|r| reachable_lane_decision(active, true, r)) && has_claude_signal
 }
 
@@ -368,8 +131,8 @@ fn lane_cyclable(active: bool, reachable: Option<bool>, has_claude_signal: bool)
 /// excluded (see state::is_claude_session_disabled - edit mode's per-session
 /// toggle, keyed by session_id so it resets whenever the session itself
 /// does). Every ClaudeSession signal shown under a given lane belongs to
-/// that lane by construction (gather_lanes() only ever resolves a lane's
-/// own zellij session's live sessions into it), so there's no further
+/// that lane by construction (a lane's facets only ever resolve its own
+/// zellij session's live sessions into it), so there's no further
 /// per-session check beyond these two facts.
 fn signal_cyclable(kind: model::SignalKind, lane_cyclable: bool, session_disabled: bool) -> bool {
     kind == model::SignalKind::ClaudeSession && lane_cyclable && !session_disabled
@@ -474,19 +237,6 @@ fn upgrade_awaiting_to_ready(reason: model::SignalReason, cyclable: bool) -> mod
         }
         other => other,
     }
-}
-
-/// drivers::claude::enumerate() grouped by zellij session, for the lanes
-/// that have several claude panes under one Terminal facet. Staleness
-/// correction for permission_pending lives in the driver itself now (see
-/// drivers::claude::ClaudeSession) - this is just the grouping.
-fn claude_sessions_by_zellij() -> HashMap<String, Vec<drivers::claude::ClaudeSession>> {
-    let mut map: HashMap<String, Vec<drivers::claude::ClaudeSession>> = HashMap::new();
-    for session in drivers::claude::enumerate() {
-        let zs = session.zellij_session.clone().unwrap_or_default();
-        map.entry(zs).or_default().push(session);
-    }
-    map
 }
 
 /// The recorded pid can't be the process that wrote a file older than it: a
@@ -655,34 +405,6 @@ fn parse_etime(s: &str) -> Option<u64> {
     Some(days * 86_400 + hours * 3_600 + mins * 60 + secs)
 }
 
-/// Signals are computed separately now (see gather_lanes(), via
-/// scope::signals_from()) - this only builds the pane list, still needing
-/// the claude map to know which pane (if any) is a Claude session that's
-/// awaiting attention.
-fn build_terminal_panes(
-    shape: Option<model::TerminalShape>,
-    claude: &HashMap<String, Vec<drivers::claude::ClaudeSession>>,
-    session: &str,
-) -> Vec<model::PaneSnapshot> {
-    let Some(shape) = shape else {
-        return vec![];
-    };
-
-    let needs_attention = claude.get(session).map_or(false, |refs| {
-        refs.iter().any(|r| matches!(r.state.as_str(), "idle" | "permission_pending"))
-    });
-
-    shape.tabs.iter().flat_map(|tab| {
-        tab.panes.iter().map(|pane| {
-            let kind = match pane.command.as_deref() {
-                Some("claude") => model::PaneKind::ClaudeSession { awaiting: needs_attention },
-                other => model::PaneKind::from_command(other),
-            };
-            model::PaneSnapshot { focused: pane.focused, cwd: pane.cwd.clone(), kind }
-        })
-    }).collect()
-}
-
 pub(crate) fn git_has_changes(path: &str) -> bool {
     let Ok(out) = std::process::Command::new("git")
         .args(["-C", path, "status", "--porcelain"])
@@ -691,77 +413,6 @@ pub(crate) fn git_has_changes(path: &str) -> bool {
         return false;
     };
     out.status.success() && !out.stdout.is_empty()
-}
-
-/// The checked-out branch, or `None` for a detached HEAD (matches git's own
-/// terminology for that state - "HEAD" isn't a real branch name worth
-/// surfacing as one) or a repo git itself couldn't answer for.
-fn git_current_branch(path: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["-C", path, "symbolic-ref", "--short", "-q", "HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let branch = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if branch.is_empty() { None } else { Some(branch) }
-}
-
-/// The repo's actual default branch - `origin/HEAD`, the same pointer
-/// GitHub/GitLab set on clone, so this needs no per-repo config of our own
-/// to know "main" isn't universal (some repos really do use "master",
-/// "trunk", etc). Falls back to a local "main" or "master" branch (in that
-/// order) if origin/HEAD is stale or the repo has no remote at all - `None`
-/// (not a guess) if neither resolves, since a wrong guess here would create
-/// false-positive "wrong branch" signals, worse than just not supporting
-/// that repo yet.
-fn git_default_branch(path: &str) -> Option<String> {
-    let out = std::process::Command::new("git")
-        .args(["-C", path, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"])
-        .output()
-        .ok()?;
-    if out.status.success() {
-        let full = String::from_utf8_lossy(&out.stdout).trim().to_string();
-        if let Some(branch) = full.strip_prefix("origin/") {
-            if !branch.is_empty() {
-                return Some(branch.to_string());
-            }
-        }
-    }
-    for candidate in ["main", "master"] {
-        let exists = std::process::Command::new("git")
-            .args(["-C", path, "show-ref", "--verify", "--quiet", &format!("refs/heads/{candidate}")])
-            .status()
-            .is_ok_and(|s| s.success());
-        if exists {
-            return Some(candidate.to_string());
-        }
-    }
-    None
-}
-
-/// The two facts gather_lanes() needs about one repo, fetched together
-/// since both are just separate `git` subprocess round-trips against the
-/// same repo - one closure per repo in the concurrent batch, not two,
-/// avoiding doubling the subprocess count this session already worked to
-/// cut down (see the Diagnostics section of the README).
-#[derive(Default)]
-pub(crate) struct RepoStatus {
-    pub dirty: bool,
-    /// (current, default) if the checked-out branch differs from the
-    /// repo's actual default - None if they match, or if the default
-    /// couldn't be determined at all (see git_default_branch).
-    pub non_default_branch: Option<(String, String)>,
-}
-
-pub(crate) fn git_repo_status(path: &str) -> RepoStatus {
-    let dirty = git_has_changes(path);
-    let non_default_branch = git_default_branch(path).and_then(|default| {
-        let current = git_current_branch(path).unwrap_or_else(|| "detached HEAD".to_string());
-        (current != default).then_some((current, default))
-    });
-    RepoStatus { dirty, non_default_branch }
 }
 
 pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
@@ -1033,8 +684,8 @@ fn cycle_claude_session_impl(direction: i32) -> Result<(), String> {
     // single cycle keypress, before switch_claude_session (and thus
     // switch.trigger) even ran - perf.log's keystroke -> switch.trigger gap
     // was almost entirely this loop. Restricting to the actually-ambiguous
-    // sessions and running what's left concurrently (same pattern as
-    // gather_lanes's batch) cuts both the call count and the serialization.
+    // sessions and running what's left concurrently cuts both the call
+    // count and the serialization.
     let ambiguous_sessions = sessions_needing_pane_positions(live_sessions.iter().map(|s| s.zellij_session.as_deref()));
     logging::perf("cycle.ambiguous_sessions", &format!("elapsed_us={} sessions={:?}", ct0.elapsed().as_micros(), ambiguous_sessions));
     let positions: HashMap<String, HashMap<u32, (usize, i64, i64)>> = std::thread::scope(|scope| {
@@ -1963,46 +1614,6 @@ mod tests {
         );
     }
 
-    /// A real scratch git repo (not a mock) with a single commit on
-    /// `main`, no remote - init/commit are cheap and deterministic, and
-    /// this exercises the actual `git` subprocess calls git_current_branch/
-    /// git_default_branch/git_repo_status make, same as
-    /// write_then_read_cached_panes_round_trips_within_ttl's real-I/O
-    /// pattern in drivers::zellij's tests. Caller is responsible for
-    /// removing the returned path when done.
-    fn scratch_git_repo(initial_branch: &str) -> std::path::PathBuf {
-        // cargo test runs tests in parallel on separate threads within the
-        // same process - keying only on (pid, branch name) let two tests
-        // that happen to use the same branch name (e.g. multiple "main"
-        // repos) race on the same directory. Thread id is unique per test
-        // thread, closing that gap.
-        let thread_id = format!("{:?}", std::thread::current().id());
-        let safe_thread_id: String = thread_id.chars().filter(|c| c.is_alphanumeric()).collect();
-        let dir = std::env::temp_dir().join(format!(
-            "lanes-test-repo-{}-{}-{}",
-            std::process::id(),
-            safe_thread_id,
-            initial_branch
-        ));
-        let _ = std::fs::remove_dir_all(&dir);
-        std::fs::create_dir_all(&dir).unwrap();
-        let git = |args: &[&str]| {
-            let status = std::process::Command::new("git")
-                .args(["-C", dir.to_str().unwrap()])
-                .args(args)
-                .status()
-                .expect("git command should run");
-            assert!(status.success(), "git {args:?} failed");
-        };
-        git(&["init", "--quiet", "--initial-branch", initial_branch]);
-        git(&["config", "user.email", "test@example.com"]);
-        git(&["config", "user.name", "Test"]);
-        std::fs::write(dir.join("f.txt"), "content").unwrap();
-        git(&["add", "f.txt"]);
-        git(&["commit", "--quiet", "-m", "init"]);
-        dir
-    }
-
     fn shell_record(state: &str, exit: Option<i32>) -> drivers::shell::CommandRecord {
         serde_json::from_value(serde_json::json!({
             "v": 1, "session": "lanes", "pane": 3,
@@ -2058,60 +1669,12 @@ mod tests {
 
     #[test]
     fn command_signals_are_visible_but_not_cyclable_after_the_correction_pass() {
-        // mirrors the per-signal correction gather_lanes() runs
+        // mirrors the per-signal correction correct_signals() runs
         let mut s = command_signal(&shell_record("failed", Some(2)), rfc3339("2026-09-04T10:03:12Z")).unwrap();
         s.cyclable = signal_cyclable(s.kind(), true /* lane cyclable */, false);
         s.visible = signal_visible(s.kind(), s.cyclable);
         assert!(!s.cyclable, "a finished command is never a cycle target");
         assert!(s.visible, "but it still shows in the normal view");
-    }
-
-    #[test]
-    fn git_current_branch_reads_the_real_checked_out_branch() {
-        let dir = scratch_git_repo("feature-xyz");
-        assert_eq!(git_current_branch(dir.to_str().unwrap()), Some("feature-xyz".to_string()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn git_default_branch_falls_back_to_local_main_without_a_remote() {
-        // No origin/HEAD to consult (no remote at all) - falls back to the
-        // local "main" branch existing, per git_default_branch's fallback
-        // chain, rather than returning None just because there's no remote.
-        let dir = scratch_git_repo("main");
-        assert_eq!(git_default_branch(dir.to_str().unwrap()), Some("main".to_string()));
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn git_default_branch_is_none_when_neither_remote_nor_local_fallback_resolves() {
-        // Neither origin/HEAD nor a local main/master exists - must not
-        // guess "main" anyway, since a wrong guess here creates a false
-        // "wrong branch" signal, worse than not supporting this repo yet.
-        let dir = scratch_git_repo("some-other-name");
-        assert_eq!(git_default_branch(dir.to_str().unwrap()), None);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn git_repo_status_flags_non_default_branch_against_a_real_repo() {
-        let dir = scratch_git_repo("main");
-        std::process::Command::new("git")
-            .args(["-C", dir.to_str().unwrap(), "checkout", "--quiet", "-b", "feature-xyz"])
-            .status()
-            .unwrap();
-        let status = git_repo_status(dir.to_str().unwrap());
-        assert_eq!(status.non_default_branch, Some(("feature-xyz".to_string(), "main".to_string())));
-        assert!(!status.dirty);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn git_repo_status_has_no_branch_signal_when_already_on_default() {
-        let dir = scratch_git_repo("main");
-        let status = git_repo_status(dir.to_str().unwrap());
-        assert_eq!(status.non_default_branch, None);
-        let _ = std::fs::remove_dir_all(&dir);
     }
 
     fn pane(cwd: Option<&str>) -> model::PaneInfo {
@@ -2536,15 +2099,6 @@ mod tests {
         }]);
         assert!(session_belongs_to_reachable_lane(Some("some-other-session"), &cfg));
         assert!(session_belongs_to_reachable_lane(None, &cfg));
-    }
-
-    #[test]
-    fn repo_only_facets_have_no_reachability_to_speak_of() {
-        // A repo-only lane has no session to be missing in the first place -
-        // this goes through the real lane_reachable() (not a mock) to
-        // confirm it never even reaches for state.kdl when there's no
-        // terminal facet at all, just returns None.
-        assert_eq!(lane_reachable(&[model::FacetSnapshot::Repo { path: "/a/b".to_string(), signals: vec![] }]), None);
     }
 
     #[test]
