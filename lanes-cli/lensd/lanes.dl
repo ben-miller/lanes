@@ -14,12 +14,17 @@
 # differently-named relation for lane-tied repos avoids the collision
 # entirely; repos.dl now only hand-lists genuinely context-less repos (ones
 # no lane's tab.toml declares).
-# Not derivable without negation (done client-side): "lane's Zellij session is
-# not running" = lanes_session minus lanes_session_running, and "lane has no
-# WezTerm tab" (SessionMissing) = lanes_session minus lanes_tab.
+# lanes_session_not_running/lanes_session_missing below are the negated
+# forms of the "lane's Zellij session is not running" / "lane has no
+# WezTerm tab" checks lanes-cli still also computes client-side
+# (lib.rs/lensd.rs) - these are additive, not a replacement for that path
+# yet (see PLAN-lensd-architecture-cleanup.md's negation item).
 
 lanes_session(Lane, Zellij) :- lane_zellij(Lane, Zellij).
 lanes_session_running(Lane, Zellij) :- lane_zellij(Lane, Zellij), zellij_session(Zellij).
+lanes_session_not_running(Lane, Zellij) :- lanes_session(Lane, Zellij), !lanes_session_running(Lane, Zellij).
+lanes_has_tab(Lane) :- lanes_tab(Lane, Tab).
+lanes_session_missing(Lane) :- lanes_session(Lane, Zellij), !lanes_has_tab(Lane).
 lanes_claude(Lane, SessionId, State, Pane, Zellij) :- lane_zellij(Lane, Zellij), zellij_session(Zellij), claude_zellij(SessionId, Zellij, Pane), claude_session(SessionId, State).
 lanes_command(Lane, Zellij, Pane, State, StartedAt) :- lane_zellij(Lane, Zellij), zellij_pane(Zellij, Pane), shell_command(Zellij, Pane, State), shell_command_started(Zellij, Pane, StartedAt).
 lanes_command_cmd(Lane, Zellij, Pane, Cmd) :- lane_zellij(Lane, Zellij), zellij_pane(Zellij, Pane), shell_command_cmd(Zellij, Pane, Cmd).
