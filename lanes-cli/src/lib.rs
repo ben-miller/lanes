@@ -405,16 +405,6 @@ fn parse_etime(s: &str) -> Option<u64> {
     Some(days * 86_400 + hours * 3_600 + mins * 60 + secs)
 }
 
-pub(crate) fn git_has_changes(path: &str) -> bool {
-    let Ok(out) = std::process::Command::new("git")
-        .args(["-C", path, "status", "--porcelain"])
-        .output()
-    else {
-        return false;
-    };
-    out.status.success() && !out.stdout.is_empty()
-}
-
 pub fn switch_claude_session(session_id: &str) -> Result<(), String> {
     let t0 = std::time::Instant::now();
     logging::perf("switch.trigger", &format!("session={session_id}"));

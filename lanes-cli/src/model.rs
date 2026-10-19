@@ -264,12 +264,12 @@ pub struct Signal {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub dismiss_id: Option<String>,
     // Whether this specific signal is something `sessions next`/`prev`
-    // would actually land on - see lib.rs's signal_cyclable(). Not known at
-    // construction time (signal_for() builds signals before a lane's
-    // reachability is resolved), so every construction site sets this to
-    // `false` as a placeholder; correct_signals() corrects it once the lane's
-    // own cyclable fact is known. Never trust this field on a Signal that
-    // didn't pass through that correction pass.
+    // would actually land on - see lib.rs's signal_cyclable(). Not known
+    // at construction time (a lane's own reachability isn't resolved
+    // until all its facets are built), so every construction site sets
+    // this to `false` as a placeholder; correct_signals() corrects it
+    // once the lane's own cyclable fact is known. Never trust this field
+    // on a Signal that didn't pass through that correction pass.
     pub cyclable: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub action: Option<SignalAction>,
@@ -354,8 +354,8 @@ pub enum ClaudeSessionReason {
     Active,
     Awaiting,
     Permission,
-    /// Never constructed directly by signal_for() - lane cyclability isn't
-    /// known yet at that point in the pipeline. Only ever synthesized
+    /// Never constructed directly when a signal is first built - lane
+    /// cyclability isn't known yet at that point. Only ever synthesized
     /// downstream, by correct_signals() upgrading an Awaiting signal once
     /// its lane turns out cyclable (see lib.rs's upgrade_awaiting_to_ready) -
     /// same precedent as `cyclable` itself being a correction-pass-only
@@ -609,6 +609,12 @@ pub struct TerminalShape {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn urgency_ordering_ranks_blocking_above_attention_above_info() {
+        assert!(Urgency::Blocking > Urgency::Attention);
+        assert!(Urgency::Attention > Urgency::Info);
+    }
 
     #[test]
     fn signal_reason_flattens_into_flat_kind_and_reason_on_signal() {
