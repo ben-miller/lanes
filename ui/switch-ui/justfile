@@ -1,6 +1,17 @@
 dev:
 	#!/usr/bin/env bash
 	set -e
+	# Only for an interactive terminal session you're running yourself -
+	# Claude (or anything else invoking this non-interactively) must use
+	# `just up`/`down`/`status` instead, so there's always a pidfile either
+	# side can check and control rather than an untracked background job
+	# only whoever started it knows about. Every non-interactive invocation
+	# (including every one of Claude's own tool calls) has non-tty stdout,
+	# so this check is a real guarantee, not a reminder to remember.
+	if [ ! -t 1 ]; then
+		echo "error: 'just dev' is for an interactive terminal only - use 'just up' for background/non-interactive use (e.g. from Claude)" >&2
+		exit 1
+	fi
 	# This app depends on lanes-cli as a local path dependency - `tauri dev`'s
 	# own watcher only looks at src-tauri, so a lanes-cli-only change never
 	# triggers a rebuild and the running dev binary silently goes stale.
@@ -21,6 +32,67 @@ dev:
 	# cargo-watch only watches lanes-cli, so the two don't fight each other.
 	cd src-tauri
 	cargo watch -w ../../../lanes-cli -s 'cd .. && npm run tauri dev' -c
+
+# Same dev pipeline as `just dev`, backgrounded - per CONVENTIONS.md's
+# "Running a long-lived local daemon" pattern (matching spinner/lensd): a
+# pidfile is the single source of truth for "is it running and whose pid is
+# it," so Claude and a human never raw-signal or pattern-kill past each
+# other the way `nohup ... &` + `pkill -f` did before this existed.
+up:
+	#!/usr/bin/env bash
+	set -e
+	PIDFILE="$HOME/.local/state/lanes/switch-ui-dev.pid"
+	LOGFILE="$HOME/.local/state/lanes/logs/switch-ui-dev.log"
+	mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")"
+	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
+		echo "already running (pid $(cat "$PIDFILE")) - run 'just down' first" >&2
+		exit 1
+	fi
+	cd src-tauri
+	set -m
+	# The subshell becomes its own process group (set -m), so `down` can
+	# kill the whole tree (cargo watch, npm, tauri, vite, the lanes-ui
+	# binary) via that one group id, not just this top pid - killing only
+	# the top pid doesn't cascade and leaves the rest running.
+	( exec cargo watch -w ../../../lanes-cli -s 'cd .. && npm run tauri dev' -c ) > "$LOGFILE" 2>&1 &
+	PID=$!
+	disown
+	echo "$PID" > "$PIDFILE"
+	echo "lanes-ui dev: started (pid $PID), logging to $LOGFILE"
+
+down:
+	#!/usr/bin/env bash
+	set -e
+	PIDFILE="$HOME/.local/state/lanes/switch-ui-dev.pid"
+	if [ ! -f "$PIDFILE" ]; then
+		echo "lanes-ui dev: not running"
+		exit 0
+	fi
+	PID="$(cat "$PIDFILE")"
+	if kill -0 "$PID" 2>/dev/null; then
+		kill -TERM -"$PID" 2>/dev/null || kill -TERM "$PID"
+		echo "lanes-ui dev: stopped (pid $PID)"
+	else
+		echo "lanes-ui dev: not running (removing stale pidfile for pid $PID)"
+	fi
+	rm -f "$PIDFILE"
+
+status:
+	#!/usr/bin/env bash
+	set -e
+	PIDFILE="$HOME/.local/state/lanes/switch-ui-dev.pid"
+	if [ ! -f "$PIDFILE" ]; then
+		echo "lanes-ui dev: not running"
+		exit 1
+	fi
+	PID="$(cat "$PIDFILE")"
+	if kill -0 "$PID" 2>/dev/null; then
+		echo "lanes-ui dev: running (pid $PID)"
+	else
+		echo "lanes-ui dev: not running (stale pidfile for pid $PID, removing)"
+		rm -f "$PIDFILE"
+		exit 1
+	fi
 
 install:
 	#!/usr/bin/env bash
