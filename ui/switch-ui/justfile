@@ -46,6 +46,7 @@ up:
 	mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")"
 	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
 		echo "already running (pid $(cat "$PIDFILE")) - run 'just down' first" >&2
+		echo "logging to $LOGFILE" >&2
 		exit 1
 	fi
 	cd src-tauri
@@ -59,6 +60,15 @@ up:
 	disown
 	echo "$PID" > "$PIDFILE"
 	echo "lanes-ui dev: started (pid $PID), logging to $LOGFILE"
+	# Only follow the log when run from a real terminal - an interactive
+	# `just up` should feel like `docker run -d && docker logs -f`
+	# chained automatically, but a non-interactive caller (Claude) needs
+	# this to return immediately, not hang tailing forever. Ctrl+C here
+	# only stops watching: `tail` isn't part of the backgrounded process
+	# group started above, so the app it's tailing keeps running.
+	if [ -t 1 ]; then
+		tail -f "$LOGFILE"
+	fi
 
 down:
 	#!/usr/bin/env bash
@@ -93,6 +103,13 @@ status:
 		rm -f "$PIDFILE"
 		exit 1
 	fi
+
+# Tails the log just up/down's own output always points at - no need to
+# remember or retype the path.
+logs:
+	#!/usr/bin/env bash
+	set -e
+	tail -f "$HOME/.local/state/lanes/logs/switch-ui-dev.log"
 
 install:
 	#!/usr/bin/env bash
