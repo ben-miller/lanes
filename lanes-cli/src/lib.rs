@@ -70,44 +70,6 @@ pub(crate) fn correct_signals(facets: &mut [model::FacetSnapshot], cyclable: boo
     }
 }
 
-/// A lane you're treating as active, but that isn't actually reachable
-/// right now - distinct from an inactive lane (a deliberate choice, nothing
-/// "wrong" about it) and from a lane with no terminal facet at all (`None`,
-/// nothing to be missing). Only meaningful for lanes that declare a
-/// terminal.
-///
-/// "Reachable" means state.kdl has a cached wezterm-tab-id for this
-/// session - not whether the Zellij session itself is alive, and not a
-/// live WezTerm query. Whichever tool actually owns the WezTerm tab's
-/// lifecycle (e.g. `ztabs`) is responsible for keeping this cache
-/// current: pushing the fresh id via `lanes tabs set` whenever it spawns a
-/// tab, and clearing it via `lanes tabs clear` the moment it kills one.
-/// `lanes` itself trusts the cache rather than re-deriving liveness by
-/// polling WezTerm - the tool that owns the tab already knows the truth
-/// the instant it changes, so there's nothing to rediscover.
-fn lane_session_missing(active: bool, reachable: Option<bool>) -> bool {
-    reachable.is_some_and(|r| lane_session_missing_decision(active, r))
-}
-
-fn lane_session_missing_decision(active: bool, reachable: bool) -> bool {
-    active && !reachable
-}
-
-/// Whether this lane's declared Zellij session is an actually-running
-/// process right now - or `None` if it has no terminal facet at all
-/// (nothing to be running or not). Distinct from reachability (a
-/// WezTerm-tab-caching fact): this is "does the Zellij session itself
-/// exist" - a lane can in principle be reachable (a cached tab-id) while
-/// its session has since died, or vice versa. Sourced from `FacetSnapshot::
-/// Terminal.running`, read back from the one Terminal facet a lane can
-/// have rather than re-derived.
-fn lane_terminal_running(facets: &[model::FacetSnapshot]) -> Option<bool> {
-    facets.iter().find_map(|f| match f {
-        model::FacetSnapshot::Terminal { running, .. } => Some(*running),
-        _ => None,
-    })
-}
-
 /// Whether this lane would actually be visited by `sessions next`/`prev`
 /// right now. Reuses `reachable_lane_decision()` - the exact same pure
 /// function `session_belongs_to_reachable_lane()` filters
@@ -652,8 +614,8 @@ fn cycle_claude_session_impl(direction: i32) -> Result<(), String> {
     };
     logging::perf("cycle.enumerated", &format!("elapsed_us={} count={}", ct0.elapsed().as_micros(), live_sessions.len()));
     // Skip sessions that live in an inactive lane, or one with no cached
-    // WezTerm tab-id (see lane_session_missing) - that's exactly what
-    // caused the "wezterm activate-tab failed" cycling errors, since
+    // WezTerm tab-id - that's exactly what caused the "wezterm
+    // activate-tab failed" cycling errors, since
     // there's nothing for a switch to actually land on. Also skip anything
     // individually excluded via edit mode's per-session toggle (see
     // state::is_claude_session_disabled) - same rule signal_cyclable()
@@ -2092,11 +2054,6 @@ mod tests {
     }
 
     #[test]
-    fn lane_session_missing_is_false_when_reachability_is_unknown() {
-        assert!(!lane_session_missing(true, None));
-    }
-
-    #[test]
     fn active_reachable_lane_with_a_claude_session_is_cyclable() {
         assert!(lane_cyclable(true, Some(true), true));
     }
@@ -2180,29 +2137,6 @@ mod tests {
             let upgraded = upgrade_awaiting_to_ready(reason.clone(), true);
             assert_eq!(format!("{upgraded:?}"), format!("{reason:?}"));
         }
-    }
-
-    // The rest go through the pure decision fn directly, not lane_session_missing()
-    // itself - that one does real I/O (state::get_wezterm_tab_id reads state.kdl),
-    // which would make these tests depend on whatever happens to be in that file
-    // on the machine running them.
-
-    #[test]
-    fn inactive_lane_is_never_session_missing_regardless_of_reachability() {
-        // Deliberately inactive isn't the same problem as "should be
-        // reachable and isn't" - nothing to flag here.
-        assert!(!lane_session_missing_decision(false, false));
-        assert!(!lane_session_missing_decision(false, true));
-    }
-
-    #[test]
-    fn active_and_reachable_is_not_session_missing() {
-        assert!(!lane_session_missing_decision(true, true));
-    }
-
-    #[test]
-    fn active_and_unreachable_is_session_missing() {
-        assert!(lane_session_missing_decision(true, false));
     }
 
     fn proc(comm: &str, age_secs: u64) -> Option<ProcInfo> {

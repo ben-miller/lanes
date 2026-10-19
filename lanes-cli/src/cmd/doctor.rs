@@ -245,11 +245,11 @@ fn check_logs() -> Check {
     }
 }
 
-/// Two distinct ways state.kdl's wezterm-tab-id cache can go wrong, since
-/// `lanes` trusts this cache rather than ever polling WezTerm itself (see
-/// lib.rs::lane_session_missing) - whichever tool owns a tab's lifecycle is
-/// responsible for keeping the cache honest, and neither failure mode is
-/// otherwise visible without a one-off check like this:
+/// Two distinct ways state.kdl's wezterm-tab-id cache can go wrong.
+/// Whichever tool owns a tab's lifecycle (e.g. `ztabs`) is responsible for
+/// keeping this cache honest by pushing/clearing it as tabs come and go;
+/// neither failure mode below is otherwise visible without a one-off check
+/// like this:
 ///
 /// - orphaned: a cached session that doesn't match any lane at all anymore
 ///   (e.g. a renamed/removed lane's leftover entry) - detectable from config

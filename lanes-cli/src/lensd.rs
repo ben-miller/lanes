@@ -364,19 +364,27 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_command
     // right now (lensd's wezterm source), not Lanes' cached tab id.
     let has_tab = m.rows("lanes_tab").any(|r| s(&r[0]) == lane.id);
     let reachable = facets.iter().any(|f| matches!(f, FacetSnapshot::Terminal { .. })).then_some(has_tab);
-    let terminal_running = crate::lane_terminal_running(&facets);
 
     if let Some(FacetSnapshot::Terminal { session, signals, .. }) =
         facets.iter_mut().find(|f| matches!(f, FacetSnapshot::Terminal { .. }))
     {
-        if crate::lane_session_missing(lane.active, reachable) {
+        // Both conditions below used to be recomputed client-side
+        // (lane_session_missing/terminal_running == Some(false)) for lack
+        // of negation in lensd's Datalog compiler - lanes_session_missing/
+        // lanes_session_not_running are now real lensd relations (lanes.dl),
+        // so this just reads them rather than re-deriving the same fact a
+        // second way. `active` still gates SessionMissing client-side:
+        // lensd's own rule doesn't know about a lane's active/inactive
+        // state at all, so an inactive lane's missing tab is deliberately
+        // not flagged.
+        if lane.active && m.rows("lanes_session_missing").any(|r| s(&r[0]) == lane.id) {
             signals.push(Signal::new(
                 SignalReason::Lanes(LanesReason::SessionMissing),
                 None,
                 Some(format!("no WezTerm tab showing zellij session \"{session}\"")),
             ));
         }
-        if terminal_running == Some(false) {
+        if rows_for(m, "lanes_session_not_running", &lane.id, session).next().is_some() {
             signals.push(Signal::new(
                 SignalReason::Lanes(LanesReason::SessionNotRunning),
                 None,
@@ -690,7 +698,8 @@ mod tests {
 
     #[test]
     fn a_lane_without_a_wezterm_tab_is_session_missing_and_not_cyclable() {
-        let rows: Vec<Value> = live_rows().into_iter().filter(|r| r["relation"] != "lanes_tab").collect();
+        let mut rows: Vec<Value> = live_rows().into_iter().filter(|r| r["relation"] != "lanes_tab").collect();
+        rows.push(row("lanes_session_missing", json!(["l"])));
         let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
         let (_, _, signals) = terminal(&snap);
         assert!(!snap.lanes[0].cyclable);
@@ -703,7 +712,11 @@ mod tests {
 
     #[test]
     fn a_session_that_is_not_running_has_no_panes_and_a_not_running_signal() {
-        let rows = vec![row("lanes_session", json!(["l", "z"])), row("lanes_tab", json!(["l", 4]))];
+        let rows = vec![
+            row("lanes_session", json!(["l", "z"])),
+            row("lanes_tab", json!(["l", 4])),
+            row("lanes_session_not_running", json!(["l", "z"])),
+        ];
         let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
         let (running, panes, signals) = terminal(&snap);
         assert!(!*running && panes.is_empty());
