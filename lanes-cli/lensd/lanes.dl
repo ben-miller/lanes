@@ -20,23 +20,91 @@
 # (lib.rs/lensd.rs) - these are additive, not a replacement for that path
 # yet (see PLAN-lensd-architecture-cleanup.md's negation item).
 
-lanes_session(Lane, Zellij) :- lane_zellij(Lane, Zellij).
-lanes_session_running(Lane, Zellij) :- lane_zellij(Lane, Zellij), zellij_session(Zellij).
-lanes_session_not_running(Lane, Zellij) :- lanes_session(Lane, Zellij), !lanes_session_running(Lane, Zellij).
-lanes_has_tab(Lane) :- lanes_tab(Lane, Tab).
-lanes_session_missing(Lane) :- lanes_session(Lane, Zellij), !lanes_has_tab(Lane).
-lanes_claude(Lane, SessionId, State, Pane, Zellij) :- lane_zellij(Lane, Zellij), zellij_session(Zellij), claude_zellij(SessionId, Zellij, Pane), claude_session(SessionId, State).
-lanes_command(Lane, Zellij, Pane, State, StartedAt) :- lane_zellij(Lane, Zellij), zellij_pane(Zellij, Pane), shell_command(Zellij, Pane, State), shell_command_started(Zellij, Pane, StartedAt).
-lanes_command_cmd(Lane, Zellij, Pane, Cmd) :- lane_zellij(Lane, Zellij), zellij_pane(Zellij, Pane), shell_command_cmd(Zellij, Pane, Cmd).
-lanes_command_exit(Lane, Zellij, Pane, Code) :- lane_zellij(Lane, Zellij), zellij_pane(Zellij, Pane), shell_command_exit(Zellij, Pane, Code).
-lanes_command_ended(Lane, Zellij, Pane, At) :- lane_zellij(Lane, Zellij), zellij_pane(Zellij, Pane), shell_command_ended(Zellij, Pane, At).
-lanes_pane(Lane, Zellij, Pane, TabPos, TabName, X, Y) :- lane_zellij(Lane, Zellij), zellij_pane_tab(Zellij, Pane, TabPos, TabName), zellij_pane_geom(Zellij, Pane, X, Y).
-lanes_pane_cmd(Lane, Zellij, Pane, Cmd) :- lane_zellij(Lane, Zellij), zellij_pane_cmd(Zellij, Pane, Cmd).
-lanes_pane_cwd(Lane, Zellij, Pane, Cwd) :- lane_zellij(Lane, Zellij), zellij_pane_cwd(Zellij, Pane, Cwd).
-lanes_pane_focused(Lane, Zellij, Pane) :- lane_zellij(Lane, Zellij), zellij_pane_focused(Zellij, Pane).
-lanes_repo_watched(Lane, Repo, Path) :- lane_repo_path(Lane, Path), repo_path(Repo, Path).
-lanes_repo_dirty(Lane, Repo, Path) :- lane_repo_path(Lane, Path), repo_path(Repo, Path), dirty(Repo).
-lanes_repo_branch(Lane, Repo, Current, Default, Path) :- lane_repo_path(Lane, Path), repo_path(Repo, Path), branch(Repo, Current), default_branch(Repo, Default), Current != Default.
-lanes_tab(Lane, Tab) :- lane_zellij(Lane, Zellij), wezterm_tab_session(Tab, Zellij).
-lanes_inbox_count(Lane, Project, Count) :- lane_boards_project(Lane, Project), board_inbox_count(Project, Count).
-lane_watch_repo(Path, Lane) :- lane_repo_path(Lane, Path).
+lanes_session(Lane, Zellij) :-
+    lane_zellij(Lane, Zellij).
+
+lanes_session_running(Lane, Zellij) :-
+    lane_zellij(Lane, Zellij),
+    zellij_session(Zellij).
+
+lanes_session_not_running(Lane, Zellij) :-
+    lanes_session(Lane, Zellij),
+    !lanes_session_running(Lane, Zellij).
+
+lanes_has_tab(Lane) :-
+    lanes_tab(Lane, Tab).
+
+lanes_session_missing(Lane) :-
+    lanes_session(Lane, Zellij),
+    !lanes_has_tab(Lane).
+
+lanes_claude(Lane, SessionId, State, Pane, Zellij) :-
+    lane_zellij(Lane, Zellij),
+    zellij_session(Zellij),
+    claude_zellij(SessionId, Zellij, Pane),
+    claude_session(SessionId, State).
+
+lanes_command(Lane, Zellij, Pane, State, StartedAt) :-
+    lane_zellij(Lane, Zellij),
+    zellij_pane(Zellij, Pane),
+    shell_command(Zellij, Pane, State),
+    shell_command_started(Zellij, Pane, StartedAt).
+
+lanes_command_cmd(Lane, Zellij, Pane, Cmd) :-
+    lane_zellij(Lane, Zellij),
+    zellij_pane(Zellij, Pane),
+    shell_command_cmd(Zellij, Pane, Cmd).
+
+lanes_command_exit(Lane, Zellij, Pane, Code) :-
+    lane_zellij(Lane, Zellij),
+    zellij_pane(Zellij, Pane),
+    shell_command_exit(Zellij, Pane, Code).
+
+lanes_command_ended(Lane, Zellij, Pane, At) :-
+    lane_zellij(Lane, Zellij),
+    zellij_pane(Zellij, Pane),
+    shell_command_ended(Zellij, Pane, At).
+
+lanes_pane(Lane, Zellij, Pane, TabPos, TabName, X, Y) :-
+    lane_zellij(Lane, Zellij),
+    zellij_pane_tab(Zellij, Pane, TabPos, TabName),
+    zellij_pane_geom(Zellij, Pane, X, Y).
+
+lanes_pane_cmd(Lane, Zellij, Pane, Cmd) :-
+    lane_zellij(Lane, Zellij),
+    zellij_pane_cmd(Zellij, Pane, Cmd).
+
+lanes_pane_cwd(Lane, Zellij, Pane, Cwd) :-
+    lane_zellij(Lane, Zellij),
+    zellij_pane_cwd(Zellij, Pane, Cwd).
+
+lanes_pane_focused(Lane, Zellij, Pane) :-
+    lane_zellij(Lane, Zellij),
+    zellij_pane_focused(Zellij, Pane).
+
+lanes_repo_watched(Lane, Repo, Path) :-
+    lane_repo_path(Lane, Path),
+    repo_path(Repo, Path).
+
+lanes_repo_dirty(Lane, Repo, Path) :-
+    lane_repo_path(Lane, Path),
+    repo_path(Repo, Path),
+    dirty(Repo).
+
+lanes_repo_branch(Lane, Repo, Current, Default, Path) :-
+    lane_repo_path(Lane, Path),
+    repo_path(Repo, Path),
+    branch(Repo, Current),
+    default_branch(Repo, Default),
+    Current != Default.
+
+lanes_tab(Lane, Tab) :-
+    lane_zellij(Lane, Zellij),
+    wezterm_tab_session(Tab, Zellij).
+
+lanes_inbox_count(Lane, Project, Count) :-
+    lane_boards_project(Lane, Project),
+    board_inbox_count(Project, Count).
+
+lane_watch_repo(Path, Lane) :-
+    lane_repo_path(Lane, Path).
