@@ -41,6 +41,21 @@ fn arm_pending_running(handle: &tauri::AppHandle, timers: &RunningTimers, pendin
     }
 }
 
+/// Shows and focuses the main window - shared by the `switch.sock` "show"
+/// message and the single-instance plugin's second-launch callback, so a
+/// second launch attempt behaves exactly like any other "show the switcher"
+/// trigger rather than its own slightly-different path.
+fn show_main_window(handle: &tauri::AppHandle) {
+    if let Some(win) = handle.get_webview_window("main") {
+        let _ = win.show();
+        let _ = win.set_focus();
+        // The frontend skips its resize/recenter while the window is
+        // hidden (see App.svelte's refresh) - tell it we're visible again
+        // so it re-measures now rather than reappearing at a stale size.
+        handle.emit("switch-shown", ()).ok();
+    }
+}
+
 /// Listens on a local Unix socket for direct notifications from the `lanes`
 /// CLI, so latency-sensitive updates (a switch's new lane, show/hide) don't
 /// have to wait on the state.kdl file watcher's inherent floor latency
@@ -76,15 +91,7 @@ fn start_switch_socket(
                     handle.emit("lane-changed", payload).ok();
                     lanes::logging::perf("ui.emitted_lane_changed", &format!("lane={lane} session={session}"));
                 } else if line == "show" {
-                    if let Some(win) = handle.get_webview_window("main") {
-                        let _ = win.show();
-                        let _ = win.set_focus();
-                        // The frontend skips its resize/recenter while the
-                        // window is hidden (see App.svelte's refresh) - tell
-                        // it we're visible again so it re-measures now
-                        // rather than reappearing at a stale size.
-                        handle.emit("switch-shown", ()).ok();
-                    }
+                    show_main_window(&handle);
                 } else if line == "hide" {
                     if let Some(win) = handle.get_webview_window("main") {
                         let _ = win.hide();
@@ -577,6 +584,13 @@ fn watch_paths(
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
+        // Registered first so a second launch attempt exits as soon as
+        // possible (per the plugin's own docs) - a second instance just
+        // shows/focuses the existing window via the same path `switch.sock`'s
+        // "show" message already uses, rather than running a duplicate app.
+        .plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
+            show_main_window(app);
+        }))
         .plugin(tauri_plugin_opener::init())
         .setup(|app| {
             #[cfg(target_os = "macos")]

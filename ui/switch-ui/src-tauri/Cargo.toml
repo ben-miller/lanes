@@ -22,3 +22,6 @@ ignore = "0.4"
 # see arm_pending_running in lib.rs). Runs on tauri::async_runtime's own
 # already-running tokio runtime, not a separate one.
 tokio = { version = "1", features = ["time"] }
+
+[target.'cfg(any(target_os = "macos", windows, target_os = "linux"))'.dependencies]
+tauri-plugin-single-instance = "2.5.4"
