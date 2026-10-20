@@ -33,41 +33,73 @@ dev:
 	cd src-tauri
 	cargo watch -w ../../../lanes-cli -s 'cd .. && npm run tauri dev' -c
 
-# Same dev pipeline as `just dev`, backgrounded - per CONVENTIONS.md's
-# "Running a long-lived local daemon" pattern (matching spinner/lensd): a
-# pidfile is the single source of truth for "is it running and whose pid is
-# it," so Claude and a human never raw-signal or pattern-kill past each
-# other the way `nohup ... &` + `pkill -f` did before this existed.
-up:
+# Same dev pipeline as `just dev`, pidfile-tracked either way - per
+# CONVENTIONS.md's "Running a long-lived local daemon" pattern (matching
+# spinner/lensd): a pidfile is the single source of truth for "is it
+# running and whose pid is it," so Claude and a human never raw-signal or
+# pattern-kill past each other the way `nohup ... &` + `pkill -f` did
+# before this existed.
+#
+# `just up` (no args): attached, like `docker run` without `-d` - logs
+# stream straight to your terminal (no file, no tail), and Ctrl+C kills
+# the *entire* app, not just a log view. This is the fix for a real bug:
+# the previous version always backgrounded the app regardless of this
+# flag and only ever let Ctrl+C stop a `tail -f` of it, so the app kept
+# running invisibly no matter what you did short of `just down` - exactly
+# the "Claude starts something and now you can't see or control it"
+# problem this whole mechanism exists to prevent, just self-inflicted by
+# this recipe's own design instead of by Claude.
+# `just up -d`/`--detach`: detached, like `docker run -d` - starts it in
+# the background, logs to a file, returns immediately.
+up detach="":
 	#!/usr/bin/env bash
 	set -e
 	PIDFILE="$HOME/.local/state/lanes/switch-ui-dev.pid"
-	LOGFILE="$HOME/.local/state/lanes/logs/switch-ui-dev.log"
-	mkdir -p "$(dirname "$PIDFILE")" "$(dirname "$LOGFILE")"
+	mkdir -p "$(dirname "$PIDFILE")"
 	if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
 		echo "already running (pid $(cat "$PIDFILE")) - run 'just down' first" >&2
-		echo "logging to $LOGFILE" >&2
 		exit 1
 	fi
 	cd src-tauri
-	set -m
-	# The subshell becomes its own process group (set -m), so `down` can
-	# kill the whole tree (cargo watch, npm, tauri, vite, the lanes-ui
-	# binary) via that one group id, not just this top pid - killing only
-	# the top pid doesn't cascade and leaves the rest running.
-	( exec cargo watch -w ../../../lanes-cli -s 'cd .. && npm run tauri dev' -c ) > "$LOGFILE" 2>&1 &
-	PID=$!
-	disown
-	echo "$PID" > "$PIDFILE"
-	echo "lanes-ui dev: started (pid $PID), logging to $LOGFILE"
-	# Only follow the log when run from a real terminal - an interactive
-	# `just up` should feel like `docker run -d && docker logs -f`
-	# chained automatically, but a non-interactive caller (Claude) needs
-	# this to return immediately, not hang tailing forever. Ctrl+C here
-	# only stops watching: `tail` isn't part of the backgrounded process
-	# group started above, so the app it's tailing keeps running.
-	if [ -t 1 ]; then
-		tail -f "$LOGFILE"
+
+	if [ "{{detach}}" = "-d" ] || [ "{{detach}}" = "--detach" ]; then
+		LOGFILE="$HOME/.local/state/lanes/logs/switch-ui-dev.log"
+		mkdir -p "$(dirname "$LOGFILE")"
+		set -m
+		# The subshell becomes its own process group (set -m), so `down` can
+		# kill the whole tree (cargo watch, npm, tauri, vite, the lanes-ui
+		# binary) via that one group id, not just this top pid - killing
+		# only the top pid doesn't cascade and leaves the rest running.
+		( exec cargo watch -w ../../../lanes-cli -s 'cd .. && npm run tauri dev' -c ) > "$LOGFILE" 2>&1 &
+		PID=$!
+		disown
+		echo "$PID" > "$PIDFILE"
+		echo "lanes-ui dev: started (pid $PID), logging to $LOGFILE"
+	else
+		if [ ! -t 1 ]; then
+			echo "error: 'just up' without --detach is for an interactive terminal only - use 'just up -d' for background/non-interactive use (e.g. from Claude)" >&2
+			exit 1
+		fi
+		# Same explicit-group trick as the detached branch (set -m plus a
+		# backgrounded subshell), not an inherited/ambient group - `$$`
+		# here is NOT reliably this job's actual process group id (verified
+		# directly: in one real run bash's own pid differed from its pgid,
+		# because `just` had already placed this script into a group
+		# whose original leader had since exited - an orphaned-but-valid
+		# group, nothing wrong with it, just not equal to `$$`). Output is
+		# left un-redirected (no log file) so it streams straight to this
+		# terminal, same as `just dev`. An explicit trap on THIS wrapping
+		# script forwards Ctrl+C to the actual group and cleans up the
+		# pidfile - the wrapper itself stays in the terminal's foreground
+		# group throughout, so it (not the backgrounded subshell) is what
+		# actually receives the SIGINT.
+		set -m
+		( exec cargo watch -w ../../../lanes-cli -s 'cd .. && npm run tauri dev' -c ) &
+		PID=$!
+		echo "$PID" > "$PIDFILE"
+		trap 'kill -TERM -"$PID" 2>/dev/null; rm -f "$PIDFILE"; exit 0' INT TERM
+		wait "$PID"
+		rm -f "$PIDFILE"
 	fi
 
 down:

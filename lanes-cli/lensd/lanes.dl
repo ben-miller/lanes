@@ -91,6 +91,17 @@ lanes_repo_dirty(Lane, Repo, Path) :-
     repo_path(Repo, Path),
     dirty(Repo).
 
+# dirty/has_change used to come from rules.dl's built-in default set; now
+# that it's empty (nobody ever connected to default.sock as a client - see
+# lensd's own README), this set owns them itself rather than depending on
+# content that could disappear out from under it again. Safe to define
+# here: nothing else in any loaded rule set defines them anymore.
+has_change(Repo, Kind) :-
+    change(Repo, Kind, Path).
+
+dirty(Repo) :-
+    has_change(Repo, Kind).
+
 lanes_repo_branch(Lane, Repo, Current, Default, Path) :-
     lane_repo_path(Lane, Path),
     repo_path(Repo, Path),
