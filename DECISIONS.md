@@ -53,3 +53,28 @@ at its source (`default.toml`) rather than something any one context could
 turn off. Not worth adding a real suppression mechanism until a concrete
 case needs one default suppressed while another context still wants it -
 nothing does today.
+
+## Boards target: appctl socket first, `open boards://` as fallback only
+
+`open "boards://open?project=..."` only reaches an **installed** Boards -
+LaunchServices routes it by bundle ID, and a `just dev` build has none
+(`lsappinfo` reports `CFBundleIdentifier=[ NULL ]`). That forced
+`just install-dev` on every Boards iteration just to keep Lanes working.
+Boards now serves an `appctl` socket per running instance
+(`~/.local/state/boards/instances/<instance>.sock`), so Lanes drives that
+directly and only falls back to the `open` link when no instance answers -
+which still cold-launches the installed app on that project, unchanged.
+
+Instance choice uses `appctl`'s own default policy (one live `dev-*`, else
+`installed`, else error) rather than a per-lane config field: no concrete
+case has ever needed Lanes and the live dev build to disagree about which
+Boards window a lane should land on, so there's nothing yet to make that
+field express. A `board.toml` `instance` field can be added later without
+touching anything else (`appctl::client::connect`'s third argument already
+exists for exactly this).
+
+Placement switched from bundle-ID lookup to the pid `activate_target`
+itself discovered mid-request (`activate_target`'s return type grew an
+`Option<u32>` for this) - a bundle ID can only ever resolve the installed
+copy, so placing a `just dev` window at all required addressing it by the
+specific process Lanes just talked to, not by app identity.

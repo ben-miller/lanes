@@ -95,10 +95,16 @@ Each target's `driver` picks one of these; fields beyond it are driver-specific:
 | `wezterm` | `session` (optional, defaults to the lane's own terminal session) | `wezterm cli activate-tab` |
 | `zellij` | `session` (optional), `pane` (optional) | zellij's own action API |
 | `obsidian` | `vault` | `open 'obsidian://open?vault=<vault>'`, placed via lanes-wm's focused-window selector |
-| `boards` | `project` | `open 'boards://open?project=<project>'` - matches a folder name under Boards' own data root exactly, case-sensitive |
+| `boards` | `project` | `appctl` socket `open_project` on the running instance (dev or installed), placed by pid; falls back to `open 'boards://open?project=<project>'` - matches a folder name under Boards' own data root exactly, case-sensitive |
 | `sourcetree` | `repo` | `cd <repo> && stree` |
 | `vscode` | `folder` | `code -r <folder>` (reuse window) |
 | `app` | `name`, `bundle_id` (optional) | `open -a <name>`; `bundle_id` unlocks placement, otherwise activate-only |
+
+`boards`'s instance choice is `appctl`'s own default policy: one live `dev-*`
+instance wins, else the `installed` copy, else fall back to `open
+'boards://...'` (which cold-launches the installed app, as before). This
+means a `just dev` Boards build now works with Lanes without
+`just install-dev` first - no separate config needed to pick it up.
 
 A placed target (`monitor` set) only raises its app if `raise = true` - it's correctly repositioned via lanes-wm's focused-window selector either way, so stealing focus is opt-in (needed for a "peek" app whose whole point is to be seen immediately, e.g. a Trello board glance-view).
 

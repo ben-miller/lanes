@@ -62,6 +62,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "appctl"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "autocfg"
 version = "1.5.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -276,6 +284,7 @@ dependencies = [
 name = "lanes"
 version = "0.1.0"
 dependencies = [
+ "appctl",
  "chrono",
  "clap",
  "kdl",

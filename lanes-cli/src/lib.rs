@@ -1028,7 +1028,7 @@ fn run_command_checked(cmd: &mut std::process::Command, label: &str) -> Result<(
 /// final terminal-focus step landed - visibly flickering through each app
 /// on every switch instead of just showing the one or two that actually
 /// need to be seen.
-fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_session: Option<&str>) -> Result<(), String> {
+fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_session: Option<&str>) -> Result<Option<u32>, String> {
     let resolve_session = |session: &Option<String>| -> Result<String, String> {
         session.clone().or_else(|| default_session.map(String::from))
             .ok_or_else(|| "no session given and this lane has no terminal session to default to".to_string())
@@ -1041,7 +1041,7 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
         // just be a redundant, visible extra flip before that final step.
         model::TargetDriver::Wezterm { session } => {
             activate_wezterm_tab(&resolve_session(session)?, false)?;
-            Ok(())
+            Ok(None)
         }
         model::TargetDriver::Zellij { session, pane } => {
             let session = resolve_session(session)?;
@@ -1052,25 +1052,21 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
                     as u64,
             };
             focus_zellij_pane(&session, pane_id)?;
-            Ok(())
+            Ok(None)
         }
         model::TargetDriver::Obsidian { vault } => {
             let uri = format!("obsidian://open?vault={}", percent_encode(vault));
             run_command_checked(std::process::Command::new("open").arg(uri), "open obsidian:// URI")?;
-            Ok(())
+            Ok(None)
         }
-        model::TargetDriver::Boards { project } => {
-            let uri = format!("boards://open?project={}", percent_encode(project));
-            run_command_checked(std::process::Command::new("open").arg(uri), "open boards:// URI")?;
-            Ok(())
-        }
+        model::TargetDriver::Boards { project } => activate_boards_target(project),
         model::TargetDriver::Sourcetree { repo } => {
             let path = expand_tilde(repo);
             run_command_checked(
                 std::process::Command::new("/opt/homebrew/bin/stree").current_dir(&path).arg("."),
                 "stree",
             )?;
-            Ok(())
+            Ok(None)
         }
         model::TargetDriver::Vscode { folder } => {
             let path = expand_tilde(folder);
@@ -1078,13 +1074,71 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
                 std::process::Command::new("code").args(["-r", &path]),
                 "code -r (is the 'code' shell command installed? VS Code > Cmd+Shift+P > \"Shell Command: Install 'code' command in PATH\")",
             )?;
-            Ok(())
+            Ok(None)
         }
         model::TargetDriver::App { name, .. } => {
             if raise_app {
                 run_command_checked(std::process::Command::new("open").args(["-a", name]), "open -a")?;
             }
-            Ok(())
+            Ok(None)
+        }
+    }
+}
+
+/// Switches Boards to `project` over its `appctl` socket (reaches a
+/// `just dev` instance, not just the installed app - see
+/// `PLAN-boards-via-appctl.md`), falling back to `open 'boards://...'` when
+/// no instance is reachable. Returns the instance's pid when the socket
+/// path was used, so `apply_targets` can place that exact process instead
+/// of guessing by bundle id (which only resolves the installed copy).
+fn activate_boards_target(project: &str) -> Result<Option<u32>, String> {
+    let t0 = std::time::Instant::now();
+    let outcome = match appctl::default_state_root() {
+        Some(root) => activate_boards_via_appctl(&root, project),
+        None => BoardsAppctlOutcome::Fallback,
+    };
+    let result = match outcome {
+        BoardsAppctlOutcome::Switched(pid) => Ok(Some(pid)),
+        BoardsAppctlOutcome::AppError(msg) => Err(msg),
+        BoardsAppctlOutcome::Fallback => {
+            let uri = format!("boards://open?project={}", percent_encode(project));
+            run_command_checked(std::process::Command::new("open").arg(uri), "open boards:// URI").map(|()| None)
+        }
+    };
+    logging::perf(
+        "focus.boards_appctl",
+        &format!("outcome={} elapsed_us={}", if matches!(result, Ok(Some(_))) { "appctl" } else { "fallback" }, t0.elapsed().as_micros()),
+    );
+    result
+}
+
+#[derive(Debug)]
+enum BoardsAppctlOutcome {
+    Switched(u32),
+    AppError(String),
+    Fallback,
+}
+
+fn activate_boards_via_appctl(root: &std::path::Path, project: &str) -> BoardsAppctlOutcome {
+    let mut conn = match appctl::client::connect(root, "boards", None) {
+        Ok(conn) => conn,
+        // The normal "Boards isn't running" case - `open boards://` cold-launches
+        // the installed app on that project, same as always, so this is quiet.
+        Err(appctl::client::ClientError::NoRunningInstance { .. }) => return BoardsAppctlOutcome::Fallback,
+        Err(e) => {
+            eprintln!("warning: boards appctl: {e}, falling back to 'open boards://'");
+            return BoardsAppctlOutcome::Fallback;
+        }
+    };
+    let pid = conn.hello().pid;
+    let mut args = serde_json::Map::new();
+    args.insert("project".to_string(), serde_json::json!(project));
+    match conn.request("open_project", args) {
+        Ok(_) => BoardsAppctlOutcome::Switched(pid),
+        Err(appctl::client::RequestError::App(msg)) => BoardsAppctlOutcome::AppError(msg),
+        Err(appctl::client::RequestError::Io(msg)) => {
+            eprintln!("warning: boards appctl: {msg}, falling back to 'open boards://'");
+            BoardsAppctlOutcome::Fallback
         }
     }
 }
@@ -1171,7 +1225,7 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
     // durations one by one measurably shortens every lane switch -
     // confirmed via perf.log (~420ms -> dominated by the slower of the two
     // calls instead of their sum).
-    let results: Vec<Result<(), String>> = std::thread::scope(|scope| {
+    let results: Vec<Result<Option<u32>, String>> = std::thread::scope(|scope| {
         let handles: Vec<_> = pending
             .iter()
             .map(|target| {
@@ -1199,25 +1253,31 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
     });
 
     for (target, result) in pending.into_iter().zip(results) {
-        if let Err(e) = result {
-            let e = format!("target '{}': {e}", target.driver.name());
-            eprintln!("warning: {e}");
-            warnings.push(e);
-            continue;
-        }
-
-        let Some(monitor) = &target.monitor else { continue };
-        let identity_value: serde_json::Value = match target_bundle_id(&target.driver) {
-            Some(bundle_id) => serde_json::json!(bundle_id),
-            None => {
-                let e = format!(
-                    "target '{}' has monitor/position set but its driver can't be placed",
-                    target.driver.name()
-                );
+        let activated_pid = match result {
+            Ok(pid) => pid,
+            Err(e) => {
+                let e = format!("target '{}': {e}", target.driver.name());
                 eprintln!("warning: {e}");
                 warnings.push(e);
                 continue;
             }
+        };
+
+        let Some(monitor) = &target.monitor else { continue };
+        let (identity_key, identity_value): (&str, serde_json::Value) = match activated_pid {
+            Some(pid) => ("pid", serde_json::json!(pid)),
+            None => match target_bundle_id(&target.driver) {
+                Some(bundle_id) => ("app", serde_json::json!(bundle_id)),
+                None => {
+                    let e = format!(
+                        "target '{}' has monitor/position set but its driver can't be placed",
+                        target.driver.name()
+                    );
+                    eprintln!("warning: {e}");
+                    warnings.push(e);
+                    continue;
+                }
+            },
         };
         let Some(uuid) = cfg.monitor_uuid(monitor) else {
             let e = format!("monitor handle '{monitor}' not found in config");
@@ -1240,7 +1300,7 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
         // frontmost first, so placement just acts on whatever that left
         // focused (lanes-wm's `--focused` selector).
         let mut placement = serde_json::Map::new();
-        placement.insert("app".to_string(), identity_value);
+        placement.insert(identity_key.to_string(), identity_value);
         placement.insert("monitor".to_string(), serde_json::json!(uuid));
         placement.insert("position".to_string(), position_json);
         placement.insert("focused".to_string(), serde_json::json!(true));
@@ -1349,7 +1409,7 @@ pub fn activate_context(driver_name: &str) -> Result<(), String> {
 /// both want exactly "bring this one thing forward, right now," never
 /// placement.
 fn activate_and_raise(target: &model::Target, default_session: Option<&str>) -> Result<(), String> {
-    activate_target(&target.driver, true, default_session)
+    activate_target(&target.driver, true, default_session).map(|_pid| ())
 }
 
 fn fallback_activate(driver_name: &str) -> Result<(), String> {
@@ -1730,6 +1790,95 @@ mod tests {
             }),
             Some("org.mozilla.firefox")
         );
+    }
+
+    /// A throwaway `/tmp` dir for an `appctl` state root in these tests,
+    /// cleaned up on drop. Short path, same reasoning as `appctl`'s own
+    /// tests: macOS caps a Unix socket path at ~104 bytes.
+    struct TempDir(std::path::PathBuf);
+
+    impl TempDir {
+        fn new(tag: &str) -> TempDir {
+            static COUNTER: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let n = COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            // `/tmp`, not `std::env::temp_dir()` - on macOS that resolves to a
+            // long per-user path under /var/folders/..., which blows the ~104
+            // byte cap on a Unix socket path once joined with app/instance.
+            let dir = std::path::PathBuf::from(format!("/tmp/lanes-actl-{tag}-{}-{n}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).unwrap();
+            TempDir(dir)
+        }
+    }
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// A real git repo, since `appctl::start` resolves a dev instance's
+    /// name from the source dir's branch (`git_branch`).
+    fn appctl_test_repo(branch: &str) -> TempDir {
+        let dir = TempDir::new("repo");
+        for args in [
+            &["init", "-q", "-b", branch][..],
+            &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "--allow-empty", "-m", "init"][..],
+        ] {
+            assert!(std::process::Command::new("git").arg("-C").arg(&dir.0).args(args).status().unwrap().success());
+        }
+        dir
+    }
+
+    /// A live `boards` appctl instance, answering `open_project` like the
+    /// real app (`boards/src-tauri/src/open_project.rs`): any project
+    /// except "missing" succeeds, "missing" reports `no such project:
+    /// missing` the way the real app's lookup failure would.
+    fn serve_boards(branch: &str, repo: &TempDir, state: &TempDir) -> appctl::Handle {
+        let config = appctl::Config::new("boards", &repo.0, "1.0.0").state_dir(&state.0).command("open_project", |req| {
+            let project = req["project"].as_str().unwrap_or_default();
+            if project == "missing" {
+                Err(format!("no such project: {project}"))
+            } else {
+                Ok(serde_json::json!(null))
+            }
+        });
+        let _ = branch; // branch comes from the repo fixture itself, kept as a param for test-site clarity
+        appctl::start(config).unwrap()
+    }
+
+    #[test]
+    fn boards_appctl_switches_a_live_instance_and_returns_its_pid() {
+        let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
+        let handle = serve_boards("main", &repo, &state);
+        match activate_boards_via_appctl(&state.0, "myproj") {
+            BoardsAppctlOutcome::Switched(pid) => assert_eq!(pid, handle.info().pid),
+            other => panic!("expected Switched, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn boards_appctl_app_error_is_not_a_fallback() {
+        let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
+        let _handle = serve_boards("main", &repo, &state);
+        match activate_boards_via_appctl(&state.0, "missing") {
+            BoardsAppctlOutcome::AppError(msg) => assert_eq!(msg, "no such project: missing"),
+            other => panic!("expected AppError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn boards_appctl_falls_back_when_nothing_is_running() {
+        let state = TempDir::new("st");
+        assert!(matches!(activate_boards_via_appctl(&state.0, "myproj"), BoardsAppctlOutcome::Fallback));
+    }
+
+    #[test]
+    fn boards_appctl_falls_back_when_ambiguous() {
+        let (repo_a, repo_b, state) = (appctl_test_repo("dev-a"), appctl_test_repo("dev-b"), TempDir::new("st"));
+        let _a = serve_boards("dev-a", &repo_a, &state);
+        let _b = serve_boards("dev-b", &repo_b, &state);
+        assert!(matches!(activate_boards_via_appctl(&state.0, "myproj"), BoardsAppctlOutcome::Fallback));
     }
 
     #[test]
