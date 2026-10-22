@@ -218,6 +218,16 @@ it". Panes are ordered top to bottom, then left to right. Gap: cycling and tab
 activation still use the cached tab id, so `cyclable` (live tab) can disagree
 with what activation does.
 
+**Stale build chips** (`build` kind): `lanes_build_changed` /
+`lanes_build_rebuilt` in `lanes.dl` join lensd's `appctl` facts (running
+app instances and their build identity, `~/src/dev-infra`) to the lane
+whose repo is the app's own. The repo facet then shows `build stale ·
+<app> <instance> · <changed sources>` when a source the running binary was
+built from has changed on disk (including a path dependency in another
+repo, e.g. `dev-infra/crates/appctl`), or `build relaunch · <app>
+<instance>` when the exe was rebuilt or reinstalled since launch. Warning
+urgency, always visible. See `../PLAN-build-chip.md`.
+
 ## Snapshot format
 
 `lanes snapshot` outputs a JSON `Snapshot`:

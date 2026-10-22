@@ -289,6 +289,39 @@ fn repo_signals(m: &Mirror, lane: &str, resolved_path: &str, raw_path: &str, ses
     out
 }
 
+/// "Running build is stale" chips for the app instances whose own repo is
+/// this lane repo (`lanes_build_changed`/`lanes_build_rebuilt`, lanes.dl).
+/// One chip per instance and reason; a source-changed chip names the
+/// changed sources (`src-tauri`, or `dev-infra/crates/appctl` for a path
+/// dependency in another repo).
+fn build_signals(m: &Mirror, lane: &str, resolved_path: &str) -> Vec<Signal> {
+    use crate::model::BuildReason;
+    let mut changed: std::collections::BTreeMap<(String, String), BTreeSet<String>> = Default::default();
+    for r in m.rows("lanes_build_changed").filter(|r| s(&r[0]) == lane && s(&r[1]) == resolved_path) {
+        let (repo, path) = (s(&r[4]), s(&r[5]));
+        let label = if repo == resolved_path {
+            if path.is_empty() { "source".to_string() } else { path.to_string() }
+        } else {
+            let name = std::path::Path::new(repo).file_name().and_then(|n| n.to_str()).unwrap_or(repo);
+            if path.is_empty() { name.to_string() } else { format!("{name}/{path}") }
+        };
+        changed.entry((s(&r[2]).to_string(), s(&r[3]).to_string())).or_default().insert(label);
+    }
+    let mut out: Vec<Signal> = changed
+        .into_iter()
+        .map(|((app, instance), sources)| {
+            let detail = format!("{app} {instance} · {}", sources.into_iter().collect::<Vec<_>>().join(", "));
+            Signal::new(SignalReason::Build(BuildReason::SourceChanged), None, Some(detail))
+        })
+        .collect();
+    let rebuilt: BTreeSet<(&str, &str)> =
+        m.rows("lanes_build_rebuilt").filter(|r| s(&r[0]) == lane && s(&r[1]) == resolved_path).map(|r| (s(&r[2]), s(&r[3]))).collect();
+    out.extend(rebuilt.into_iter().map(|(app, instance)| {
+        Signal::new(SignalReason::Build(BuildReason::RebuiltSinceLaunch), None, Some(format!("{app} {instance}")))
+    }));
+    out
+}
+
 /// The UI snapshot built from lensd's rows. Lane definitions come from Lanes'
 /// config; signals and live state come from the mirror. Lanes' own policy
 /// (dismissals, disabled sessions, `cyclable`, `visible`, lifecycle) is
@@ -347,7 +380,9 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_command
                 FacetSnapshot::Terminal { session: session.to_string(), running, panes, signals: claude }
             } else {
                 let raw = el.repo_path().unwrap_or_default();
-                let signals = repo_signals(m, &lane.id, &resolve_path(raw), raw, nav_session);
+                let resolved = resolve_path(raw);
+                let mut signals = repo_signals(m, &lane.id, &resolved, raw, nav_session);
+                signals.extend(build_signals(m, &lane.id, &resolved));
                 FacetSnapshot::Repo { path: raw.to_string(), signals }
             }
         })
@@ -447,6 +482,12 @@ pub fn keys_from_mirror(m: &Mirror, is_dismissed: impl Fn(&str) -> bool) -> BTre
     }
     for r in m.rows("lanes_repo_branch") {
         keys.insert(format!("{}|repo|non_default_branch|{}", s(&r[0]), s(&r[1])));
+    }
+    for r in m.rows("lanes_build_changed") {
+        keys.insert(format!("{}|build|source_changed|{}:{}", s(&r[0]), s(&r[2]), s(&r[3])));
+    }
+    for r in m.rows("lanes_build_rebuilt") {
+        keys.insert(format!("{}|build|rebuilt_since_launch|{}:{}", s(&r[0]), s(&r[2]), s(&r[3])));
     }
     let running: HashSet<(&str, &str)> = m.rows("lanes_session_running").map(|r| (s(&r[0]), s(&r[1]))).collect();
     for r in m.rows("lanes_session") {
@@ -882,6 +923,45 @@ mod tests {
         assert!(matches!(signals[0].reason, SignalReason::Repo(RepoReason::PendingCommit)));
         assert_eq!(signals[1].detail.as_deref(), Some("on \"feat\", default is \"main\""));
         assert!(matches!(&signals[0].action, Some(SignalAction::FocusRepoPane { session, path }) if session == "z" && path == "/p/infra"));
+    }
+
+    #[test]
+    fn stale_builds_get_visible_warning_chips_on_the_owning_repo_facet() {
+        let mut rows = live_rows();
+        rows.extend([
+            // Two of the app's own sources changed, plus one in another repo.
+            row("lanes_build_changed", json!(["l", "/p/infra", "boards", "dev-main", "/p/infra", "src-tauri"])),
+            row("lanes_build_changed", json!(["l", "/p/infra", "boards", "dev-main", "/s/dev-infra", "crates/appctl"])),
+            row("lanes_build_rebuilt", json!(["l", "/p/infra", "boards", "installed"])),
+            // Another lane's, and another repo of this lane's: not here.
+            row("lanes_build_changed", json!(["other", "/p/infra", "x", "dev-main", "/p/infra", ""])),
+            row("lanes_build_rebuilt", json!(["l", "/p/elsewhere", "y", "installed"])),
+        ]);
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let FacetSnapshot::Repo { signals, .. } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
+        let builds: Vec<&Signal> = signals.iter().filter(|s| s.kind() == crate::model::SignalKind::Build).collect();
+        assert_eq!(builds.len(), 2, "{:?}", builds.iter().map(|s| &s.detail).collect::<Vec<_>>());
+
+        assert!(matches!(builds[0].reason, SignalReason::Build(crate::model::BuildReason::SourceChanged)));
+        assert_eq!(builds[0].detail.as_deref(), Some("boards dev-main · dev-infra/crates/appctl, src-tauri"));
+        assert!(matches!(builds[1].reason, SignalReason::Build(crate::model::BuildReason::RebuiltSinceLaunch)));
+        assert_eq!(builds[1].detail.as_deref(), Some("boards installed"));
+        for chip in builds {
+            assert_eq!(chip.urgency, crate::model::Urgency::Warning);
+            assert!(chip.visible, "shown whether or not the lane is cyclable");
+            assert!(chip.action.is_none());
+        }
+    }
+
+    #[test]
+    fn stale_build_keys_are_comparable() {
+        let m = mirror(vec![
+            row("lanes_build_changed", json!(["l", "/p/infra", "boards", "dev-main", "/p/infra", "src-tauri"])),
+            row("lanes_build_rebuilt", json!(["l", "/p/infra", "boards", "installed"])),
+        ]);
+        let keys = keys_from_mirror(&m, |_| false);
+        assert!(keys.contains("l|build|source_changed|boards:dev-main"), "{keys:?}");
+        assert!(keys.contains("l|build|rebuilt_since_launch|boards:installed"), "{keys:?}");
     }
 
     #[test]

@@ -119,3 +119,19 @@ lanes_inbox_count(Lane, Project, Count) :-
 
 lane_watch_repo(Path, Lane) :-
     lane_repo_path(Lane, Path).
+
+# Running app builds that aren't the code on disk (lensd's appctl source;
+# see PLAN-build-chip.md). An instance belongs to the lane whose repo is the
+# app's own (appctl_instance_repo), even when the changed source is in
+# another repo (e.g. Boards built against an older dev-infra/crates/appctl).
+lanes_build_changed(Lane, LaneRepo, App, Instance, Repo, Path) :-
+    lane_repo_path(Lane, LaneRepo),
+    appctl_instance_repo(App, Instance, LaneRepo),
+    appctl_instance_source(App, Instance, Repo, Path, Built),
+    appctl_source_tree(Repo, Path, Now),
+    Built != Now.
+
+lanes_build_rebuilt(Lane, LaneRepo, App, Instance) :-
+    lane_repo_path(Lane, LaneRepo),
+    appctl_instance_repo(App, Instance, LaneRepo),
+    appctl_instance_rebuilt(App, Instance).

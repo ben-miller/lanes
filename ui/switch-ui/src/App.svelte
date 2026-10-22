@@ -290,6 +290,7 @@
     if (signal.kind === "lanes") return "lanes";
     if (signal.kind === "command") return "shell";
     if (signal.kind === "boards") return "boards";
+    if (signal.kind === "build") return "build";
     return signal.kind;
   }
 
@@ -305,6 +306,9 @@
     if (signal.reason === "done") return "done";
     if (signal.reason === "failed") return "failed";
     if (signal.reason === "inbox_non_empty") return "inbox";
+    // A running app that isn't the code on disk (lanes-cli's `build` kind).
+    if (signal.reason === "source_changed") return "stale";
+    if (signal.reason === "rebuilt_since_launch") return "relaunch";
     return signal.reason;
   }
 
@@ -484,11 +488,11 @@
                       class="signal urgency-{signal.urgency}"
                       class:is-active={signal.action?.kind === "switch_claude_session" && signal.action.session_id === snapshot.focused_claude_session}
                       class:is-cyclable={signal.cyclable}
-                      class:is-command={signal.kind === "command" || signal.kind === "boards"}
+                      class:is-command={signal.kind === "command" || signal.kind === "boards" || signal.kind === "build"}
                       class:is-unreachable={isUnreachable(signal)}
                       on:mousedown|stopPropagation={() => handleSignalClick(lane, signal)}
                       on:click|stopPropagation
-                    >{#if signal.kind === "boards"}Inbox: {signal.detail}{:else}<span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}{#if signal.kind === "command" && signal.detail} · {signal.detail}{/if}{/if}</button>
+                    >{#if signal.kind === "boards"}Inbox: {signal.detail}{:else}<span class="kind">{kindLabel(signal)}</span>{reasonLabel(signal)}{#if (signal.kind === "command" || signal.kind === "build") && signal.detail} · {signal.detail}{/if}{/if}</button>
                     <!-- Only for an active lane - an inactive one is already
                          excluded from cycling entirely (the lane-level
                          toggle above), so a per-session cycling toggle here

@@ -223,6 +223,12 @@ pub enum SignalKind {
     /// `lane_from_mirror`, which is the only lane-snapshot path there is -
     /// see `lensd::snapshot_from_mirror`.
     Boards,
+    /// A running app instance that isn't the code on disk: built from
+    /// source that has changed since, or rebuilt/reinstalled since it was
+    /// launched. From lensd's `appctl` source (apps' own `appctl` sockets
+    /// and build identity, `~/src/dev-infra`); shown on the repo facet of
+    /// the lane owning the app's repo. See PLAN-build-chip.md.
+    Build,
 }
 
 /// How a signal's existence is governed - the axis that decides whether a
@@ -330,6 +336,7 @@ pub enum SignalReason {
     Lanes(LanesReason),
     Command(CommandReason),
     Boards(BoardsReason),
+    Build(BuildReason),
 }
 
 /// A long-running foreground shell command, either still running or past
@@ -388,6 +395,18 @@ pub enum BoardsReason {
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+pub enum BuildReason {
+    /// A source the running binary was built from has changed on disk
+    /// since (its repo, or a path dependency in another repo): rebuilding
+    /// now would give a different app.
+    SourceChanged,
+    /// The executable on disk is newer than the running process (rebuilt or
+    /// reinstalled since launch): the app needs relaunching.
+    RebuiltSinceLaunch,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LanesReason {
     /// A lane that's active but whose Zellij session has no cached WezTerm
     /// tab, so there's nothing for a switch to actually land on.
@@ -439,6 +458,7 @@ impl SignalReason {
             SignalReason::Lanes(_) => SignalKind::Lanes,
             SignalReason::Command(_) => SignalKind::Command,
             SignalReason::Boards(_) => SignalKind::Boards,
+            SignalReason::Build(_) => SignalKind::Build,
         }
     }
 
@@ -483,6 +503,9 @@ impl SignalReason {
             // (your own doing, resolved by committing), an unprocessed
             // Inbox is more of a "this is piling up" nudge.
             SignalReason::Boards(BoardsReason::InboxNonEmpty) => Urgency::Warning,
+            // Something's off (what's running isn't what's on disk), not
+            // blocking anything: same tier as a non-default branch.
+            SignalReason::Build(_) => Urgency::Warning,
         }
     }
 }

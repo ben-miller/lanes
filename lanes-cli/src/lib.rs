@@ -118,10 +118,17 @@ fn signal_cyclable(kind: model::SignalKind, lane_cyclable: bool, session_disable
 ///     finished build; whether this lane happens to be cyclable right now
 ///     has nothing to do with whether there's something to triage.
 ///
+///   - `Build` - a running app that isn't the code on disk is worth seeing
+///     whether or not a cycle would land on this lane (see
+///     PLAN-build-chip.md).
+///
 /// Everything else (git chips, off-cycle Claude sessions) keeps the old
 /// behaviour: visible iff cyclable.
 fn signal_visible(kind: model::SignalKind, cyclable: bool) -> bool {
-    matches!(kind, model::SignalKind::Command | model::SignalKind::Lanes | model::SignalKind::Boards) || cyclable
+    matches!(
+        kind,
+        model::SignalKind::Command | model::SignalKind::Lanes | model::SignalKind::Boards | model::SignalKind::Build
+    ) || cyclable
 }
 
 /// Seconds a command must have been running before it gets a chip at all -
