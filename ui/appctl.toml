@@ -20,8 +20,8 @@ before = "pkill -f '/Applications/Lanes Switch.app/Contents/MacOS/[l]anes-ui'"
 # cwd is src-tauri, not this directory: cargo watch needs to start from a
 # real Cargo project root to resolve its own ("project root does not
 # exist" otherwise - confirmed directly, this repo has no root-level
-# Cargo.toml). `-w ../../../lanes-cli` is relative to that same cwd; the
+# Cargo.toml). `-w ../../lanes-cli` is relative to that same cwd; the
 # shell command cd's back here first, since npm/package.json live here,
 # not in src-tauri.
 cwd = "src-tauri"
-cmd = "cargo watch -w ../../../lanes-cli -s 'cd .. && npm run tauri dev' -c"
+cmd = "cargo watch -w ../../lanes-cli -s 'cd .. && npm run tauri dev' -c"
