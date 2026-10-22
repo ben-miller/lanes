@@ -1,0 +1,27 @@
+# What `appctl up` runs in this repo (see ~/src/dev-infra/README.md):
+#   appctl up            attached; Ctrl+C stops the whole tree
+#   appctl up -d         detached; then appctl status / logs -f / down
+name = "lanes-ui"
+
+# Same reasoning as boards/appctl.toml: tauri-plugin-single-instance hands
+# a second launch with the same bundle identifier (com.lanes.ui) off to an
+# already-running copy and exits silently - with the installed /Applications
+# copy open, the dev binary would just vanish. The [l] keeps pkill from
+# matching this command's own `sh -c` line.
+before = "pkill -f '/Applications/Lanes Switch.app/Contents/MacOS/[l]anes-ui'"
+
+# This app depends on lanes-cli as a local path dependency - `tauri dev`'s
+# own watcher only looks at src-tauri, so a lanes-cli-only change never
+# triggers a rebuild on its own. cargo-watch wraps the whole pipeline
+# instead (see ~/src/projects/CONVENTIONS.md, "Hot-reloading a Rust path
+# dependency during tauri dev" - --additional-watch-folders doesn't
+# actually work, confirmed directly, don't resurrect it).
+#
+# cwd is src-tauri, not this directory: cargo watch needs to start from a
+# real Cargo project root to resolve its own ("project root does not
+# exist" otherwise - confirmed directly, this repo has no root-level
+# Cargo.toml). `-w ../../../lanes-cli` is relative to that same cwd; the
+# shell command cd's back here first, since npm/package.json live here,
+# not in src-tauri.
+cwd = "src-tauri"
+cmd = "cargo watch -w ../../../lanes-cli -s 'cd .. && npm run tauri dev' -c"

@@ -84,10 +84,21 @@
     // The lane list's scroll cap tracks the actual screen now, so it has
     // to be set before measuring offsetHeight below - otherwise this
     // would measure against last call's (or the hardcoded initial) cap,
-    // one refresh cycle stale on the monitor changing.
+    // one refresh cycle stale on the monitor changing. Only touches the
+    // variable (and awaits the extra tick) when the screen actually
+    // changed - this runs on every refresh (every fs-watcher event, every
+    // few seconds), and the unconditional version of this made a click on
+    // a lane toggle land, more often than not, inside the exact spurious-
+    // focus-loss window the comment on resizeToContent's only other
+    // caller already warns about, swallowing it instead of toggling
+    // anything. Comparing first keeps the common case (screen unchanged)
+    // exactly as cheap as before this existed.
     if (monitor) {
-      panelMaxHeight = monitor.workArea.size.height / monitor.scaleFactor - SCREEN_MARGIN;
-      await tick();
+      const newMax = monitor.workArea.size.height / monitor.scaleFactor - SCREEN_MARGIN;
+      if (newMax !== panelMaxHeight) {
+        panelMaxHeight = newMax;
+        await tick();
+      }
     }
 
     const height = dashboardEl.offsetHeight;
