@@ -8,6 +8,13 @@
   // recomputing for edit mode, which adds a toggle switch to each row.
   const PANEL_WIDTH = 360;
   const EDIT_MODE_EXTRA_WIDTH = 36;
+  // How much of the screen's work area height the lane list's scroll cap
+  // leaves untouched top+bottom combined - "almost" the full height, not
+  // flush against the menu bar/dock. Overwritten with a real value as soon
+  // as resizeToContent has a monitor to measure; this is just what renders
+  // before that first call.
+  const SCREEN_MARGIN = 48;
+  let panelMaxHeight = 560;
 
   let snapshot = null;
   // lensd is the only source of signals; while its socket is down there is
@@ -72,12 +79,21 @@
   async function resizeToContent() {
     if (!dashboardEl) return;
     const width = panelWidth;
-    const height = dashboardEl.offsetHeight;
+    const monitor = await primaryMonitor();
 
+    // The lane list's scroll cap tracks the actual screen now, so it has
+    // to be set before measuring offsetHeight below - otherwise this
+    // would measure against last call's (or the hardcoded initial) cap,
+    // one refresh cycle stale on the monitor changing.
+    if (monitor) {
+      panelMaxHeight = monitor.workArea.size.height / monitor.scaleFactor - SCREEN_MARGIN;
+      await tick();
+    }
+
+    const height = dashboardEl.offsetHeight;
     const win = getCurrentWindow();
     await win.setSize(new LogicalSize(width, height));
 
-    const monitor = await primaryMonitor();
     if (monitor) {
       const scale = monitor.scaleFactor;
       const workX = monitor.workArea.position.x / scale;
@@ -468,7 +484,7 @@
   </div>
 {:else if snapshot}
   <div class="dashboard" bind:this={dashboardEl} style="width: {panelWidth}px">
-    <div class="panel" class:pulse-noop={pulseNoop}>
+    <div class="panel" class:pulse-noop={pulseNoop} style="max-height: {panelMaxHeight}px">
       {#each visibleLanes as lane}
         {@const signals = visibleSignals(lane, editMode, disabledClaudeSessions)}
         <div
@@ -671,6 +687,33 @@
        pulse-noop outline below (which follows the element's own
        border-radius) comes out rounded instead of a hard square. */
     border-radius: 8px;
+    /* Enough lanes (e.g. every dev-* lane plus a few real ones) outgrows
+       the screen vertically - resizeToContent measures this element's own
+       rendered height, so capping it here is also what keeps the actual
+       OS window from trying to grow past the monitor. Scoped to this
+       element, not body (html/body's `overflow: hidden` above is for the
+       window as a whole, which should never show a scrollbar itself).
+       The actual cap is an inline style (max-height: {panelMaxHeight}px,
+       see resizeToContent) - tracks the real screen's work area height,
+       not a guessed constant; this is just the pre-first-measurement
+       fallback via panelMaxHeight's initial value. A focused lane's ring
+       (.lane.is-focused below) is a box-shadow bleeding 2px past its own
+       edge, which this clips without room for it - `padding` reserves
+       that room on every side, more on the right so the ring also clears
+       the scrollbar track instead of sitting under it. overflow-x is
+       explicit (not left to default from only setting overflow-y, which
+       the CSS Overflow spec computes as `auto` too and would make a
+       horizontal scrollbar a possibility there's no reason to have). */
+    padding: 2px 6px 2px 2px;
+    overflow-x: hidden;
+    overflow-y: auto;
+  }
+  .panel::-webkit-scrollbar {
+    width: 6px;
+  }
+  .panel::-webkit-scrollbar-thumb {
+    background: var(--border);
+    border-radius: 3px;
   }
   /* Acknowledges a show-inactive keypress that had no effect (edit mode was
      on - see ToggleShowInactive). A brief outline pulse, not a banner or
