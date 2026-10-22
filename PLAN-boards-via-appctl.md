@@ -25,7 +25,7 @@ Boards now has a way around both problems.
 ## What exists now (all built and verified, 2026-10-20)
 
 - **Boards** serves an `appctl` socket per running instance:
-  `~/.local/state/boards/instances/installed.sock` (the copy in
+  `~/.local/state/bmiller/boards/instances/installed.sock` (the copy in
   `/Applications`) or `dev-<branch>.sock` (e.g. `dev-main` under
   `just dev`). It answers `open_project`, which switches the window and
   brings it forward through the same Rust code as `boards://` links
@@ -35,7 +35,7 @@ Boards now has a way around both problems.
 - **`appctl::client`** (`~/src/dev-infra/crates/appctl/src/client.rs`,
   docs in `~/src/dev-infra/README.md`):
   ```rust
-  let root = appctl::default_state_root();                 // Option<PathBuf>: APPCTL_STATE_DIR, else ~/.local/state
+  let root = appctl::default_state_root();                 // Option<PathBuf>: APPCTL_STATE_DIR, else ~/.local/state/bmiller
   let mut conn = appctl::client::connect(&root, "boards", None)?;   // Result<Connection, ClientError>
   conn.hello().pid                                         // u32
   conn.request("open_project", args)                       // Result<Value, RequestError::{App(msg), Io(msg)}>
