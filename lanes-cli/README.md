@@ -223,8 +223,8 @@ with what activation does.
 app instances and their build identity, `~/src/dev-infra`) to the lane
 whose repo is the app's own. The repo facet then shows `build stale ·
 <app> <instance> · <changed sources>` when a source the running binary was
-built from has changed on disk (including a path dependency in another
-repo, e.g. `dev-infra/crates/appctl`), or `build relaunch · <app>
+built from has changed on disk (including a newer dev-infra rolled out
+into its `Cargo.lock`), or `build relaunch · <app>
 <instance>` when the exe was rebuilt or reinstalled since launch. Warning
 urgency, always visible. See `../PLAN-build-chip.md`.
 
