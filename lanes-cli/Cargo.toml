@@ -19,3 +19,7 @@ toml = { version = "0.8", default-features = false, features = ["parse"] }
 toml_edit = "0.22"
 kdl = "6.5.0"
 appctl = { git = "file:///Users/bmiller/src/dev-infra", branch = "master" }
+
+# No `unsafe` code, so no direct C calls (~/src/projects/CONVENTIONS.md, "Rust").
+[lints.rust]
+unsafe_code = "forbid"
