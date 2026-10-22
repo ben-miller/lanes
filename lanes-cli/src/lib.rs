@@ -1035,7 +1035,12 @@ fn run_command_checked(cmd: &mut std::process::Command, label: &str) -> Result<(
 /// final terminal-focus step landed - visibly flickering through each app
 /// on every switch instead of just showing the one or two that actually
 /// need to be seen.
-fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_session: Option<&str>) -> Result<Option<u32>, String> {
+fn activate_target(
+    driver: &model::TargetDriver,
+    raise_app: bool,
+    default_session: Option<&str>,
+    pre_place: Option<(String, serde_json::Value)>,
+) -> Result<Option<u32>, String> {
     let resolve_session = |session: &Option<String>| -> Result<String, String> {
         session.clone().or_else(|| default_session.map(String::from))
             .ok_or_else(|| "no session given and this lane has no terminal session to default to".to_string())
@@ -1066,7 +1071,7 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
             run_command_checked(std::process::Command::new("open").arg(uri), "open obsidian:// URI")?;
             Ok(None)
         }
-        model::TargetDriver::Boards { project } => activate_boards_target(project),
+        model::TargetDriver::Boards { project } => activate_boards_target(project, pre_place),
         model::TargetDriver::Sourcetree { repo } => {
             let path = expand_tilde(repo);
             run_command_checked(
@@ -1098,10 +1103,21 @@ fn activate_target(driver: &model::TargetDriver, raise_app: bool, default_sessio
 /// no instance is reachable. Returns the instance's pid when the socket
 /// path was used, so `apply_targets` can place that exact process instead
 /// of guessing by bundle id (which only resolves the installed copy).
-fn activate_boards_target(project: &str) -> Result<Option<u32>, String> {
+///
+/// `pre_place`, when given (a resolved monitor uuid + position, only ever
+/// supplied by `apply_targets` for a target that's actually getting
+/// placed), moves the window to its destination *before* `open_project` is
+/// called - `open_project` raises Boards' window as a side effect of
+/// switching projects (same as the `open 'boards://...'` link always did),
+/// so without this the window becomes visible wherever it last was for the
+/// ~200-600ms gap until the lane switch's own (separate, batched) lanes-wm
+/// apply call catches up. Moving it first means the raise reveals a window
+/// that's already in the right place - no visible flash on the wrong
+/// screen. See the "Boards target: appctl socket first" DECISIONS.md entry.
+fn activate_boards_target(project: &str, pre_place: Option<(String, serde_json::Value)>) -> Result<Option<u32>, String> {
     let t0 = std::time::Instant::now();
     let outcome = match appctl::default_state_root() {
-        Some(root) => activate_boards_via_appctl(&root, project),
+        Some(root) => activate_boards_via_appctl(&root, project, pre_place),
         None => BoardsAppctlOutcome::Fallback,
     };
     let result = match outcome {
@@ -1126,7 +1142,11 @@ enum BoardsAppctlOutcome {
     Fallback,
 }
 
-fn activate_boards_via_appctl(root: &std::path::Path, project: &str) -> BoardsAppctlOutcome {
+fn activate_boards_via_appctl(
+    root: &std::path::Path,
+    project: &str,
+    pre_place: Option<(String, serde_json::Value)>,
+) -> BoardsAppctlOutcome {
     let mut conn = match appctl::client::connect(root, "boards", None) {
         Ok(conn) => conn,
         // The normal "Boards isn't running" case - `open boards://` cold-launches
@@ -1138,6 +1158,25 @@ fn activate_boards_via_appctl(root: &std::path::Path, project: &str) -> BoardsAp
         }
     };
     let pid = conn.hello().pid;
+
+    // Move the window to its destination while it's still in the background,
+    // before `open_project` raises it - see activate_boards_target's doc
+    // comment. `Selector::Any` (no "focused"/"title" in this request) is
+    // only valid when the app has exactly one window - true for Boards'
+    // single board view, so this never needs the window focused first.
+    // Best-effort: a failure here (e.g. two Boards windows open) just means
+    // we fall back to the old raise-then-place timing for this one switch,
+    // not a hard error.
+    if let Some((monitor, position)) = pre_place {
+        let mut placement = serde_json::Map::new();
+        placement.insert("pid".to_string(), serde_json::json!(pid));
+        placement.insert("monitor".to_string(), serde_json::json!(monitor));
+        placement.insert("position".to_string(), position);
+        for warning in run_lanes_wm_apply(&[serde_json::Value::Object(placement)]) {
+            eprintln!("warning: boards pre-placement: {warning}");
+        }
+    }
+
     let mut args = serde_json::Map::new();
     args.insert("project".to_string(), serde_json::json!(project));
     match conn.request("open_project", args) {
@@ -1173,6 +1212,18 @@ fn terminal_target_has_no_resolvable_session(driver: &model::TargetDriver, defau
 /// broken target doesn't block the rest.
 ///
 /// `default_session` - see `activate_target`.
+/// A target's monitor handle + position, resolved to what `lanes-wm` wants:
+/// the handle's configured uuid, and the position (or `"full"`, its
+/// default) as JSON. Shared by `apply_targets`' own placement step and
+/// Boards' pre-placement (`activate_boards_target`'s `pre_place`), so the
+/// two don't drift on what "this target's destination" means.
+fn resolve_placement_json(cfg: &config::Config, monitor: &str, position: &Option<toml::Value>) -> Result<(String, serde_json::Value), String> {
+    let uuid = cfg.monitor_uuid(monitor).ok_or_else(|| format!("monitor handle '{monitor}' not found in config"))?;
+    let position = position.clone().unwrap_or_else(|| toml::Value::String("full".to_string()));
+    let position_json = serde_json::to_value(&position).map_err(|e| format!("invalid position: {e}"))?;
+    Ok((uuid.to_string(), position_json))
+}
+
 fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_session: Option<&str>) -> Vec<String> {
     let t0 = std::time::Instant::now();
     let mut warnings = Vec::new();
@@ -1244,7 +1295,21 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
                     // placement) - see activate_target's doc comment and
                     // Target::raise's doc comment for why.
                     let raise_app = target.monitor.is_none() || target.raise;
-                    let result = activate_target(&target.driver, raise_app, default_session);
+                    // Only Boards' own activation can use this - see
+                    // activate_boards_target's doc comment for why it
+                    // needs its destination before raising, unlike every
+                    // other driver here. `.ok()` deliberately throws the
+                    // error away: an unresolvable monitor handle is
+                    // reported properly below, in the placement loop that
+                    // runs for every target uniformly - this is only a
+                    // best-effort head start for Boards specifically.
+                    let pre_place = match (&target.driver, &target.monitor) {
+                        (model::TargetDriver::Boards { .. }, Some(monitor)) => {
+                            resolve_placement_json(cfg, monitor, &target.position).ok()
+                        }
+                        _ => None,
+                    };
+                    let result = activate_target(&target.driver, raise_app, default_session, pre_place);
                     logging::perf(
                         "focus.target_activated",
                         &format!("driver={} elapsed_us={}", target.driver.name(), target_t0.elapsed().as_micros()),
@@ -1286,17 +1351,10 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
                 }
             },
         };
-        let Some(uuid) = cfg.monitor_uuid(monitor) else {
-            let e = format!("monitor handle '{monitor}' not found in config");
-            eprintln!("warning: {e}");
-            warnings.push(e);
-            continue;
-        };
-        let position = target.position.clone().unwrap_or_else(|| toml::Value::String("full".to_string()));
-        let position_json = match serde_json::to_value(&position) {
+        let (uuid, position_json) = match resolve_placement_json(cfg, monitor, &target.position) {
             Ok(v) => v,
             Err(e) => {
-                let e = format!("target '{}': invalid position: {e}", target.driver.name());
+                let e = format!("target '{}': {e}", target.driver.name());
                 eprintln!("warning: {e}");
                 warnings.push(e);
                 continue;
@@ -1416,7 +1474,7 @@ pub fn activate_context(driver_name: &str) -> Result<(), String> {
 /// both want exactly "bring this one thing forward, right now," never
 /// placement.
 fn activate_and_raise(target: &model::Target, default_session: Option<&str>) -> Result<(), String> {
-    activate_target(&target.driver, true, default_session).map(|_pid| ())
+    activate_target(&target.driver, true, default_session, None).map(|_pid| ())
 }
 
 fn fallback_activate(driver_name: &str) -> Result<(), String> {
@@ -1858,7 +1916,7 @@ mod tests {
     fn boards_appctl_switches_a_live_instance_and_returns_its_pid() {
         let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
         let handle = serve_boards("main", &repo, &state);
-        match activate_boards_via_appctl(&state.0, "myproj") {
+        match activate_boards_via_appctl(&state.0, "myproj", None) {
             BoardsAppctlOutcome::Switched(pid) => assert_eq!(pid, handle.info().pid),
             other => panic!("expected Switched, got {other:?}"),
         }
@@ -1868,7 +1926,7 @@ mod tests {
     fn boards_appctl_app_error_is_not_a_fallback() {
         let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
         let _handle = serve_boards("main", &repo, &state);
-        match activate_boards_via_appctl(&state.0, "missing") {
+        match activate_boards_via_appctl(&state.0, "missing", None) {
             BoardsAppctlOutcome::AppError(msg) => assert_eq!(msg, "no such project: missing"),
             other => panic!("expected AppError, got {other:?}"),
         }
@@ -1877,7 +1935,23 @@ mod tests {
     #[test]
     fn boards_appctl_falls_back_when_nothing_is_running() {
         let state = TempDir::new("st");
-        assert!(matches!(activate_boards_via_appctl(&state.0, "myproj"), BoardsAppctlOutcome::Fallback));
+        assert!(matches!(activate_boards_via_appctl(&state.0, "myproj", None), BoardsAppctlOutcome::Fallback));
+    }
+
+    #[test]
+    fn boards_appctl_pre_placement_failure_does_not_block_the_project_switch() {
+        // No real Boards window exists in a test process, so the pre-place
+        // call to lanes-wm is guaranteed to fail (or lanes-wm may not even
+        // be on PATH) - exactly the "best-effort" case activate_boards_target's
+        // doc comment describes: a failed pre-placement must never stop the
+        // actual project switch from happening.
+        let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
+        let handle = serve_boards("main", &repo, &state);
+        let pre_place = Some(("not-a-real-monitor-uuid".to_string(), serde_json::json!("full")));
+        match activate_boards_via_appctl(&state.0, "myproj", pre_place) {
+            BoardsAppctlOutcome::Switched(pid) => assert_eq!(pid, handle.info().pid),
+            other => panic!("expected Switched despite a failed pre-placement, got {other:?}"),
+        }
     }
 
     #[test]
@@ -1885,7 +1959,7 @@ mod tests {
         let (repo_a, repo_b, state) = (appctl_test_repo("dev-a"), appctl_test_repo("dev-b"), TempDir::new("st"));
         let _a = serve_boards("dev-a", &repo_a, &state);
         let _b = serve_boards("dev-b", &repo_b, &state);
-        assert!(matches!(activate_boards_via_appctl(&state.0, "myproj"), BoardsAppctlOutcome::Fallback));
+        assert!(matches!(activate_boards_via_appctl(&state.0, "myproj", None), BoardsAppctlOutcome::Fallback));
     }
 
     #[test]
