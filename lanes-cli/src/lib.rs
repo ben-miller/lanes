@@ -1224,8 +1224,40 @@ fn resolve_placement_json(cfg: &config::Config, monitor: &str, position: &Option
     Ok((uuid.to_string(), position_json))
 }
 
+/// Live count of attached monitors, via `lanes-wm monitors --compact` -
+/// `None` if the call fails for any reason (lanes-wm not on PATH, bad
+/// JSON, ...), in which case callers treat it as "not the single-monitor
+/// case" rather than guessing from a failure.
+fn attached_monitor_count() -> Option<usize> {
+    let output = std::process::Command::new("lanes-wm").args(["monitors", "--compact"]).output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    let monitors: Vec<serde_json::Value> = serde_json::from_slice(&output.stdout).ok()?;
+    Some(monitors.len())
+}
+
+/// A target's effective (monitor handle, position) for this switch - its
+/// own `monitor`/`position` normally, or `("main", position_solo)` when
+/// `solo` (exactly one monitor attached) and the target declares one. See
+/// `Target::position_solo`'s doc comment for why "does my own monitor
+/// still resolve" isn't the right trigger - `main` always resolves, so a
+/// target that's normally full-screen there (Boards) still needs this to
+/// override its usual position, not just unresolvable ones (WezTerm).
+/// `None` means this target isn't placed at all this switch, same as a
+/// bare `target.monitor` check before this field existed.
+fn effective_destination(target: &model::Target, solo: bool) -> Option<(String, Option<toml::Value>)> {
+    if solo {
+        if let Some(position) = &target.position_solo {
+            return Some(("main".to_string(), Some(position.clone())));
+        }
+    }
+    target.monitor.clone().map(|monitor| (monitor, target.position.clone()))
+}
+
 fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_session: Option<&str>) -> Vec<String> {
     let t0 = std::time::Instant::now();
+    let solo = attached_monitor_count() == Some(1);
     let mut warnings = Vec::new();
     let mut placements = Vec::new();
     let mut pending = Vec::new();
@@ -1271,7 +1303,7 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
             continue;
         }
 
-        pending.push(target);
+        pending.push((target, effective_destination(target, solo)));
     }
 
     // Each pending target's activation is an independent blocking
@@ -1286,7 +1318,7 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
     let results: Vec<Result<Option<u32>, String>> = std::thread::scope(|scope| {
         let handles: Vec<_> = pending
             .iter()
-            .map(|target| {
+            .map(|(target, effective)| {
                 scope.spawn(move || {
                     let target_t0 = std::time::Instant::now();
                     // Only raise an `app` target's window when it isn't
@@ -1294,7 +1326,7 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
                     // raised anyway (a "peek" app that also wants
                     // placement) - see activate_target's doc comment and
                     // Target::raise's doc comment for why.
-                    let raise_app = target.monitor.is_none() || target.raise;
+                    let raise_app = effective.is_none() || target.raise;
                     // Only Boards' own activation can use this - see
                     // activate_boards_target's doc comment for why it
                     // needs its destination before raising, unlike every
@@ -1303,9 +1335,9 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
                     // reported properly below, in the placement loop that
                     // runs for every target uniformly - this is only a
                     // best-effort head start for Boards specifically.
-                    let pre_place = match (&target.driver, &target.monitor) {
-                        (model::TargetDriver::Boards { .. }, Some(monitor)) => {
-                            resolve_placement_json(cfg, monitor, &target.position).ok()
+                    let pre_place = match (&target.driver, effective) {
+                        (model::TargetDriver::Boards { .. }, Some((monitor, position))) => {
+                            resolve_placement_json(cfg, monitor, position).ok()
                         }
                         _ => None,
                     };
@@ -1324,7 +1356,7 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
             .collect()
     });
 
-    for (target, result) in pending.into_iter().zip(results) {
+    for ((target, effective), result) in pending.into_iter().zip(results) {
         let activated_pid = match result {
             Ok(pid) => pid,
             Err(e) => {
@@ -1335,7 +1367,7 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
             }
         };
 
-        let Some(monitor) = &target.monitor else { continue };
+        let Some((monitor, position)) = &effective else { continue };
         let (identity_key, identity_value): (&str, serde_json::Value) = match activated_pid {
             Some(pid) => ("pid", serde_json::json!(pid)),
             None => match target_bundle_id(&target.driver) {
@@ -1351,7 +1383,7 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
                 }
             },
         };
-        let (uuid, position_json) = match resolve_placement_json(cfg, monitor, &target.position) {
+        let (uuid, position_json) = match resolve_placement_json(cfg, monitor, position) {
             Ok(v) => v,
             Err(e) => {
                 let e = format!("target '{}': {e}", target.driver.name());
@@ -1994,6 +2026,59 @@ mod tests {
         assert_eq!(cycle_index(1, Some(0), -1), 0);
     }
 
+    fn solo_target(monitor: &str, position_solo: Option<&str>) -> model::Target {
+        model::Target {
+            driver: model::TargetDriver::Obsidian { vault: "x".into() },
+            monitor: Some(monitor.to_string()),
+            position: Some(toml::Value::String("full".to_string())),
+            position_solo: position_solo.map(|p| toml::Value::String(p.to_string())),
+            launch: false,
+            raise: false,
+            minimized: None,
+            primary: false,
+        }
+    }
+
+    #[test]
+    fn effective_destination_uses_normal_monitor_and_position_when_not_solo() {
+        let target = solo_target("lg-right", Some("left-half"));
+        assert_eq!(
+            effective_destination(&target, false),
+            Some(("lg-right".to_string(), Some(toml::Value::String("full".to_string()))))
+        );
+    }
+
+    #[test]
+    fn effective_destination_switches_to_main_and_position_solo_when_solo() {
+        let target = solo_target("lg-right", Some("left-half"));
+        assert_eq!(
+            effective_destination(&target, true),
+            Some(("main".to_string(), Some(toml::Value::String("left-half".to_string()))))
+        );
+    }
+
+    #[test]
+    fn effective_destination_ignores_solo_when_target_has_no_position_solo() {
+        // main always resolves, so a target with no position_solo (e.g.
+        // one that's never adapted for this) keeps its normal placement
+        // even when solo - this is the "no change from before this field
+        // existed" case Target::position_solo's doc comment describes.
+        let target = solo_target("main", None);
+        assert_eq!(
+            effective_destination(&target, true),
+            Some(("main".to_string(), Some(toml::Value::String("full".to_string()))))
+        );
+    }
+
+    #[test]
+    fn effective_destination_none_for_an_activate_only_target_regardless_of_solo() {
+        let mut target = solo_target("lg-right", Some("left-half"));
+        target.monitor = None;
+        target.position_solo = None;
+        assert_eq!(effective_destination(&target, false), None);
+        assert_eq!(effective_destination(&target, true), None);
+    }
+
     fn test_config(lanes: Vec<model::Lane>) -> config::Config {
         config::Config { drivers: None, monitors: std::collections::HashMap::new(), order: None, cycle_policy: model::CyclePolicy::default(), lanes, boards_targets: Vec::new(), context_ids: Vec::new(), shell_ignored_commands: Vec::new() }
     }
@@ -2014,6 +2099,7 @@ mod tests {
             driver: model::TargetDriver::Obsidian { vault: vault.to_string() },
             monitor: None,
             position: None,
+            position_solo: None,
             launch: false,
             raise: false,
             minimized: None,
@@ -2054,6 +2140,7 @@ mod tests {
             driver: model::TargetDriver::Zellij { session: None, pane },
             monitor: None,
             position: None,
+            position_solo: None,
             launch: false,
             raise: false,
             minimized: None,
@@ -2086,6 +2173,7 @@ mod tests {
             driver: model::TargetDriver::Wezterm { session: None },
             monitor: None,
             position: None,
+            position_solo: None,
             launch: false,
             raise: false,
             minimized: None,

@@ -82,6 +82,17 @@ pub struct Target {
     /// position means, only lanes-wm does.
     #[serde(default)]
     pub position: Option<toml::Value>,
+    /// Position to use instead, on `main`, when exactly one monitor is
+    /// attached - the usual `monitor`/`position` are for the multi-monitor
+    /// case (e.g. WezTerm on a now-absent external, or Boards filling all
+    /// of `main`), and neither "monitor unavailable" nor "monitor still
+    /// resolves" is the right trigger here: `main` is always attached, so
+    /// a target that's normally full-screen on it (Boards) still needs to
+    /// shrink when it's suddenly sharing the only screen with everything
+    /// else. None means this target doesn't adapt - same behavior as
+    /// before this field existed.
+    #[serde(default)]
+    pub position_solo: Option<toml::Value>,
     /// Whether to launch the app first if it isn't already running.
     /// Deliberately opt-in, not automatic: with this false (the default) a
     /// not-running app is a loud per-target failure, not a silent skip or

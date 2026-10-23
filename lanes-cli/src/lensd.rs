@@ -670,6 +670,7 @@ mod tests {
                 driver: crate::model::TargetDriver::Boards { project: project.to_string() },
                 monitor: None,
                 position: None,
+                position_solo: None,
                 launch: false,
                 raise: false,
                 minimized: None,
