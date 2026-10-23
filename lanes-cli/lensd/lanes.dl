@@ -41,8 +41,8 @@ lanes_session_missing(Lane) :-
 lanes_claude(Lane, SessionId, State, Pane, Zellij) :-
     lane_zellij(Lane, Zellij),
     zellij.session(Zellij),
-    claude_zellij(SessionId, Zellij, Pane),
-    claude_session(SessionId, State).
+    claude.zellij(SessionId, Zellij, Pane),
+    claude.session(SessionId, State).
 
 lanes_command(Lane, Zellij, Pane, State, StartedAt) :-
     lane_zellij(Lane, Zellij),
@@ -122,16 +122,16 @@ lane_watch_repo(Path, Lane) :-
 
 # Running app builds that aren't the code on disk (lensd's appctl source;
 # see PLAN-build-chip.md). An instance belongs to the lane whose repo is the
-# app's own (appctl_instance_repo), even when the changed source is in
+# app's own (appctl.instance_repo), even when the changed source is in
 # another repo (e.g. Boards built against an older dev-infra/crates/appctl).
 lanes_build_changed(Lane, LaneRepo, App, Instance, Repo, Path) :-
     lane_repo_path(Lane, LaneRepo),
-    appctl_instance_repo(App, Instance, LaneRepo),
-    appctl_instance_source(App, Instance, Repo, Path, Built),
-    appctl_source_tree(Repo, Path, Now),
+    appctl.instance_repo(App, Instance, LaneRepo),
+    appctl.instance_source(App, Instance, Repo, Path, Built),
+    appctl.source_tree(Repo, Path, Now),
     Built != Now.
 
 lanes_build_rebuilt(Lane, LaneRepo, App, Instance) :-
     lane_repo_path(Lane, LaneRepo),
-    appctl_instance_repo(App, Instance, LaneRepo),
-    appctl_instance_rebuilt(App, Instance).
+    appctl.instance_repo(App, Instance, LaneRepo),
+    appctl.instance_rebuilt(App, Instance).
