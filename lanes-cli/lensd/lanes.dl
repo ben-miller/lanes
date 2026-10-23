@@ -84,11 +84,11 @@ lanes_pane_focused(Lane, Zellij, Pane) :-
 
 lanes_repo_watched(Lane, Repo, Path) :-
     lane_repo_path(Lane, Path),
-    repo_path(Repo, Path).
+    git.repo_path(Repo, Path).
 
 lanes_repo_dirty(Lane, Repo, Path) :-
     lane_repo_path(Lane, Path),
-    repo_path(Repo, Path),
+    git.repo_path(Repo, Path),
     dirty(Repo).
 
 # dirty/has_change used to come from rules.dl's built-in default set; now
@@ -97,16 +97,16 @@ lanes_repo_dirty(Lane, Repo, Path) :-
 # content that could disappear out from under it again. Safe to define
 # here: nothing else in any loaded rule set defines them anymore.
 has_change(Repo, Kind) :-
-    change(Repo, Kind, Path).
+    git.change(Repo, Kind, Path).
 
 dirty(Repo) :-
     has_change(Repo, Kind).
 
 lanes_repo_branch(Lane, Repo, Current, Default, Path) :-
     lane_repo_path(Lane, Path),
-    repo_path(Repo, Path),
-    branch(Repo, Current),
-    default_branch(Repo, Default),
+    git.repo_path(Repo, Path),
+    git.branch(Repo, Current),
+    git.default_branch(Repo, Default),
     Current != Default.
 
 lanes_tab(Lane, Tab) :-
