@@ -1,0 +1,49 @@
+# Lanes' entries in the Dev Platform's catalog (Backstage's format; see
+# ~/src/dev-infra/PLAN-dev-platform.md). Validate with: dp catalog validate
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: lanes-cli
+  title: lanes
+  description: Contexts and lane switching - snapshot, focus, the window and session targets per context
+  tags: [rust, cli, lanes]
+  links:
+    - url: https://github.com/ben-miller/lanes
+      title: GitHub
+  annotations:
+    dev-platform/appctl-app: lanes-cli
+    dev-platform/lanes-context: lanes-dev
+    dev-platform/board: Lanes
+spec:
+  type: rust-cli
+  lifecycle: production
+  system: dev-platform
+  dependsOn: [component:appctl, resource:lanes-config]
+  consumesApis: [boards-appctl, boards-url, lensd-rule-sockets]
+---
+apiVersion: backstage.io/v1alpha1
+kind: Component
+metadata:
+  name: lanes-ui
+  title: Lanes Switch
+  description: The lane switcher dashboard, with chips from lensd
+  tags: [tauri, rust, lanes]
+  annotations:
+    dev-platform/appctl-app: lanes-ui
+    dev-platform/lanes-context: lanes-dev
+    dev-platform/board: Lanes
+spec:
+  type: tauri-app
+  lifecycle: production
+  system: dev-platform
+  dependsOn: [component:lanes-cli]
+  consumesApis: [lensd-rule-sockets]
+---
+apiVersion: backstage.io/v1alpha1
+kind: Resource
+metadata:
+  name: lanes-config
+  description: Lanes' contexts and preferences (~/.config/lanes, tracked in ~/src/infra)
+spec:
+  type: config-dir
+  system: dev-platform
