@@ -181,9 +181,11 @@ Phase 2 (see `PLAN-shell-signal.md`) will add a live `running` chip and
 
 ## lensd
 
-`lensd/lanes.dl` is Lanes' rule set for the lensd daemon (see the lensd repo's
-README). Copy or symlink it into lensd's rules directory
-(`~/.config/lensd/rules.d/lanes.dl`); lensd then serves it on
+Lanes' rule set for the lensd daemon, `lanes.dl`, lives centrally in
+`~/src/dev-infra/rules/` (it combines Lanes' contexts with Zellij, WezTerm,
+Claude, git and appctl facts, so it belongs to no single project; see
+`~/src/dev-infra/PLAN-lensd-facts.md`); lensd's config lists that directory
+and serves it on
 `~/.local/state/lensd/lanes.sock`. It exposes `lanes_session`,
 `lanes_session_running`, `lanes_claude` and `lanes_command` rows, among
 others.
@@ -206,9 +208,9 @@ stale data and no fallback.
 `lensd::snapshot_from_mirror(cfg, mirror)` builds a `LanewiseSnapshot` from the
 live rows plus Lanes' lane config. Layout (lane order, scope) comes from the
 config; panes and signals come from the `lanes_*` relations in
-`lensd/lanes.dl`, and each lane's repo watch is derived there too, via
+`~/src/dev-infra/rules/lanes.dl`, and each lane's repo watch is derived there too, via
 `lane_watch_repo` (a second, non-colliding name for the same `watch_repo`
-control relation lensd's `rules.d/repos.dl` uses for repos no lane declares
+control relation `~/src/dev-infra/rules/repos.dl` uses for repos no lane declares
 - see lensd's own README for why they can't share one relation name).
 Policy stays in Lanes: the shared `correct_signals` pass sets
 `cyclable`, `visible`, `lifecycle` and the Awaiting-to-Ready upgrade, and
