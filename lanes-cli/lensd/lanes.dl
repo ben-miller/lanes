@@ -111,7 +111,7 @@ lanes_repo_branch(Lane, Repo, Current, Default, Path) :-
 
 lanes_tab(Lane, Tab) :-
     lane_zellij(Lane, Zellij),
-    wezterm_tab_session(Tab, Zellij).
+    wezterm.tab_session(Tab, Zellij).
 
 lanes_inbox_count(Lane, Project, Count) :-
     lane_boards_project(Lane, Project),
