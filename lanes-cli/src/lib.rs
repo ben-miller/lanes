@@ -1,5 +1,6 @@
 pub mod config;
 pub mod drivers;
+pub mod facts;
 pub mod lensd;
 pub mod logging;
 pub mod model;

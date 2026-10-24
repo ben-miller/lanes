@@ -29,7 +29,7 @@ metadata:
   description: The lane switcher dashboard, with chips from lensd
   tags: [tauri, rust, lanes]
   annotations:
-    dev-platform/appctl-app: lanes-ui
+    dev-platform/appctl-app: lanes
     dev-platform/lanes-context: lanes-dev
     dev-platform/board: Lanes
 spec:

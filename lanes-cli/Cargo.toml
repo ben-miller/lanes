@@ -20,6 +20,9 @@ toml_edit = "0.22"
 kdl = "6.5.0"
 appctl = { git = "file:///Users/bmiller/src/dev-infra", branch = "master" }
 
+[dev-dependencies]
+tempfile = "3"
+
 # No `unsafe` code, so no direct C calls (~/src/projects/CONVENTIONS.md, "Rust").
 [lints.rust]
 unsafe_code = "forbid"

@@ -582,6 +582,25 @@ fn watch_paths(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
+/// Publishes Lanes' facts now, and again whenever a context or a shell
+/// record changes (debounced), for as long as the app runs.
+fn publish_lanes_facts(facts: appctl::facts::Facts) {
+    lanes::facts::publish(&facts);
+    std::thread::spawn(move || {
+        let (tx, rx) = std::sync::mpsc::channel();
+        let Ok(mut watcher) = notify::recommended_watcher(tx) else { return };
+        // Missing directories are skipped; the facts then just lack them.
+        watcher.watch(&lanes::facts::contexts_dir(), RecursiveMode::Recursive).ok();
+        watcher.watch(&lanes::facts::shell_dir(), RecursiveMode::NonRecursive).ok();
+        while rx.recv().is_ok() {
+            // A burst of writes (an editor's save, a hook's rewrite) settles first.
+            std::thread::sleep(std::time::Duration::from_millis(150));
+            while rx.try_recv().is_ok() {}
+            lanes::facts::publish(&facts);
+        }
+    });
+}
+
 pub fn run() {
     tauri::Builder::default()
         // Registered first so a second launch attempt exits as soon as
@@ -592,7 +611,14 @@ pub fn run() {
             show_main_window(app);
         }))
         .plugin(tauri_plugin_opener::init())
+        // This instance's appctl socket, publishing Lanes' facts (which lanes
+        // exist, their sessions/repos/boards, recorded shell commands) for
+        // lensd, which sees them as lanes.*. They exist while this app runs.
+        .plugin(tauri_plugin_appctl::init(appctl::config!("lanes").facts(lanes::facts::RELATIONS)))
         .setup(|app| {
+            if let Some(facts) = app.try_state::<appctl::facts::Facts>() {
+                publish_lanes_facts(facts.inner().clone());
+            }
             #[cfg(target_os = "macos")]
             app.set_activation_policy(tauri::ActivationPolicy::Accessory);
 

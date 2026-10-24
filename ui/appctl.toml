@@ -1,7 +1,7 @@
 # What `appctl up` runs in this repo (see ~/src/dev-infra/README.md):
 #   appctl up            attached; Ctrl+C stops the whole tree
 #   appctl up -d         detached; then appctl status / logs -f / down
-name = "lanes-ui"
+name = "lanes"
 
 # Same reasoning as boards/appctl.toml: tauri-plugin-single-instance hands
 # a second launch with the same bundle identifier (com.lanes.ui) off to an
