@@ -70,7 +70,7 @@ impl Lane {
 /// already has that `Target` folded into its own `targets` (see
 /// `Lane.targets`'s doc comment and `config::load_contexts`), and a
 /// board-only context is never activated/placed at all, only named.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 pub struct BoardFacet {
     pub project: String,
 }
@@ -82,7 +82,7 @@ pub struct BoardFacet {
 /// DECISIONS.md, "Context vs lane" (and PLAN-context-model.md historically)
 /// for why this - not `Lane` - is the primary type: "lane" is one optional
 /// facet a context can have, not a synonym for "context."
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct Context {
     pub id: String,
     pub lane: Option<Lane>,

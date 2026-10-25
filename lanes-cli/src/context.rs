@@ -7,56 +7,7 @@
 use std::io;
 use std::path::Path;
 
-use serde::Serialize;
-
 use crate::config;
-use crate::model;
-use crate::scope::ScopeElement;
-
-/// One context's shape, for discovery - every context (`cfg.contexts`
-/// covers every subdirectory, lane or not), not just the ones that happen
-/// to be lanes. `name` falls back from the lane's own `name` to the bare
-/// id - a board-only context has no display name slot of its own (see
-/// DECISIONS.md, "Context vs lane").
-#[derive(Debug, Clone, Serialize, PartialEq)]
-pub struct Summary {
-    pub id: String,
-    pub name: String,
-    /// `None` if this context has no lane facet at all (a board-only
-    /// context) - distinct from `Some(false)`, an inactive lane.
-    pub active: Option<bool>,
-    pub session: Option<String>,
-    pub repo: Option<String>,
-    pub board_project: Option<String>,
-}
-
-/// Every context, in `cfg.order`'s sequence (same fallback - alphabetical
-/// by id, after any listed ones - `sort_by_order` uses elsewhere), so this
-/// matches what you'd actually see cycling through them, not directory
-/// listing order.
-pub fn list(cfg: &config::Config) -> Vec<Summary> {
-    let mut contexts: Vec<&model::Context> = cfg.contexts.iter().collect();
-    if let Some(order) = &cfg.order {
-        contexts.sort_by_key(|c| order.iter().position(|o| o == &c.id).unwrap_or(order.len()));
-    } else {
-        contexts.sort_by(|a, b| a.id.cmp(&b.id));
-    }
-
-    contexts
-        .into_iter()
-        .map(|ctx| {
-            let lane = ctx.lane.as_ref();
-            Summary {
-                id: ctx.id.clone(),
-                name: lane.map(|l| l.name.clone()).unwrap_or_else(|| ctx.id.clone()),
-                active: lane.map(|l| l.active),
-                session: lane.and_then(|l| l.terminal_session()).map(String::from),
-                repo: lane.and_then(|l| l.scope.iter().find_map(ScopeElement::repo_path)).map(String::from),
-                board_project: ctx.board.as_ref().map(|b| b.project.clone()),
-            }
-        })
-        .collect()
-}
 
 /// Sets a context's display name everywhere it's actually shown today:
 /// `lane.toml`'s `name` (if this context is a lane), `zellij-tabs.toml`'s
@@ -228,72 +179,4 @@ mod tests {
         assert!(!updated);
     }
 
-    fn lane(id: &str, name: &str, active: bool, session: &str, repo: Option<&str>) -> model::Lane {
-        let mut scope = vec![ScopeElement::zellij_session(session)];
-        if let Some(repo) = repo {
-            scope.push(ScopeElement::repo(repo));
-        }
-        model::Lane { id: id.to_string(), name: name.to_string(), active, scope, targets: vec![], layout_template: None }
-    }
-
-    fn board_only_context(id: &str, project: &str) -> model::Context {
-        model::Context { id: id.to_string(), lane: None, board: Some(model::BoardFacet { project: project.to_string() }) }
-    }
-
-    fn lane_context(lane: model::Lane) -> model::Context {
-        model::Context { id: lane.id.clone(), lane: Some(lane), board: None }
-    }
-
-    fn list_test_config(contexts: Vec<model::Context>, order: Option<Vec<&str>>) -> config::Config {
-        config::Config {
-            drivers: None,
-            monitors: std::collections::HashMap::new(),
-            order: order.map(|o| o.into_iter().map(String::from).collect()),
-            cycle_policy: model::CyclePolicy::default(),
-            contexts,
-            lanes: Vec::new(),
-            boards_targets: Vec::new(),
-            context_ids: Vec::new(),
-            shell_ignored_commands: Vec::new(),
-        }
-    }
-
-    #[test]
-    fn list_includes_a_board_only_context_with_no_lane_toml() {
-        let cfg = list_test_config(vec![board_only_context("app-ideas", "App Ideas")], None);
-        let summaries = list(&cfg);
-        assert_eq!(summaries.len(), 1);
-        let s = &summaries[0];
-        assert_eq!(s.id, "app-ideas");
-        // No lane facet -> no display name slot of its own, falls back to
-        // the bare id (exactly the drift doctor's display-name-consistency
-        // check exists to surface, not something list papers over).
-        assert_eq!(s.name, "app-ideas");
-        assert_eq!(s.active, None);
-        assert_eq!(s.board_project, Some("App Ideas".to_string()));
-    }
-
-    #[test]
-    fn list_reports_a_lanes_own_facets() {
-        let cfg = list_test_config(vec![lane_context(lane("infra", "Infra", true, "infra", Some("~/src/infra")))], None);
-        let summaries = list(&cfg);
-        assert_eq!(summaries.len(), 1);
-        let s = &summaries[0];
-        assert_eq!(s.name, "Infra");
-        assert_eq!(s.active, Some(true));
-        assert_eq!(s.session, Some("infra".to_string()));
-        assert_eq!(s.repo, Some("~/src/infra".to_string()));
-        assert_eq!(s.board_project, None);
-    }
-
-    #[test]
-    fn list_follows_order_falling_back_to_alphabetical_for_unlisted_ids() {
-        let cfg = list_test_config(
-            vec![lane_context(lane("b", "B", true, "b", None)), lane_context(lane("a", "A", true, "a", None))],
-            Some(vec!["b", "a"]),
-        );
-        let summaries = list(&cfg);
-        let ids: Vec<&str> = summaries.iter().map(|s| s.id.as_str()).collect();
-        assert_eq!(ids, vec!["b", "a"]);
-    }
 }

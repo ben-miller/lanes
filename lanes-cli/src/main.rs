@@ -44,8 +44,14 @@ enum Command {
         fix: bool,
     },
 
-    /// List configured lanes and their facets
-    List {
+    /// List every context - bare ids only. `-l`/`--json` for full detail
+    /// (every scope element, every target's placement), including
+    /// board-only contexts (a project tracked only in Boards, no lane.toml).
+    Ls {
+        /// Full detail, not just ids
+        #[arg(short = 'l', long)]
+        long: bool,
+
         /// Output as JSON
         #[arg(long)]
         json: bool,
@@ -221,15 +227,6 @@ enum ComponentCommand {
 
 #[derive(Subcommand)]
 enum ContextCommand {
-    /// List every context - not just lanes (board-only contexts like a
-    /// project tracked only in Boards show up too), with its id, display
-    /// name, and which facets it actually has
-    Ls {
-        /// Output as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
     /// Set a context's display name in every file it's shown in today:
     /// lane.toml's `name`, zellij-tabs.toml's `name` for its terminal
     /// session, and its board.yaml `title` - whichever of those apply.
@@ -380,9 +377,9 @@ fn main() {
 
         Command::Doctor { fix } => cmd::doctor::run(fix),
 
-        Command::List { json } => {
+        Command::Ls { long, json } => {
             let cfg = lanes::config::Config::load();
-            cmd::list::run(&cfg.lanes, json);
+            cmd::ls::run(&cfg.contexts, long, json);
         }
 
         Command::Snapshot { out } => {
@@ -403,34 +400,6 @@ fn main() {
         }
 
         Command::Context { command } => match command {
-            ContextCommand::Ls { json } => {
-                let cfg = lanes::config::Config::load();
-                let summaries = lanes::context::list(&cfg);
-                if json {
-                    println!("{}", serde_json::to_string_pretty(&summaries).unwrap());
-                } else if summaries.is_empty() {
-                    eprintln!("No contexts found in ~/.config/lanes/contexts/");
-                } else {
-                    for s in &summaries {
-                        let mark = match s.active {
-                            Some(true) => "x",
-                            Some(false) => " ",
-                            None => "-",
-                        };
-                        println!("[{mark}] {} ({})", s.id, s.name);
-                        if let Some(session) = &s.session {
-                            println!("  session         {session}");
-                        }
-                        if let Some(repo) = &s.repo {
-                            println!("  repo            {repo}");
-                        }
-                        if let Some(project) = &s.board_project {
-                            println!("  board           {project}");
-                        }
-                    }
-                }
-            }
-
             ContextCommand::SetName { id, name } => {
                 let cfg = lanes::config::Config::load();
                 match lanes::context::set_display_name(&cfg, &id, &name) {
