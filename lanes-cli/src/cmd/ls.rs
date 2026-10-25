@@ -26,8 +26,7 @@ pub fn run(contexts: &[Context], long: bool, json: bool) {
             Some(_) => " ",
             None => "-",
         };
-        let name = ctx.lane.as_ref().map(|l| l.name.as_str()).unwrap_or(&ctx.id);
-        println!("[{mark}] {} ({name})", ctx.id);
+        println!("[{mark}] {} ({})", ctx.id, display_name(ctx));
 
         if !long {
             continue;
@@ -70,5 +69,53 @@ pub fn run(contexts: &[Context], long: bool, json: bool) {
             // vs lane").
             println!("  board           project={}", board.project);
         }
+    }
+}
+
+/// A lane's own name wins; otherwise fall back to the board's project
+/// (already a real human-readable name, same one board.yaml's title has -
+/// see DECISIONS.md, "Display names stay denormalized") before finally
+/// falling back to the bare, kebab-case id, which is only ever a last
+/// resort.
+fn display_name(ctx: &Context) -> &str {
+    ctx.lane
+        .as_ref()
+        .map(|l| l.name.as_str())
+        .or_else(|| ctx.board.as_ref().map(|b| b.project.as_str()))
+        .unwrap_or(&ctx.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use lanes::model::BoardFacet;
+
+    #[test]
+    fn display_name_prefers_the_lane_name_over_the_board_project() {
+        let ctx = Context {
+            id: "ctx".to_string(),
+            lane: Some(lanes::model::Lane {
+                id: "ctx".to_string(),
+                name: "Ctx".to_string(),
+                active: true,
+                scope: vec![],
+                targets: vec![],
+                layout_template: None,
+            }),
+            board: Some(BoardFacet { project: "Ctx Board".to_string() }),
+        };
+        assert_eq!(display_name(&ctx), "Ctx");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_the_board_project_for_a_board_only_context() {
+        let ctx = Context { id: "app-ideas".to_string(), lane: None, board: Some(BoardFacet { project: "App Ideas".to_string() }) };
+        assert_eq!(display_name(&ctx), "App Ideas");
+    }
+
+    #[test]
+    fn display_name_falls_back_to_the_bare_id_when_there_is_no_facet_at_all() {
+        let ctx = Context { id: "bare".to_string(), lane: None, board: None };
+        assert_eq!(display_name(&ctx), "bare");
     }
 }
