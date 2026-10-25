@@ -91,6 +91,7 @@ enum Command {
 
     /// Scripted edits to a context's own files - a safer alternative to
     /// hand-editing lane.toml/zellij-tabs.toml/board.yaml directly
+    #[command(name = "ctx")]
     Context {
         #[command(subcommand)]
         command: ContextCommand,
