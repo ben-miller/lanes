@@ -1,9 +1,10 @@
 # The dev app (and the lanes-cli watcher), under process-compose (what
-# runs: ../process-compose.yaml), attached in its TUI. For background use
-# (including from Claude): `process-compose up -D`, then
-# `process logs lanes -f` / `attach` / `down`.
+# runs: ../process-compose.yaml): starts them in the background and follows
+# their logs; Ctrl+C stops following, not them. Then, from anywhere:
+# `dp ps logs lanes -f`, `dp ps down -p lanes`. (Just starting them, as
+# Claude does: `dp ps up -d`.)
 dev:
-	cd .. && process-compose up
+	dp ps up
 
 install:
 	#!/usr/bin/env bash

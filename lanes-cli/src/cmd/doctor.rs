@@ -46,6 +46,7 @@ pub fn run(fix: bool) {
         check_layout_templates(&cfg, &lanes::config::config_dir().join("layout-templates")),
         check_lane_order(&cfg),
         check_lane_order_vs_ztabs(&cfg),
+        check_display_name_consistency(&cfg, &boards_dir),
         check_git_default_branches(&cfg),
         check_lanes_wm(),
         check_monitor_config(&cfg),
@@ -609,6 +610,25 @@ fn ztabs_session_order() -> Option<Vec<String>> {
     )
 }
 
+/// `ztabs`' own display name per session - same source as
+/// `ztabs_session_order`, just paired with `name` instead of position.
+fn ztabs_names_by_session() -> Option<std::collections::HashMap<String, String>> {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let path = PathBuf::from(home).join(".config/infra/zellij-tabs.toml");
+    let content = std::fs::read_to_string(path).ok()?;
+    let doc: toml::Value = toml::from_str(&content).ok()?;
+    let tabs = doc.get("tabs")?.as_array()?;
+    Some(
+        tabs.iter()
+            .filter_map(|t| {
+                let session = t.get("session")?.as_str()?.to_string();
+                let name = t.get("name")?.as_str()?.to_string();
+                Some((session, name))
+            })
+            .collect(),
+    )
+}
+
 /// `order`, restricted to whichever entries also appear in `other`, keeping
 /// `order`'s own relative sequence. Used to compare two orderings that may
 /// not cover exactly the same set of sessions (e.g. contexts.toml has a lane
@@ -658,6 +678,71 @@ fn check_lane_order_vs_ztabs(cfg: &lanes::config::Config) -> Check {
             hint: Some(
                 "not auto-fixed - edit `order` in ~/.config/lanes/contexts.toml or the tab order in \
                  ~/.config/infra/zellij-tabs.toml so the two agree."
+                    .to_string(),
+            ),
+        }
+    }
+}
+
+/// `<project>/board.yaml`'s `title`, if the file exists and parses - via
+/// `noyalib`, the same crate Boards itself uses for this file.
+fn board_yaml_title(data_dir: &std::path::Path, project: &str) -> Option<String> {
+    #[derive(serde::Deserialize)]
+    struct BoardYamlMeta {
+        title: Option<String>,
+    }
+    let content = std::fs::read_to_string(data_dir.join(project).join("board.yaml")).ok()?;
+    let meta: BoardYamlMeta = noyalib::from_str(&content).ok()?;
+    meta.title
+}
+
+/// A context's display name is deliberately denormalized across up to
+/// three files lanes doesn't own the sync between: `lane.toml`'s `name`,
+/// `zellij-tabs.toml`'s `name` (keyed by session), and `board.yaml`'s
+/// `title` (Boards' own file, editable from inside Boards itself). See
+/// DECISIONS.md, "Display names stay denormalized" - this check exists
+/// instead of a sync mechanism: never auto-fixed, never fails the run,
+/// just surfaces drift so fixing it (in whichever file is actually stale)
+/// is a choice, not a silent surprise.
+fn check_display_name_consistency(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Check {
+    let ztabs_names = ztabs_names_by_session().unwrap_or_default();
+    let mut mismatches = Vec::new();
+
+    for lane in &cfg.lanes {
+        let Some(session) = lane.terminal_session() else { continue };
+        if let Some(ztabs_name) = ztabs_names.get(session) {
+            if ztabs_name != &lane.name {
+                mismatches.push(format!(
+                    "{}: lane.toml says \"{}\", zellij-tabs.toml says \"{}\"",
+                    lane.id, lane.name, ztabs_name
+                ));
+            }
+        }
+    }
+
+    for (id, name, target) in &cfg.boards_targets {
+        let lanes::model::TargetDriver::Boards { project } = &target.driver else { continue };
+        if let Some(title) = board_yaml_title(data_dir, project) {
+            if &title != name {
+                mismatches.push(format!("{id}: lanes calls it \"{name}\", board.yaml's title is \"{title}\""));
+            }
+        }
+    }
+
+    if mismatches.is_empty() {
+        Check {
+            label: "display name consistency",
+            status: Status::Ok,
+            message: "lane.toml, zellij-tabs.toml, and board.yaml titles agree wherever compared".to_string(),
+            hint: None,
+        }
+    } else {
+        Check {
+            label: "display name consistency",
+            status: Status::Warn,
+            message: mismatches.join("; "),
+            hint: Some(
+                "display names are deliberately denormalized, not auto-fixed - edit whichever file is stale"
                     .to_string(),
             ),
         }
@@ -1245,6 +1330,40 @@ mod tests {
         let check = check_boards_projects(&cfg, &dir);
         assert!(matches!(check.status, Status::Warn));
         assert!(check.message.contains("infra-board"));
+    }
+
+    #[test]
+    fn display_name_consistency_ok_when_board_yaml_title_matches_the_lane_name() {
+        let dir = boards_test_dir("display-name-match");
+        std::fs::create_dir_all(dir.join("infra-board")).unwrap();
+        std::fs::write(dir.join("infra-board/board.yaml"), "title: \"Infra\"\n").unwrap();
+
+        let cfg = test_config(vec![Lane { targets: vec![boards_target("infra-board")], ..lane("infra", "Infra", true, "infra") }]);
+        let check = check_display_name_consistency(&cfg, &dir);
+        assert!(matches!(check.status, Status::Ok), "{:?}", check.message);
+    }
+
+    #[test]
+    fn display_name_consistency_warns_when_board_yaml_title_disagrees_with_the_lane_name() {
+        let dir = boards_test_dir("display-name-mismatch");
+        std::fs::create_dir_all(dir.join("infra-board")).unwrap();
+        std::fs::write(dir.join("infra-board/board.yaml"), "title: \"Something Else\"\n").unwrap();
+
+        let cfg = test_config(vec![Lane { targets: vec![boards_target("infra-board")], ..lane("infra", "Infra", true, "infra") }]);
+        let check = check_display_name_consistency(&cfg, &dir);
+        assert!(matches!(check.status, Status::Warn));
+        assert!(check.message.contains("Infra") && check.message.contains("Something Else"), "{}", check.message);
+    }
+
+    #[test]
+    fn display_name_consistency_ok_when_board_yaml_is_missing() {
+        // check_boards_projects already owns "the file doesn't exist at
+        // all" - this check only compares names when there's something to
+        // compare against.
+        let dir = boards_test_dir("display-name-no-file");
+        let cfg = test_config(vec![Lane { targets: vec![boards_target("infra-board")], ..lane("infra", "Infra", true, "infra") }]);
+        let check = check_display_name_consistency(&cfg, &dir);
+        assert!(matches!(check.status, Status::Ok), "{:?}", check.message);
     }
 
     #[test]

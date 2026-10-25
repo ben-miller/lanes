@@ -78,3 +78,24 @@ itself discovered mid-request (`activate_target`'s return type grew an
 `Option<u32>` for this) - a bundle ID can only ever resolve the installed
 copy, so placing a `just dev` window at all required addressing it by the
 specific process Lanes just talked to, not by app identity.
+
+## Display names stay denormalized
+
+One context's human-facing name lives in up to three places lanes doesn't
+own the sync between: `lane.toml`'s `name`, `zellij-tabs.toml`'s `name`
+(a different tool's config), and `board.yaml`'s `title` (Boards' own data
+file, editable from inside Boards itself, in a directory lanes only ever
+*points at* via `board.toml`'s `project` key - see `board.toml`/`board.yaml`
+in the lanes-cli README's "Target drivers" section for why those are two
+separate files at all). A CRUD layer for contexts (rename, add, remove)
+could sync all three on every write, but that would mean forcing a
+specific relationship between them (always identical) that isn't actually
+true today in every case - a "<Project> Dev" lane legitimately shares a
+plain "<Project>" Boards project, for instance.
+
+Resolved by *not* syncing: each file stays independently editable, and
+`lanes doctor`'s "display name consistency" check just surfaces drift
+(lane.toml vs zellij-tabs.toml by session, lane display name vs that
+context's board.yaml title) as a warning - never auto-fixed, never fails
+the run. Fixing a real mismatch is a choice made by hand, in whichever
+file is actually stale, not something the tooling decides for you.

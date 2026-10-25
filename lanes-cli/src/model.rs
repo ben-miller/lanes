@@ -152,7 +152,7 @@ pub enum TargetDriver {
     },
     /// Open a specific Obsidian vault via its `obsidian://` URI.
     Obsidian { vault: String },
-    /// Switch Boards (a standalone kanban app, `com.bmiller.boards`) to a
+    /// Switch Boards (a standalone kanban app, `com.dev-platform.boards`) to a
     /// specific project via its `boards://` deep link. `project` is matched
     /// by folder name under Boards' own data root, exactly as Boards'
     /// `list_projects` returns it - same identity convention as `vault`

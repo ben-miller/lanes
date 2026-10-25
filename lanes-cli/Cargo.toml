@@ -18,7 +18,12 @@ clap = { version = "4", features = ["derive"] }
 toml = { version = "0.8", default-features = false, features = ["parse"] }
 toml_edit = "0.22"
 kdl = "6.5.0"
+regex = "1"
 appctl = { git = "file:///Users/bmiller/src/dev-infra", branch = "master" }
+# Reads board.yaml's title (doctor's display-name-consistency check) - the
+# same crate Boards itself uses for this exact file format, not a second
+# YAML library with its own parsing quirks.
+noyalib = "0.0"
 
 [dev-dependencies]
 tempfile = "3"

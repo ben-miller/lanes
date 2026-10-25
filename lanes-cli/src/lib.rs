@@ -979,7 +979,7 @@ fn target_bundle_id(driver: &model::TargetDriver) -> Option<&str> {
     match driver {
         model::TargetDriver::Wezterm { .. } => Some("com.github.wez.wezterm"),
         model::TargetDriver::Obsidian { .. } => Some("md.obsidian"),
-        model::TargetDriver::Boards { .. } => Some("com.bmiller.boards"),
+        model::TargetDriver::Boards { .. } => Some("com.dev-platform.boards"),
         model::TargetDriver::Sourcetree { .. } => Some("com.torusknot.SourceTreeNotMAS"),
         model::TargetDriver::Vscode { .. } => Some("com.microsoft.VSCode"),
         // Only known if the config gave us one - unlike the drivers above,
@@ -988,6 +988,20 @@ fn target_bundle_id(driver: &model::TargetDriver) -> Option<&str> {
         model::TargetDriver::App { bundle_id, .. } => bundle_id.as_deref(),
         model::TargetDriver::Zellij { .. } => None,
     }
+}
+
+/// A regex matching an Obsidian window's title for this specific vault -
+/// "<note> - <vault> - Obsidian <app version>", confirmed live, e.g.
+/// "Inbox - Formation - Obsidian 1.14.5". No trailing `$` anchor right
+/// after "Obsidian" itself, or every title would silently fail to match
+/// and the window would just stay wherever it already was, since an
+/// upgrade changes that version suffix. Requires the vault name to be
+/// preceded by either start-of-string or the literal "- " separator, not
+/// just a word boundary: a word boundary alone would still let "Formation"
+/// match inside "My Formation", since both are preceded by one; requiring
+/// the separator itself doesn't.
+fn obsidian_title_pattern(vault: &str) -> String {
+    format!(r"(^|- ){} - Obsidian\b", regex::escape(vault))
 }
 
 /// Percent-encode everything but RFC 3986's unreserved characters. Minimal,
@@ -1393,15 +1407,33 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
                 continue;
             }
         };
-        // `focused: true`, never `title` - the whole point of the activate
-        // step above was to deterministically make the right window
-        // frontmost first, so placement just acts on whatever that left
-        // focused (lanes-wm's `--focused` selector).
+        // `focused: true` is right for a single-window app: the activate
+        // step above deterministically made the right window frontmost
+        // first, so placement just acts on whatever that left focused
+        // (lanes-wm's `--focused` selector). But Obsidian can have several
+        // windows at once (one vault per window, "Open in new window"), and
+        // `open obsidian://...` returns as soon as it hands off to Launch
+        // Services - it doesn't wait for that vault's window to actually
+        // become focused, so `--focused` placement right after is racy and
+        // can grab a different vault's window instead. Obsidian's title is
+        // always "<note> - <vault> - Obsidian" (or just "<vault> -
+        // Obsidian" with no note open), so a title regex keyed on the vault
+        // name sidesteps the race entirely instead of needing one.
         let mut placement = serde_json::Map::new();
         placement.insert(identity_key.to_string(), identity_value);
         placement.insert("monitor".to_string(), serde_json::json!(uuid));
         placement.insert("position".to_string(), position_json);
-        placement.insert("focused".to_string(), serde_json::json!(true));
+        match &target.driver {
+            model::TargetDriver::Obsidian { vault } => {
+                placement.insert(
+                    "title".to_string(),
+                    serde_json::json!(obsidian_title_pattern(vault)),
+                );
+            }
+            _ => {
+                placement.insert("focused".to_string(), serde_json::json!(true));
+            }
+        }
         placements.push(serde_json::Value::Object(placement));
     }
 
@@ -1854,12 +1886,33 @@ mod tests {
         );
         assert_eq!(
             target_bundle_id(&model::TargetDriver::Boards { project: "x".into() }),
-            Some("com.bmiller.boards")
+            Some("com.dev-platform.boards")
         );
         assert_eq!(
             target_bundle_id(&model::TargetDriver::Vscode { folder: "x".into() }),
             Some("com.microsoft.VSCode")
         );
+    }
+
+    #[test]
+    fn obsidian_title_pattern_matches_real_titles_version_suffix_and_all() {
+        let re = regex::Regex::new(&obsidian_title_pattern("Formation")).unwrap();
+        // Confirmed live via `osascript ... get name of every window`:
+        // Obsidian's title always carries a trailing app version.
+        assert!(re.is_match("Inbox - Formation - Obsidian 1.14.5"));
+        assert!(re.is_match("Formation - Obsidian 1.14.5"));
+        // A different vault whose name happens to contain this one as a
+        // substring must not match - the whole reason for the `\b` before
+        // the vault name (the one after "Obsidian" alone isn't enough to
+        // stop this, since "Obsidian" is always a whole word either way).
+        assert!(!re.is_match("Daily Note - My Formation - Obsidian 1.14.5"));
+        assert!(!re.is_match("Daily Note - Planning - Obsidian 1.14.5"));
+    }
+
+    #[test]
+    fn obsidian_title_pattern_escapes_regex_metacharacters_in_the_vault_name() {
+        let re = regex::Regex::new(&obsidian_title_pattern("Self (Formation)")).unwrap();
+        assert!(re.is_match("Note - Self (Formation) - Obsidian 1.14.5"));
     }
 
     #[test]
