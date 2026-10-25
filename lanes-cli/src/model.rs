@@ -63,6 +63,32 @@ impl Lane {
     }
 }
 
+/// A context's Boards projection - which project it names (`board.toml`'s
+/// `project`). Deliberately just the project string, not the full `Target`
+/// `board.toml` also carries (monitor/position/raise/...): nothing reads
+/// those fields off a context's board facet directly - a lane with a board
+/// already has that `Target` folded into its own `targets` (see
+/// `Lane.targets`'s doc comment and `config::load_contexts`), and a
+/// board-only context is never activated/placed at all, only named.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BoardFacet {
+    pub project: String,
+}
+
+/// The real top-level unit: one `~/.config/lanes/contexts/<id>/` directory,
+/// with whichever of its facets are actually present. `lane`/`board` are
+/// independent - a context can be a lane with no board, a board with no
+/// lane (e.g. a project tracked only in Boards), or both. See
+/// DECISIONS.md, "Context vs lane" (and PLAN-context-model.md historically)
+/// for why this - not `Lane` - is the primary type: "lane" is one optional
+/// facet a context can have, not a synonym for "context."
+#[derive(Clone, Debug)]
+pub struct Context {
+    pub id: String,
+    pub lane: Option<Lane>,
+    pub board: Option<BoardFacet>,
+}
+
 /// One thing a lane wants activated (made frontmost/focused) on lane focus,
 /// and optionally placed on a monitor afterward. Every driver is the same
 /// shape - a name plus that driver's own fields - so adding a new app means

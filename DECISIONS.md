@@ -99,3 +99,35 @@ Resolved by *not* syncing: each file stays independently editable, and
 context's board.yaml title) as a warning - never auto-fixed, never fails
 the run. Fixing a real mismatch is a choice made by hand, in whichever
 file is actually stale, not something the tooling decides for you.
+
+## Context vs lane: context is the primary type, lane is one of its facets
+
+"Lane" and "context" used to be treated as nearly synonymous - `Config`
+stored `lanes: Vec<Lane>` as if it were the primary collection, with a
+context that happened to have no `lane.toml` (a board-only context like
+`app-ideas`) handled as a bolted-on special case: a *second*, independent
+directory scan (`context_board_targets`, since removed) re-read
+`board.toml` *and* `lane.toml` again from scratch, purely to also catch
+contexts the first scan (`load_lanes`, since removed, which required
+`lane.toml` to exist at all) skipped entirely. Two scans of the same
+directories computing overlapping data, because there was no type that
+could represent "has a board, may or may not have a lane."
+
+"Lane" is one optional facet a context can have - the same tier as having
+a board or a tab/session - not a synonym for "context" itself. Resolved by
+making `Context { id, lane: Option<Lane>, board: Option<BoardFacet> }` (see
+`model::Context`) the primary type, built by one scan
+(`config::load_contexts`) that reads each file once. `Config.lanes`/
+`boards_targets`/`context_ids` still exist, now as cheap in-memory
+derivations of `contexts` (`derive_lanes`, `derive_boards_targets`) rather
+than separate scans - kept so the many existing callers shaped around
+"just the lanes" don't all need rewriting at once, but anything new should
+read `cfg.contexts` directly (see `context::list`/`context::set_display_name`,
+built this way from the start).
+
+`BoardFacet` deliberately carries only `project` (a String), not the full
+placement `Target` `board.toml` also has (monitor/position/raise/...):
+nothing anywhere reads those fields off a context's board facet directly -
+a lane with a board already has that `Target` folded into its own
+`targets` by `load_contexts`, and a board-only context is only ever named,
+never activated or placed.

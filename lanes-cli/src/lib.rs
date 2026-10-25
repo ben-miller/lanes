@@ -2160,7 +2160,17 @@ mod tests {
     }
 
     fn test_config(lanes: Vec<model::Lane>) -> config::Config {
-        config::Config { drivers: None, monitors: std::collections::HashMap::new(), order: None, cycle_policy: model::CyclePolicy::default(), lanes, boards_targets: Vec::new(), context_ids: Vec::new(), shell_ignored_commands: Vec::new() }
+        config::Config {
+            drivers: None,
+            monitors: std::collections::HashMap::new(),
+            order: None,
+            cycle_policy: model::CyclePolicy::default(),
+            contexts: Vec::new(),
+            lanes,
+            boards_targets: Vec::new(),
+            context_ids: Vec::new(),
+            shell_ignored_commands: Vec::new(),
+        }
     }
 
     fn lane_with_target(id: &str, target: model::Target) -> model::Lane {

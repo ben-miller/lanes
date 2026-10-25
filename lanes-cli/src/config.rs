@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use serde::de::DeserializeOwned;
 use serde::Deserialize;
 
-use crate::model::{CyclePolicy, Lane, Target, TargetDriver};
+use crate::model::{BoardFacet, Context, CyclePolicy, Lane, Target, TargetDriver};
 use crate::scope::ScopeElement;
 
 #[derive(Clone)]
@@ -28,15 +28,25 @@ pub struct Config {
     /// Which candidate list `lanes cycle` steps through - see
     /// `CyclePolicy`'s own doc comment.
     pub cycle_policy: CyclePolicy,
-    /// Discovered lane definitions - only contexts that actually have a
-    /// `lane.toml` (see `load_lanes`). A context with no `lane.toml` simply
+    /// Every context, lane or not - the primary, single-scan view (see
+    /// `load_contexts`, `model::Context`). `lanes`/`boards_targets`/
+    /// `context_ids` below are cheap derivations of this, kept only so the
+    /// many existing callers shaped around "just the lanes" or "just the
+    /// boards targets" don't all need rewriting at once - reach for this
+    /// field directly in anything new.
+    pub contexts: Vec<Context>,
+    /// Discovered lane definitions - only contexts whose `lane` facet is
+    /// `Some` (see `model::Context`). A context with no `lane.toml` simply
     /// isn't a lane: it never appears here, regardless of what other facets
     /// (`tab.toml`, `board.toml`) it has.
     pub lanes: Vec<Lane>,
-    /// Every context's Boards target (`board.toml`), read directly and
-    /// independently of `lanes` above - a context doesn't need a
-    /// `lane.toml` for Boards materialization/ordering to manage it (see
-    /// `context_board_targets`). `(context id, display name, target)`.
+    /// Every context's Boards target, derived from `contexts`' `board`
+    /// facets - a context doesn't need a `lane.toml` for Boards
+    /// materialization/ordering to manage it. `(context id, display name,
+    /// target)`; the target's non-`driver` fields (monitor/position/...)
+    /// are never meaningful here - nothing reads them off this list, only
+    /// `.driver`'s `project` - a lane's own placement already lives in its
+    /// `targets` instead.
     pub boards_targets: Vec<(String, String, Target)>,
     /// Every context directory's id, regardless of which facets (if any) it
     /// has - what `order` is actually checked against (see
@@ -64,13 +74,14 @@ impl Config {
         let templates_dir = config_dir().join("layout-templates");
         let default_targets = load_layout_template(&templates_dir, "default");
         let contexts_dir = config_dir().join("contexts");
-        let mut lanes = load_lanes(&contexts_dir, &templates_dir, &default_targets);
-        let boards_targets = context_board_targets(&contexts_dir);
-        let context_ids = all_context_ids(&contexts_dir);
+        let contexts = load_contexts(&contexts_dir, &templates_dir, &default_targets);
+        let mut lanes = derive_lanes(&contexts);
+        let boards_targets = derive_boards_targets(&contexts);
+        let context_ids = contexts.iter().map(|c| c.id.clone()).collect();
         if let Some(order) = &order {
             sort_by_order(&mut lanes, order);
         }
-        Self { drivers, monitors, order, cycle_policy, lanes, boards_targets, context_ids, shell_ignored_commands }
+        Self { drivers, monitors, order, cycle_policy, contexts, lanes, boards_targets, context_ids, shell_ignored_commands }
     }
 
     pub fn monitor_uuid(&self, handle: &str) -> Option<&str> {
@@ -123,7 +134,7 @@ impl Config {
 /// toml_edit rather than the parse-only `toml` crate so the rest of the
 /// file (formatting, key order, any future comments) is left untouched -
 /// these files are hand-maintained. `lane.toml` is an optional facet (see
-/// `load_lanes`), so a context that's never had one yet gets a fresh file
+/// `load_contexts`), so a context that's never had one yet gets a fresh file
 /// containing just this one key, not an error.
 pub fn set_lane_active(lane_id: &str, active: bool) -> std::io::Result<()> {
     let path = config_dir().join("contexts").join(lane_id).join("lane.toml");
@@ -137,7 +148,7 @@ pub fn set_lane_active(lane_id: &str, active: bool) -> std::io::Result<()> {
     // Write-then-rename: the Lanes Switch fs-watcher reads this dir the
     // instant it sees a change, and a torn read makes toml parsing fail,
     // which drops the lane from that refresh's snapshot entirely (see
-    // load_lanes) - the toggle appears to flicker or not stick. rename(2)
+    // load_contexts) - the toggle appears to flicker or not stick. rename(2)
     // is atomic on one filesystem. Same fix as state::atomic_write.
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, doc.to_string())?;
@@ -151,6 +162,7 @@ impl Default for Config {
             monitors: HashMap::new(),
             order: None,
             cycle_policy: CyclePolicy::default(),
+            contexts: Vec::new(),
             lanes: Vec::new(),
             boards_targets: Vec::new(),
             context_ids: Vec::new(),
@@ -207,7 +219,7 @@ struct ContextsConfig {
 /// is not a lane - it's invisible to `cfg.lanes`, the dashboard, and
 /// cycling entirely, even though its other facets (`tab.toml`,
 /// `board.toml`) are still read directly for their own purposes (see
-/// `context_board_targets`). Having *any* `lane.toml`, even an empty one,
+/// `load_contexts`). Having *any* `lane.toml`, even an empty one,
 /// is what opts a context in - its own `active` key (if present) then only
 /// controls whether that real lane is currently shown/cycled to, same as
 /// before. Identity (the old `id` field) isn't part of this anymore - it's
@@ -334,9 +346,9 @@ fn merge_targets(defaults: &[Target], lane_targets: Vec<Target>) -> Vec<Target> 
 
 /// `<templates_dir>/<name>.toml`'s targets - used both for the always-on
 /// `"default"` template (`Config::load`) and for a context's optional
-/// `layout_template` (`load_lanes`). `templates_dir` is always
+/// `layout_template` (`load_contexts`). `templates_dir` is always
 /// `config_dir().join("layout-templates")` outside tests - a parameter for
-/// the same reason `load_lanes`'s `dir` is (see its doc comment). Absent/
+/// the same reason `load_contexts`'s `dir` is (see its doc comment). Absent/
 /// malformed behaves exactly like any other facet file (`read_facet`) - a
 /// missing or broken template just contributes nothing, it's `doctor`'s job
 /// (not this function's) to flag a context referencing one that doesn't
@@ -393,24 +405,25 @@ fn read_board_target(path: &Path) -> Option<Target> {
 /// Every subdirectory of `dir` (always `config_dir().join("contexts")`
 /// outside tests - taken as a parameter purely so tests can point it at a
 /// throwaway tree instead of mutating `$HOME`, which would race every
-/// other test reading it) is a *candidate* context; the directory name *is*
-/// its id (no separate field to hand-write, and so nothing to disagree with
-/// it - see LaneToml's doc comment). Only a context with an actual
-/// `lane.toml` becomes a `Lane` here - presence, not content, is what opts
-/// a context into being a lane at all (an empty `lane.toml` still counts;
-/// `read_facet` alone can't tell "file absent" apart from "file present but
-/// empty", both deserializing to `LaneToml::default()`, hence the separate
-/// existence check). A context with no `lane.toml` is simply not a lane: it
-/// never appears in the returned list, regardless of whether it has a
-/// `tab.toml`/`board.toml`/`layout.toml` - those facets are read directly by
-/// `context_board_targets` and friends for non-lane purposes instead.
-fn load_lanes(dir: &Path, templates_dir: &Path, default_targets: &[Target]) -> Vec<Lane> {
+/// other test reading it) is a context; the directory name *is* its id (no
+/// separate field to hand-write, and so nothing to disagree with it - see
+/// LaneToml's doc comment). Its facets - `lane`, `board` - are each
+/// independently present or absent; "lane" is not a synonym for "context,"
+/// it's one optional facet a context can have (see `model::Context`'s doc
+/// comment). One scan, one read of each file - this used to be two
+/// separate scans (`load_lanes`, since removed, requiring `lane.toml` to
+/// exist at all; `context_board_targets`, re-reading `board.toml` *and*
+/// `lane.toml` again from scratch just to also catch a board-only
+/// context), which is exactly the duplication a single `Context` type
+/// exists to remove: a lane with a board was read correctly either way,
+/// but "read once" beats "read twice and trust they agree."
+fn load_contexts(dir: &Path, templates_dir: &Path, default_targets: &[Target]) -> Vec<Context> {
     let entries = match std::fs::read_dir(dir) {
         Ok(e) => e,
         Err(_) => return Vec::new(),
     };
 
-    let mut lanes: Vec<Lane> = entries
+    let mut contexts: Vec<Context> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
         .filter_map(|e| {
@@ -420,78 +433,84 @@ fn load_lanes(dir: &Path, templates_dir: &Path, default_targets: &[Target]) -> V
                 return None;
             }
             let path = e.path();
-            if !path.join("lane.toml").is_file() {
-                return None;
-            }
-            let lane_toml: LaneToml = read_facet(&path.join("lane.toml"));
-            let tab_toml: TabToml = read_facet(&path.join("tab.toml"));
-            let layout_toml: LayoutToml = read_facet(&path.join("layout.toml"));
 
-            let layout_template = layout_toml.layout_template.clone();
-            let templated_defaults = match &layout_template {
-                Some(name) => merge_targets(default_targets, load_layout_template(templates_dir, name)),
-                None => default_targets.to_vec(),
-            };
+            let board_target = read_board_target(&path.join("board.toml"));
+            let board = board_target.as_ref().and_then(|t| match &t.driver {
+                TargetDriver::Boards { project } => Some(BoardFacet { project: project.clone() }),
+                _ => None,
+            });
 
-            let mut own_targets = layout_toml.targets;
-            own_targets.extend(read_board_target(&path.join("board.toml")));
+            // Presence, not content, is what opts a context into also
+            // having a lane facet (an empty `lane.toml` still counts;
+            // `read_facet` alone can't tell "file absent" apart from "file
+            // present but empty", both deserializing to
+            // `LaneToml::default()`, hence the separate existence check).
+            let lane = path.join("lane.toml").is_file().then(|| {
+                let lane_toml: LaneToml = read_facet(&path.join("lane.toml"));
+                let tab_toml: TabToml = read_facet(&path.join("tab.toml"));
+                let layout_toml: LayoutToml = read_facet(&path.join("layout.toml"));
 
-            Some(Lane {
-                name: lane_toml.name.unwrap_or_else(|| id.clone()),
-                active: lane_toml.active.unwrap_or(true),
-                scope: tab_toml.scope.into_iter().map(ScopeElement::from).collect(),
-                targets: merge_targets(&templated_defaults, own_targets),
-                layout_template,
-                id,
-            })
+                let layout_template = layout_toml.layout_template.clone();
+                let templated_defaults = match &layout_template {
+                    Some(name) => merge_targets(default_targets, load_layout_template(templates_dir, name)),
+                    None => default_targets.to_vec(),
+                };
+
+                let mut own_targets = layout_toml.targets;
+                own_targets.extend(board_target.clone());
+
+                Lane {
+                    name: lane_toml.name.unwrap_or_else(|| id.clone()),
+                    active: lane_toml.active.unwrap_or(true),
+                    scope: tab_toml.scope.into_iter().map(ScopeElement::from).collect(),
+                    targets: merge_targets(&templated_defaults, own_targets),
+                    layout_template,
+                    id: id.clone(),
+                }
+            });
+
+            Some(Context { id, lane, board })
         })
         .collect();
 
-    lanes.sort_by(|a, b| a.id.cmp(&b.id));
-    lanes
+    contexts.sort_by(|a, b| a.id.cmp(&b.id));
+    contexts
 }
 
-/// Every context directory's id under `dir`, regardless of which facets (if
-/// any) it has - what `order` (contexts.toml) is checked against, since a
-/// context doesn't need to be a lane to need a place in that order (e.g. a
-/// board-only context like `development`).
-fn all_context_ids(dir: &Path) -> Vec<String> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut ids: Vec<String> = entries
-        .filter_map(|e| e.ok())
-        .filter(|e| e.path().is_dir())
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .filter(|id| !id.contains(char::is_whitespace))
-        .collect();
-    ids.sort();
-    ids
+/// `Config.lanes`, derived from `contexts` (no filesystem access - the
+/// data's already in memory from `load_contexts`'s single scan).
+fn derive_lanes(contexts: &[Context]) -> Vec<Lane> {
+    contexts.iter().filter_map(|c| c.lane.clone()).collect()
 }
 
-/// Every context's `board.toml` target, read directly - independent of
-/// `lane.toml`, so Boards materialization/ordering (`doctor`) still works
-/// for a context that isn't a lane at all. Display name falls back to the
-/// directory id when there's no `lane.toml` name to use (a board-only
-/// context has no `lane.toml` at all, so nowhere else to get a name from).
-fn context_board_targets(dir: &Path) -> Vec<(String, String, Target)> {
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
-    let mut out = Vec::new();
-    for e in entries.filter_map(|e| e.ok()) {
-        let path = e.path();
-        if !path.is_dir() {
-            continue;
-        }
-        let id = e.file_name().to_string_lossy().into_owned();
-        if id.contains(char::is_whitespace) {
-            continue;
-        }
-        let Some(target) = read_board_target(&path.join("board.toml")) else {
-            continue;
-        };
-        let lane_toml: LaneToml = read_facet(&path.join("lane.toml"));
-        let name = lane_toml.name.unwrap_or_else(|| id.clone());
-        out.push((id, name, target));
+/// `Config.boards_targets`, derived from `contexts` the same way - see
+/// `Config.boards_targets`'s own doc comment for why the placeholder
+/// `Target` here only ever needs a correct `driver`.
+fn derive_boards_targets(contexts: &[Context]) -> Vec<(String, String, Target)> {
+    contexts
+        .iter()
+        .filter_map(|c| {
+            let board = c.board.as_ref()?;
+            let name = c.lane.as_ref().map(|l| l.name.clone()).unwrap_or_else(|| c.id.clone());
+            Some((c.id.clone(), name, boards_only_target(board.project.clone())))
+        })
+        .collect()
+}
+
+/// A `Target` carrying nothing but a `Boards` driver - see
+/// `Config.boards_targets`'s doc comment for why every other field is
+/// never meaningful on one of these.
+fn boards_only_target(project: String) -> Target {
+    Target {
+        driver: TargetDriver::Boards { project },
+        monitor: None,
+        position: None,
+        position_solo: None,
+        launch: false,
+        raise: false,
+        minimized: None,
+        primary: false,
     }
-    out
 }
 
 #[cfg(test)]
@@ -537,11 +556,13 @@ mod tests {
 
     fn config_with(lanes: Vec<Lane>, order: Option<Vec<&str>>) -> Config {
         let context_ids = lanes.iter().map(|l| l.id.clone()).collect();
+        let contexts = lanes.iter().map(|l| Context { id: l.id.clone(), lane: Some(l.clone()), board: None }).collect();
         Config {
             drivers: None,
             monitors: HashMap::new(),
             order: order.map(|o| o.into_iter().map(String::from).collect()),
             cycle_policy: CyclePolicy::default(),
+            contexts,
             lanes,
             boards_targets: Vec::new(),
             context_ids,
@@ -709,7 +730,7 @@ position = 1
     #[test]
     fn lane_toml_without_name_still_parses_name_is_optional_now() {
         // Unlike the old single-file [lane] header, `name` is optional here -
-        // load_lanes() falls back to the directory name (see its own test
+        // load_contexts() falls back to the directory name (see its own test
         // coverage via the id-is-the-dirname design). lane.toml itself must
         // not require it.
         let file: LaneToml = toml::from_str("active = false\n").unwrap();
@@ -835,6 +856,7 @@ raise = true
             monitors: HashMap::new(),
             order: None,
             cycle_policy: CyclePolicy::default(),
+            contexts: Vec::new(),
             lanes: Vec::new(),
             boards_targets: Vec::new(),
             context_ids: Vec::new(),
@@ -859,6 +881,7 @@ raise = true
             monitors: HashMap::new(),
             order: None,
             cycle_policy: CyclePolicy::default(),
+            contexts: Vec::new(),
             lanes: vec![
                 Lane {
                     id: "sheetwork".to_string(),
@@ -893,6 +916,7 @@ raise = true
             monitors: HashMap::new(),
             order: None,
             cycle_policy: CyclePolicy::default(),
+            contexts: Vec::new(),
             lanes: vec![
                 Lane {
                     id: "sheetwork1".to_string(),
@@ -921,15 +945,15 @@ raise = true
     }
 
     #[test]
-    fn load_lanes_reads_a_real_directory_tree_end_to_end() {
+    fn load_contexts_reads_a_real_directory_tree_end_to_end() {
         let root = std::env::temp_dir().join(format!(
-            "lanes-config-test-load-lanes-{}-{:?}",
+            "lanes-config-test-load-contexts-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
         let _ = std::fs::remove_dir_all(&root);
 
-        // A fully-specified context: all four facets.
+        // A fully-specified context: all three facet files.
         let infra = root.join("infra");
         std::fs::create_dir_all(&infra).unwrap();
         std::fs::write(infra.join("lane.toml"), "name = \"Infra\"\nactive = false\n").unwrap();
@@ -942,32 +966,34 @@ raise = true
             "driver = \"boards\"\nproject = \"Infra\"\nmonitor = \"main\"\nposition = \"full\"\n",
         ).unwrap();
 
-        // A bare context: just a directory, no facet files at all - not a
-        // lane at all, since it has no lane.toml.
+        // A bare context: just a directory, no facet files at all - no
+        // lane, no board, but still a context (it has an id).
         std::fs::create_dir_all(root.join("placeholder")).unwrap();
 
-        let lanes = load_lanes(&root, Path::new("/nonexistent"), &[]);
-        assert_eq!(lanes.len(), 1);
+        let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
+        assert_eq!(contexts.len(), 2);
 
-        let infra_lane = lanes.iter().find(|l| l.id == "infra").unwrap();
+        let infra_ctx = contexts.iter().find(|c| c.id == "infra").unwrap();
+        let infra_lane = infra_ctx.lane.as_ref().expect("infra has a lane.toml");
         assert_eq!(infra_lane.name, "Infra");
         assert!(!infra_lane.active);
         assert_eq!(infra_lane.scope.len(), 1);
         assert_eq!(infra_lane.targets.len(), 1);
         assert!(matches!(&infra_lane.targets[0].driver, crate::model::TargetDriver::Boards { project } if project == "Infra"));
+        assert_eq!(infra_ctx.board.as_ref().map(|b| b.project.as_str()), Some("Infra"));
 
-        // No lane.toml at all -> not a lane, period - it never appears in
-        // load_lanes' output regardless of what else it might have.
-        assert!(lanes.iter().all(|l| l.id != "placeholder"));
+        let placeholder = contexts.iter().find(|c| c.id == "placeholder").unwrap();
+        assert!(placeholder.lane.is_none());
+        assert!(placeholder.board.is_none());
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn load_lanes_an_empty_lane_toml_still_defaults_active_true() {
-        // Distinct from the placeholder case above: the file's mere
-        // *presence* is what opts a context in, regardless of whether it
-        // sets anything - an empty lane.toml is enough.
+    fn load_contexts_an_empty_lane_toml_still_defaults_active_true() {
+        // The file's mere *presence* is what opts a context into having a
+        // lane facet, regardless of whether it sets anything - an empty
+        // lane.toml is enough.
         let root = std::env::temp_dir().join(format!(
             "lanes-config-test-empty-lane-toml-{}-{:?}",
             std::process::id(),
@@ -978,15 +1004,15 @@ raise = true
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(dir.join("lane.toml"), "").unwrap();
 
-        let lanes = load_lanes(&root, Path::new("/nonexistent"), &[]);
-        assert_eq!(lanes.len(), 1);
-        assert!(lanes[0].active);
+        let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
+        assert_eq!(contexts.len(), 1);
+        assert!(contexts[0].lane.as_ref().unwrap().active);
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn load_lanes_skips_a_directory_name_with_whitespace() {
+    fn load_contexts_skips_a_directory_name_with_whitespace() {
         let root = std::env::temp_dir().join(format!(
             "lanes-config-test-whitespace-id-{}-{:?}",
             std::process::id(),
@@ -997,14 +1023,14 @@ raise = true
         std::fs::create_dir_all(root.join("fine")).unwrap();
         std::fs::write(root.join("fine").join("lane.toml"), "").unwrap();
 
-        let lanes = load_lanes(&root, Path::new("/nonexistent"), &[]);
-        assert_eq!(lanes.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), vec!["fine"]);
+        let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
+        assert_eq!(contexts.iter().map(|c| c.id.as_str()).collect::<Vec<_>>(), vec!["fine"]);
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn load_lanes_cascades_through_a_layout_template() {
+    fn load_contexts_cascades_through_a_layout_template() {
         let root = std::env::temp_dir().join(format!(
             "lanes-config-test-layout-template-{}-{:?}",
             std::process::id(),
@@ -1033,9 +1059,9 @@ raise = true
         ).unwrap();
 
         let default_targets = [wezterm_target("lg-right")];
-        let lanes = load_lanes(&contexts_dir, &templates_dir, &default_targets);
-        assert_eq!(lanes.len(), 1);
-        let targets = &lanes[0].targets;
+        let contexts = load_contexts(&contexts_dir, &templates_dir, &default_targets);
+        assert_eq!(contexts.len(), 1);
+        let targets = &contexts[0].lane.as_ref().unwrap().targets;
 
         let wezterm = targets.iter().find(|t| matches!(t.driver, crate::model::TargetDriver::Wezterm { .. })).unwrap();
         assert_eq!(wezterm.monitor.as_deref(), Some("lg-left"), "the template should override the global default");
@@ -1047,7 +1073,7 @@ raise = true
     }
 
     #[test]
-    fn load_lanes_uses_only_the_default_targets_when_no_layout_template_is_set() {
+    fn load_contexts_uses_only_the_default_targets_when_no_layout_template_is_set() {
         let root = std::env::temp_dir().join(format!(
             "lanes-config-test-no-layout-template-{}-{:?}",
             std::process::id(),
@@ -1060,16 +1086,17 @@ raise = true
         std::fs::write(infra.join("lane.toml"), "").unwrap();
 
         let default_targets = [wezterm_target("lg-right")];
-        let lanes = load_lanes(&contexts_dir, Path::new("/nonexistent"), &default_targets);
-        assert_eq!(lanes.len(), 1);
-        assert_eq!(lanes[0].targets.len(), 1);
-        assert_eq!(lanes[0].targets[0].monitor.as_deref(), Some("lg-right"));
+        let contexts = load_contexts(&contexts_dir, Path::new("/nonexistent"), &default_targets);
+        assert_eq!(contexts.len(), 1);
+        let lane = contexts[0].lane.as_ref().unwrap();
+        assert_eq!(lane.targets.len(), 1);
+        assert_eq!(lane.targets[0].monitor.as_deref(), Some("lg-right"));
 
         std::fs::remove_dir_all(&root).ok();
     }
 
     #[test]
-    fn load_lanes_skips_a_context_with_no_lane_toml_even_with_other_facets() {
+    fn load_contexts_a_board_only_context_has_no_lane_facet_but_is_still_a_context() {
         let root = std::env::temp_dir().join(format!(
             "lanes-config-test-no-lane-toml-{}-{:?}",
             std::process::id(),
@@ -1083,51 +1110,12 @@ raise = true
             "driver = \"boards\"\nproject = \"Development\"\nmonitor = \"main\"\nposition = \"full\"\n",
         ).unwrap();
 
-        let lanes = load_lanes(&root, Path::new("/nonexistent"), &[]);
-        assert!(lanes.is_empty(), "a board.toml-only context must never become a Lane");
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn context_board_targets_reads_a_board_only_context_with_no_lane_toml() {
-        let root = std::env::temp_dir().join(format!(
-            "lanes-config-test-board-targets-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        let dir = root.join("development");
-        std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(
-            dir.join("board.toml"),
-            "driver = \"boards\"\nproject = \"Development\"\nmonitor = \"main\"\nposition = \"full\"\n",
-        ).unwrap();
-
-        let targets = context_board_targets(&root);
-        assert_eq!(targets.len(), 1);
-        let (id, name, target) = &targets[0];
-        assert_eq!(id, "development");
-        // No lane.toml at all -> falls back to the directory id as the name.
-        assert_eq!(name, "development");
-        assert!(matches!(&target.driver, crate::model::TargetDriver::Boards { project } if project == "Development"));
-
-        std::fs::remove_dir_all(&root).ok();
-    }
-
-    #[test]
-    fn all_context_ids_lists_every_context_dir_regardless_of_facets() {
-        let root = std::env::temp_dir().join(format!(
-            "lanes-config-test-all-context-ids-{}-{:?}",
-            std::process::id(),
-            std::thread::current().id()
-        ));
-        let _ = std::fs::remove_dir_all(&root);
-        std::fs::create_dir_all(root.join("development")).unwrap();
-        std::fs::create_dir_all(root.join("infra")).unwrap();
-        std::fs::write(root.join("infra").join("lane.toml"), "").unwrap();
-
-        assert_eq!(all_context_ids(&root), vec!["development".to_string(), "infra".to_string()]);
+        let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
+        assert_eq!(contexts.len(), 1, "a board.toml-only directory is still a context");
+        let ctx = &contexts[0];
+        assert_eq!(ctx.id, "development");
+        assert!(ctx.lane.is_none(), "a board.toml-only context must never become a Lane");
+        assert_eq!(ctx.board.as_ref().map(|b| b.project.as_str()), Some("Development"));
 
         std::fs::remove_dir_all(&root).ok();
     }

@@ -221,6 +221,15 @@ enum ComponentCommand {
 
 #[derive(Subcommand)]
 enum ContextCommand {
+    /// List every context - not just lanes (board-only contexts like a
+    /// project tracked only in Boards show up too), with its id, display
+    /// name, and which facets it actually has
+    Ls {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Set a context's display name in every file it's shown in today:
     /// lane.toml's `name`, zellij-tabs.toml's `name` for its terminal
     /// session, and its board.yaml `title` - whichever of those apply.
@@ -394,6 +403,34 @@ fn main() {
         }
 
         Command::Context { command } => match command {
+            ContextCommand::Ls { json } => {
+                let cfg = lanes::config::Config::load();
+                let summaries = lanes::context::list(&cfg);
+                if json {
+                    println!("{}", serde_json::to_string_pretty(&summaries).unwrap());
+                } else if summaries.is_empty() {
+                    eprintln!("No contexts found in ~/.config/lanes/contexts/");
+                } else {
+                    for s in &summaries {
+                        let mark = match s.active {
+                            Some(true) => "x",
+                            Some(false) => " ",
+                            None => "-",
+                        };
+                        println!("[{mark}] {} ({})", s.id, s.name);
+                        if let Some(session) = &s.session {
+                            println!("  session         {session}");
+                        }
+                        if let Some(repo) = &s.repo {
+                            println!("  repo            {repo}");
+                        }
+                        if let Some(project) = &s.board_project {
+                            println!("  board           {project}");
+                        }
+                    }
+                }
+            }
+
             ContextCommand::SetName { id, name } => {
                 let cfg = lanes::config::Config::load();
                 match lanes::context::set_display_name(&cfg, &id, &name) {

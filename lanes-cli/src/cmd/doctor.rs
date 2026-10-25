@@ -515,7 +515,7 @@ fn check_primary_targets(cfg: &lanes::config::Config) -> Check {
 /// missing its whole template layer on a typo is an easy-to-miss bug, not a
 /// soft problem. `templates_dir` is always
 /// `config_dir().join("layout-templates")` outside tests - a parameter for
-/// the same hermeticity reason `config::load_lanes`'s `dir` is.
+/// the same hermeticity reason `config::load_contexts`'s `dir` is.
 fn check_layout_templates(cfg: &lanes::config::Config, templates_dir: &std::path::Path) -> Check {
     let missing: Vec<String> = cfg.lanes.iter()
         .filter_map(|l| l.layout_template.as_ref().map(|t| (l.id.as_str(), t.as_str())))
@@ -1188,11 +1188,10 @@ mod tests {
     use std::collections::{HashMap, HashSet};
 
     /// Derives `boards_targets`/`context_ids` from the given lanes' own
-    /// targets/ids - real `Config::load()` reads these independently of
-    /// `lanes.targets` (see `context_board_targets`), but for a test config
+    /// targets/ids - real `Config::load()` derives these from `contexts`
+    /// instead (see `config::derive_boards_targets`), but for a test config
     /// built straight from `Lane`s it's simplest to mirror whatever Boards
-    /// target each lane already carries, same as before this distinction
-    /// existed.
+    /// target each lane already carries.
     fn test_config(lanes: Vec<Lane>) -> Config {
         let boards_targets = lanes.iter()
             .filter_map(|l| {
@@ -1203,7 +1202,17 @@ mod tests {
             })
             .collect();
         let context_ids = lanes.iter().map(|l| l.id.clone()).collect();
-        Config { drivers: None, monitors: HashMap::new(), order: None, cycle_policy: lanes::model::CyclePolicy::default(), lanes, boards_targets, context_ids, shell_ignored_commands: Vec::new() }
+        Config {
+            drivers: None,
+            monitors: HashMap::new(),
+            order: None,
+            cycle_policy: lanes::model::CyclePolicy::default(),
+            contexts: Vec::new(),
+            lanes,
+            boards_targets,
+            context_ids,
+            shell_ignored_commands: Vec::new(),
+        }
     }
 
     fn lane(id: &str, name: &str, active: bool, session: &str) -> Lane {
@@ -1251,6 +1260,7 @@ mod tests {
             monitors: HashMap::new(),
             order: Some(order.into_iter().map(String::from).collect()),
             cycle_policy: lanes::model::CyclePolicy::default(),
+            contexts: Vec::new(),
             lanes: Vec::new(),
             boards_targets: vec![(id.to_string(), id.to_string(), boards_target(project))],
             context_ids: vec![id.to_string()],
@@ -1503,6 +1513,7 @@ mod tests {
             monitors: HashMap::new(),
             order: Some(order.into_iter().map(String::from).collect()),
             cycle_policy: lanes::model::CyclePolicy::default(),
+            contexts: Vec::new(),
             lanes,
             boards_targets: Vec::new(),
             context_ids,

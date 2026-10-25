@@ -357,7 +357,7 @@ pub fn with_cycle_lock<T>(f: impl FnOnce() -> T) -> T {
 
 /// `with_cycle_lock`'s actual logic, taking the lock directory as a
 /// parameter purely so tests can point it at a throwaway path instead of
-/// the real state dir - same reasoning as `load_lanes` taking `dir`
+/// the real state dir - same reasoning as `load_contexts` taking `dir`
 /// explicitly rather than reading `$HOME` itself (see config.rs).
 fn with_lock_at<T>(lock_dir: &Path, f: impl FnOnce() -> T) -> T {
     let deadline = std::time::Instant::now() + LOCK_WAIT_TIMEOUT;

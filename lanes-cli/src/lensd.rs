@@ -647,7 +647,17 @@ mod tests {
     }
 
     fn cfg_with(lane: crate::model::Lane) -> Config {
-        Config { drivers: None, monitors: HashMap::new(), order: None, cycle_policy: crate::model::CyclePolicy::default(), lanes: vec![lane], boards_targets: Vec::new(), context_ids: Vec::new(), shell_ignored_commands: Vec::new() }
+        Config {
+            drivers: None,
+            monitors: HashMap::new(),
+            order: None,
+            cycle_policy: crate::model::CyclePolicy::default(),
+            contexts: Vec::new(),
+            lanes: vec![lane],
+            boards_targets: Vec::new(),
+            context_ids: Vec::new(),
+            shell_ignored_commands: Vec::new(),
+        }
     }
 
     fn lane() -> crate::model::Lane {
