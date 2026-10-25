@@ -1,0 +1,56 @@
+# What runs in this repo, under process-compose (~/src/projects/CONVENTIONS.md,
+# "Running a long-lived local daemon"; Boards is the reference):
+#   process-compose up             attached, in its TUI (both processes)
+#   process-compose up lanes       just Lanes Switch (or: up lanes-cli)
+#   process-compose up -D          in the background
+#   process-compose attach         the TUI on the running project
+#   process-compose process logs lanes -f
+#   process-compose down           stop everything it started
+# `.envrc` (direnv) puts the control socket at a fixed path, so these find
+# the running project from this repo without flags.
+version: "0.5"
+
+processes:
+  # tauri-plugin-single-instance hands a second launch with the same bundle
+  # identifier off to an already-running copy and exits silently: with the
+  # installed /Applications copy open, the dev binary would just vanish.
+  # Exits right away. The [l] keeps pkill from matching its own command.
+  close-installed:
+    command: "pkill -f '/Applications/Lanes Switch.app/Contents/MacOS/[l]anes-ui' || true"
+    availability:
+      restart: "no"
+
+  # Lanes Switch, the dev app. It depends on lanes-cli by path; tauri dev
+  # watches it too through build.additionalWatchFolders in
+  # src-tauri/tauri.conf.json (CONVENTIONS.md, "Hot-reloading a Rust path
+  # dependency during tauri dev"), so no cargo watch wrapper is needed.
+  lanes:
+    command: "npm run tauri dev"
+    working_dir: "ui"
+    depends_on:
+      close-installed:
+        condition: process_completed
+    log_location: "${HOME}/.local/state/bmiller/lanes/logs/process-compose.log"
+    log_configuration:
+      add_timestamp: true
+      flush_each_line: true
+    shutdown:
+      signal: 15
+      timeout_seconds: 10
+
+  # `lanes` (the binary ~/.local/bin/lanes symlinks to; CONVENTIONS.md,
+  # "Keeping a plain CLI binary fresh during development") is invoked fresh
+  # on every call, not a long-running process, so there's nothing to
+  # restart, only something to keep rebuilt: a rebuild on every source
+  # change, so the next `lanes` (a hotkey, Lanes Switch, `lanes focus ...`)
+  # always runs current code.
+  lanes-cli:
+    command: "cargo watch -x build"
+    working_dir: "lanes-cli"
+    log_location: "${HOME}/.local/state/bmiller/lanes-cli/logs/process-compose.log"
+    log_configuration:
+      add_timestamp: true
+      flush_each_line: true
+    shutdown:
+      signal: 15
+      timeout_seconds: 10

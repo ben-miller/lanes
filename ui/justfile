@@ -1,8 +1,9 @@
-# The dev app, run and supervised by appctl (what it runs: appctl.toml).
-# Attached: Ctrl+C stops the whole tree. For background use (including
-# from Claude): `appctl up -d`, then `appctl status` / `logs -f` / `down`.
+# The dev app (and the lanes-cli watcher), under process-compose (what
+# runs: ../process-compose.yaml), attached in its TUI. For background use
+# (including from Claude): `process-compose up -D`, then
+# `process logs lanes -f` / `attach` / `down`.
 dev:
-	appctl up
+	cd .. && process-compose up
 
 install:
 	#!/usr/bin/env bash
