@@ -1,4 +1,5 @@
 pub mod config;
+pub mod context;
 pub mod drivers;
 pub mod facts;
 pub mod lensd;
@@ -1714,6 +1715,31 @@ pub fn expand_tilde(path: &str) -> String {
     } else {
         path.to_string()
     }
+}
+
+/// Boards' own data-root resolution order (`BOARDS_DATA_DIR` env var, then
+/// `data_dir` in `~/.config/boards/config.yaml`, then
+/// `~/.local/share/bmiller/boards`) - duplicated here deliberately rather
+/// than linking against Boards, which is a separate Tauri app with no
+/// library to depend on. Boards' own `src-tauri/src/data_dir.rs` is the
+/// source of truth for this order; keep it in sync if that ever changes
+/// (as it did when the default moved off `~/boards`).
+pub fn boards_data_dir() -> std::path::PathBuf {
+    if let Ok(dir) = std::env::var("BOARDS_DATA_DIR") {
+        return std::path::PathBuf::from(expand_tilde(&dir));
+    }
+    let config_path = std::path::PathBuf::from(expand_tilde("~/.config/boards/config.yaml"));
+    if let Ok(content) = std::fs::read_to_string(&config_path) {
+        for line in content.lines() {
+            if let Some(val) = line.trim().strip_prefix("data_dir:") {
+                let val = val.trim().trim_matches('"').trim_matches('\'');
+                if !val.is_empty() {
+                    return std::path::PathBuf::from(expand_tilde(val));
+                }
+            }
+        }
+    }
+    std::path::PathBuf::from(expand_tilde("~/.local/share/bmiller/boards"))
 }
 
 #[cfg(test)]

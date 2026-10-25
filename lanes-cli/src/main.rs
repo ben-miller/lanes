@@ -83,6 +83,13 @@ enum Command {
         command: SessionsCommand,
     },
 
+    /// Scripted edits to a context's own files - a safer alternative to
+    /// hand-editing lane.toml/zellij-tabs.toml/board.yaml directly
+    Context {
+        #[command(subcommand)]
+        command: ContextCommand,
+    },
+
     /// Cycle through active, reachable lanes directly - independent of
     /// whether anything (Claude or otherwise) is running inside them. A
     /// separate policy from `sessions next`/`prev`, not a replacement.
@@ -210,6 +217,14 @@ enum ComponentCommand {
         #[arg(short, long)]
         follow: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum ContextCommand {
+    /// Set a context's display name in every file it's shown in today:
+    /// lane.toml's `name`, zellij-tabs.toml's `name` for its terminal
+    /// session, and its board.yaml `title` - whichever of those apply.
+    SetName { id: String, name: String },
 }
 
 #[derive(Subcommand)]
@@ -377,6 +392,19 @@ fn main() {
                 .collect();
             println!("{}", serde_json::to_string_pretty(&signaled).unwrap());
         }
+
+        Command::Context { command } => match command {
+            ContextCommand::SetName { id, name } => {
+                let cfg = lanes::config::Config::load();
+                match lanes::context::set_display_name(&cfg, &id, &name) {
+                    Ok(touched) => println!("updated {}: {}", id, touched.join(", ")),
+                    Err(e) => {
+                        eprintln!("error: {}", e);
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
 
         Command::Sessions { command } => match command {
             SessionsCommand::Switch { id } => {

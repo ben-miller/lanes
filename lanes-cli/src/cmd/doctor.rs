@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 use std::process::Command;
 
+use lanes::boards_data_dir;
+
 struct Check {
     label: &'static str,
     status: Status,
@@ -986,31 +988,6 @@ fn check_monitor_config(cfg: &lanes::config::Config) -> Check {
             hint: Some("reconnect the display, or update the UUID in ~/.config/lanes/lanes.toml (see `lanes-wm monitors` for current UUIDs)".to_string()),
         }
     }
-}
-
-/// Boards' own data-root resolution order (BOARDS_DATA_DIR env var, then
-/// `data_dir` in ~/.config/boards/config.yaml, then
-/// ~/.local/share/bmiller/boards) - duplicated here deliberately rather
-/// than linking against Boards, which is a separate Tauri app with no
-/// library to depend on. Boards' own `src-tauri/src/data_dir.rs` is the
-/// source of truth for this order; keep it in sync if that ever changes
-/// (as it did when the default moved off ~/boards).
-fn boards_data_dir() -> PathBuf {
-    if let Ok(dir) = std::env::var("BOARDS_DATA_DIR") {
-        return PathBuf::from(lanes::expand_tilde(&dir));
-    }
-    let config_path = PathBuf::from(lanes::expand_tilde("~/.config/boards/config.yaml"));
-    if let Ok(content) = std::fs::read_to_string(&config_path) {
-        for line in content.lines() {
-            if let Some(val) = line.trim().strip_prefix("data_dir:") {
-                let val = val.trim().trim_matches('"').trim_matches('\'');
-                if !val.is_empty() {
-                    return PathBuf::from(lanes::expand_tilde(val));
-                }
-            }
-        }
-    }
-    PathBuf::from(lanes::expand_tilde("~/.local/share/bmiller/boards"))
 }
 
 /// Every Boards project name named by a `board.toml` facet across every

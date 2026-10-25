@@ -1,8 +1,8 @@
 # The dev app (and the lanes-cli watcher), under process-compose (what
-# runs: ../process-compose.yaml): starts them in the background and follows
-# their logs; Ctrl+C stops following, not them. Then, from anywhere:
-# `dp ps logs lanes -f`, `dp ps down -p lanes`. (Just starting them, as
-# Claude does: `dp ps up -d`.)
+# runs: ../process-compose.yaml), in the foreground like `docker compose
+# up`: follows their logs, and Ctrl+C stops them. In the background instead
+# (as Claude does): `dp ps up -d`, then `dp ps logs lanes -f` from
+# anywhere, `dp ps down -p lanes`.
 dev:
 	dp ps up
 
