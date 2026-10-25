@@ -130,21 +130,50 @@ impl Config {
     }
 }
 
-/// Flip a context's `active` flag in its `lane.toml` facet, in place. Uses
+/// Flip a context's `active` flag in its `lane.toml` facet, in place - the
+/// cycling-membership bit (see `Lane::active`'s doc comment), distinct from
+/// `set_lane_enabled` below (whether the facet is even present at all).
+pub fn set_lane_active(context_id: &str, active: bool) -> std::io::Result<()> {
+    set_facet_flag(context_id, "lane.toml", "active", active)
+}
+
+/// Flip a context's `enabled` flag in its `lane.toml` facet - see
+/// `LaneToml`'s doc comment for what disabling it does. Separate key, and a
+/// separate command (`lanes ctx disable-lane`/`enable-lane`), from
+/// `set_lane_active`/`lanes activate`/`deactivate`: "active" is cycling
+/// membership for a lane that's still fully present; "enabled" is whether
+/// the lane facet exists at all.
+pub fn set_lane_enabled(context_id: &str, enabled: bool) -> std::io::Result<()> {
+    set_facet_flag(context_id, "lane.toml", "enabled", enabled)
+}
+
+/// Flip a context's `enabled` flag in its `tab.toml` facet - see TabToml's
+/// doc comment for what disabling it does.
+pub fn set_tab_enabled(context_id: &str, enabled: bool) -> std::io::Result<()> {
+    set_facet_flag(context_id, "tab.toml", "enabled", enabled)
+}
+
+/// Flip a context's `enabled` flag in its `board.toml` facet - see
+/// `read_board_target`'s doc comment for what disabling it does.
+pub fn set_board_enabled(context_id: &str, enabled: bool) -> std::io::Result<()> {
+    set_facet_flag(context_id, "board.toml", "enabled", enabled)
+}
+
+/// Sets `key` to `value` in `<context>/<facet_file>`, in place. Uses
 /// toml_edit rather than the parse-only `toml` crate so the rest of the
 /// file (formatting, key order, any future comments) is left untouched -
-/// these files are hand-maintained. `lane.toml` is an optional facet (see
-/// `load_contexts`), so a context that's never had one yet gets a fresh file
-/// containing just this one key, not an error.
-pub fn set_lane_active(lane_id: &str, active: bool) -> std::io::Result<()> {
-    let path = config_dir().join("contexts").join(lane_id).join("lane.toml");
+/// these files are hand-maintained. Every facet file here is optional (see
+/// `load_contexts`), so a context that's never had this one yet gets a
+/// fresh file containing just this one key, not an error.
+fn set_facet_flag(context_id: &str, facet_file: &str, key: &str, value: bool) -> std::io::Result<()> {
+    let path = config_dir().join("contexts").join(context_id).join(facet_file);
     let mut doc = match std::fs::read_to_string(&path) {
         Ok(text) => text.parse::<toml_edit::DocumentMut>().map_err(|e| {
             std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
         })?,
         Err(_) => toml_edit::DocumentMut::new(),
     };
-    doc["active"] = toml_edit::value(active);
+    doc[key] = toml_edit::value(value);
     // Write-then-rename: the Lanes Switch fs-watcher reads this dir the
     // instant it sees a change, and a torn read makes toml parsing fail,
     // which drops the lane from that refresh's snapshot entirely (see
@@ -215,29 +244,57 @@ struct ContextsConfig {
 }
 
 /// `<context>/lane.toml` - the switcher-facing facet, and the one thing
-/// that makes a context a *lane* at all. A context dir with no `lane.toml`
-/// is not a lane - it's invisible to `cfg.lanes`, the dashboard, and
-/// cycling entirely, even though its other facets (`tab.toml`,
-/// `board.toml`) are still read directly for their own purposes (see
-/// `load_contexts`). Having *any* `lane.toml`, even an empty one,
-/// is what opts a context in - its own `active` key (if present) then only
-/// controls whether that real lane is currently shown/cycled to, same as
-/// before. Identity (the old `id` field) isn't part of this anymore - it's
-/// the context directory's own name, which can't disagree with itself the
-/// way a hand-written `id` field could.
+/// that makes a context a *lane* at all. A context dir with no `lane.toml`,
+/// or one with `enabled = false`, is not a lane - it's invisible to
+/// `cfg.lanes`, the dashboard, and cycling entirely, even though its other
+/// facets (`tab.toml`, `board.toml`) are still read directly for their own
+/// purposes (see `load_contexts`).
+///
+/// Two independent bits, not one - don't conflate them:
+/// - `enabled` (default true): whether this facet exists at all. `false`
+///   behaves exactly as if `lane.toml` were absent (see `load_contexts`),
+///   but the file's own content (name, whatever else gets added later)
+///   stays on disk, so re-enabling restores it. Set via `lanes ctx
+///   disable-lane`/`enable-lane`.
+/// - `active` (default true): cycling membership for a lane that's still
+///   fully present and visible - "is this part of the current working
+///   set," same as before this field existed. Set via `lanes
+///   activate`/`deactivate`.
+///
+/// Identity (the old `id` field) isn't part of this - it's the context
+/// directory's own name, which can't disagree with itself the way a
+/// hand-written `id` field could.
 #[derive(Deserialize, Default)]
 struct LaneToml {
     name: Option<String>,
     active: Option<bool>,
+    enabled: Option<bool>,
 }
 
 /// `<context>/tab.toml` - the Zellij/repo anchor (what used to be the one
 /// do-everything lane file's `[[scope]]` array). Same human-friendly
 /// `ScopeElementRaw` shape as before, just split into its own file.
-#[derive(Deserialize, Default)]
+///
+/// `enabled` (default true) disables this facet without deleting it: a
+/// disabled tab behaves exactly as if `tab.toml` didn't exist at all (empty
+/// scope - see `load_contexts`), but its `scope` entries stay on disk so
+/// re-enabling restores them verbatim rather than making you re-author them.
+#[derive(Deserialize)]
 struct TabToml {
+    #[serde(default = "default_true")]
+    enabled: bool,
     #[serde(default)]
     scope: Vec<ScopeElementRaw>,
+}
+
+impl Default for TabToml {
+    fn default() -> Self {
+        Self { enabled: true, scope: Vec::new() }
+    }
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// `layout.toml` - window-placement targets applied on switch (app /
@@ -377,14 +434,34 @@ fn read_facet<T: DeserializeOwned + Default>(path: &Path) -> T {
     }
 }
 
+/// Just the `enabled` key of a facet file (`board.toml` here), read
+/// independently of that file's own `Target`/driver shape so toggling it
+/// doesn't need a dedicated field on the shared `Target` struct (which
+/// every other target kind in `layout.toml` also uses, and has no such
+/// concept). Missing key or missing file both mean "enabled" - see
+/// `default_true`.
+#[derive(Deserialize, Default)]
+struct EnabledFlag {
+    #[serde(default = "default_true")]
+    enabled: bool,
+}
+
 /// `<context>/board.toml` - the Boards projection: which Boards project
 /// this context corresponds to, plus optional placement. Kept as its own
 /// facet (one `Target`, not a list - a context has at most one board)
 /// rather than folded into `layout.toml`, because Boards is architecturally
 /// different from the other target drivers: it's generated/materialized
 /// (see PLAN-context-model.md), not just another thing to place on switch.
+///
+/// `enabled` (default true) disables this facet without deleting it: a
+/// disabled board behaves exactly as if `board.toml` didn't exist (no
+/// `BoardFacet`, nothing folded into the lane's own `targets`), but the
+/// file's `project`/placement stay on disk for re-enabling later.
 fn read_board_target(path: &Path) -> Option<Target> {
     let content = std::fs::read_to_string(path).ok()?;
+    if !toml::from_str::<EnabledFlag>(&content).map(|f| f.enabled).unwrap_or(true) {
+        return None;
+    }
     match toml::from_str::<Target>(&content) {
         Ok(t) if matches!(t.driver, TargetDriver::Boards { .. }) => Some(t),
         Ok(t) => {
@@ -444,9 +521,14 @@ fn load_contexts(dir: &Path, templates_dir: &Path, default_targets: &[Target]) -
             // having a lane facet (an empty `lane.toml` still counts;
             // `read_facet` alone can't tell "file absent" apart from "file
             // present but empty", both deserializing to
-            // `LaneToml::default()`, hence the separate existence check).
-            let lane = path.join("lane.toml").is_file().then(|| {
-                let lane_toml: LaneToml = read_facet(&path.join("lane.toml"));
+            // `LaneToml::default()`, hence the separate existence check) -
+            // *unless* `enabled = false`, which behaves exactly as if the
+            // file were absent (see `LaneToml`'s doc comment).
+            let lane = path.join("lane.toml").is_file().then(|| read_facet(&path.join("lane.toml"))).and_then(|lane_toml: LaneToml| {
+                if !lane_toml.enabled.unwrap_or(true) {
+                    return None;
+                }
+
                 let tab_toml: TabToml = read_facet(&path.join("tab.toml"));
                 let layout_toml: LayoutToml = read_facet(&path.join("layout.toml"));
 
@@ -459,14 +541,24 @@ fn load_contexts(dir: &Path, templates_dir: &Path, default_targets: &[Target]) -
                 let mut own_targets = layout_toml.targets;
                 own_targets.extend(board_target.clone());
 
-                Lane {
+                // A disabled tab (`enabled: false`) behaves exactly as if
+                // tab.toml didn't exist - empty scope - while its `scope`
+                // entries stay on disk for re-enabling (see TabToml's doc
+                // comment).
+                let scope = if tab_toml.enabled {
+                    tab_toml.scope.into_iter().map(ScopeElement::from).collect()
+                } else {
+                    Vec::new()
+                };
+
+                Some(Lane {
                     name: lane_toml.name.unwrap_or_else(|| id.clone()),
                     active: lane_toml.active.unwrap_or(true),
-                    scope: tab_toml.scope.into_iter().map(ScopeElement::from).collect(),
+                    scope,
                     targets: merge_targets(&templated_defaults, own_targets),
                     layout_template,
                     id: id.clone(),
-                }
+                })
             });
 
             Some(Context { id, lane, board })
@@ -822,6 +914,16 @@ raise = true
     }
 
     #[test]
+    fn read_board_target_is_none_when_enabled_is_false_even_though_the_driver_is_valid() {
+        let dir = std::env::temp_dir().join(format!("lanes-config-test-board-enabled-{}-{:?}", std::process::id(), std::thread::current().id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("board.toml");
+        std::fs::write(&path, "enabled = false\ndriver = \"boards\"\nproject = \"infra\"\n").unwrap();
+        assert!(read_board_target(&path).is_none());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
     fn read_facet_falls_back_to_default_when_file_is_absent() {
         let missing = std::env::temp_dir().join("lanes-config-test-does-not-exist").join("lane.toml");
         let lane_toml: LaneToml = read_facet(&missing);
@@ -838,6 +940,66 @@ raise = true
         let lane_toml: LaneToml = read_facet(&path);
         assert_eq!(lane_toml.name, None);
         std::fs::remove_dir_all(&dir).ok();
+    }
+
+    /// Points `config_dir()`'s result at a throwaway tree for the duration
+    /// of one `set_facet_active`-based test, via `$HOME` - the one seam
+    /// those functions have, same as `set_ztabs_name`/`set_ztabs_name_at`
+    /// in context.rs splitting a real vs. injectable-path version for the
+    /// same reason. Serialized by a lock so parallel tests don't race the
+    /// shared `$HOME` env var.
+    fn with_fake_home<T>(f: impl FnOnce(&Path) -> T) -> T {
+        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        let _guard = LOCK.lock().unwrap();
+        let home = std::env::temp_dir().join(format!("lanes-config-test-home-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let _ = std::fs::remove_dir_all(&home);
+        std::fs::create_dir_all(home.join(".config/lanes/contexts")).unwrap();
+        let prev = std::env::var("HOME").ok();
+        std::env::set_var("HOME", &home);
+        let result = f(&home);
+        match prev {
+            Some(p) => std::env::set_var("HOME", p),
+            None => std::env::remove_var("HOME"),
+        }
+        std::fs::remove_dir_all(&home).ok();
+        result
+    }
+
+    #[test]
+    fn set_tab_enabled_creates_tab_toml_when_absent() {
+        with_fake_home(|home| {
+            std::fs::create_dir_all(home.join(".config/lanes/contexts/ctx")).unwrap();
+            set_tab_enabled("ctx", false).unwrap();
+            let text = std::fs::read_to_string(home.join(".config/lanes/contexts/ctx/tab.toml")).unwrap();
+            assert!(text.contains("enabled = false"));
+        });
+    }
+
+    #[test]
+    fn set_board_enabled_preserves_other_keys() {
+        with_fake_home(|home| {
+            let dir = home.join(".config/lanes/contexts/ctx");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("board.toml"), "driver = \"boards\"\nproject = \"infra\"\n").unwrap();
+            set_board_enabled("ctx", false).unwrap();
+            let text = std::fs::read_to_string(dir.join("board.toml")).unwrap();
+            assert!(text.contains("enabled = false"));
+            assert!(text.contains("project = \"infra\""));
+        });
+    }
+
+    #[test]
+    fn set_lane_enabled_is_independent_of_set_lane_active() {
+        with_fake_home(|home| {
+            let dir = home.join(".config/lanes/contexts/ctx");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("lane.toml"), "name = \"Ctx\"\nactive = true\n").unwrap();
+            set_lane_enabled("ctx", false).unwrap();
+            let text = std::fs::read_to_string(dir.join("lane.toml")).unwrap();
+            assert!(text.contains("enabled = false"));
+            // The unrelated `active` (cycling membership) key is untouched.
+            assert!(text.contains("active = true"));
+        });
     }
 
     #[test]
@@ -1007,6 +1169,98 @@ raise = true
         let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
         assert_eq!(contexts.len(), 1);
         assert!(contexts[0].lane.as_ref().unwrap().active);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_contexts_a_disabled_lane_has_no_lane_facet_at_all_unlike_merely_inactive() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-disabled-lane-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+
+        // `active = false` (cycling membership) still produces a real,
+        // visible lane facet - the pre-existing behavior.
+        let inactive = root.join("inactive");
+        std::fs::create_dir_all(&inactive).unwrap();
+        std::fs::write(inactive.join("lane.toml"), "name = \"Inactive\"\nactive = false\n").unwrap();
+
+        // `enabled = false` behaves exactly as if lane.toml didn't exist -
+        // no lane facet at all, not even an inactive one.
+        let disabled = root.join("disabled");
+        std::fs::create_dir_all(&disabled).unwrap();
+        std::fs::write(disabled.join("lane.toml"), "name = \"Disabled\"\nenabled = false\n").unwrap();
+
+        let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
+        assert!(contexts.iter().find(|c| c.id == "inactive").unwrap().lane.is_some());
+        assert!(contexts.iter().find(|c| c.id == "disabled").unwrap().lane.is_none());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_contexts_a_disabled_tab_has_empty_scope_but_an_enabled_lane() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-disabled-tab-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("ctx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lane.toml"), "").unwrap();
+        std::fs::write(dir.join("tab.toml"), "enabled = false\n\n[[scope]]\nkind = \"repo\"\npath = \"~/src/infra\"\n").unwrap();
+
+        let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
+        let lane = contexts[0].lane.as_ref().unwrap();
+        // The tab facet is disabled, so its scope behaves as if tab.toml
+        // doesn't exist - it must not leak through even though the file
+        // still has real entries on disk.
+        assert!(lane.scope.is_empty());
+        // Disabling the tab facet is independent of the lane facet itself.
+        assert!(lane.active);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_contexts_a_disabled_board_has_no_board_facet_and_no_folded_in_target() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-disabled-board-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("ctx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lane.toml"), "").unwrap();
+        std::fs::write(dir.join("board.toml"), "enabled = false\ndriver = \"boards\"\nproject = \"infra\"\n").unwrap();
+
+        let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
+        assert!(contexts[0].board.is_none());
+        let lane = contexts[0].lane.as_ref().unwrap();
+        assert!(lane.targets.iter().all(|t| !matches!(t.driver, TargetDriver::Boards { .. })));
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_contexts_board_toml_with_no_enabled_key_defaults_enabled() {
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-board-default-enabled-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("ctx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("board.toml"), "driver = \"boards\"\nproject = \"infra\"\n").unwrap();
+
+        let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
+        assert_eq!(contexts[0].board.as_ref().map(|b| b.project.as_str()), Some("infra"));
 
         std::fs::remove_dir_all(&root).ok();
     }

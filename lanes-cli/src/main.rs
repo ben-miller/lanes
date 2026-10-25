@@ -232,6 +232,32 @@ enum ContextCommand {
     /// lane.toml's `name`, zellij-tabs.toml's `name` for its terminal
     /// session, and its board.yaml `title` - whichever of those apply.
     SetName { id: String, name: String },
+
+    /// Disable a context's lane facet - its lane.toml is kept on disk but
+    /// behaves as if the file didn't exist (no lane, invisible to cycling
+    /// and the dashboard) until re-enabled. Distinct from `lanes
+    /// deactivate`, which drops a still-visible lane out of the cycling
+    /// set without hiding it.
+    DisableLane { id: String },
+
+    /// Re-enable a context's lane facet, restoring its lane.toml.
+    EnableLane { id: String },
+
+    /// Disable a context's tab facet - its tab.toml's `scope` is kept on
+    /// disk but behaves as if the file didn't exist (no zellij session,
+    /// no repo anchor) until re-enabled.
+    DisableTab { id: String },
+
+    /// Re-enable a context's tab facet, restoring its tab.toml's `scope`.
+    EnableTab { id: String },
+
+    /// Disable a context's board facet - its board.toml is kept on disk
+    /// but behaves as if the file didn't exist (no Boards project, no
+    /// placement folded into the lane's targets) until re-enabled.
+    DisableBoard { id: String },
+
+    /// Re-enable a context's board facet, restoring its board.toml.
+    EnableBoard { id: String },
 }
 
 #[derive(Subcommand)]
@@ -307,6 +333,24 @@ enum TabsCommand {
     /// so, so the cache never sits there pointing at a tab that's already
     /// gone.
     Clear { session: String },
+}
+
+/// Shared body for the six `ctx enable-*`/`disable-*` commands: `facet` is
+/// "lane", "tab", or "board", picking which facet file's `enabled` key to
+/// flip (see `config::set_lane_enabled`/`set_tab_enabled`/
+/// `set_board_enabled`).
+fn set_facet_enabled_or_exit(id: &str, facet: &str, enabled: bool) {
+    let result = match facet {
+        "lane" => lanes::config::set_lane_enabled(id, enabled),
+        "tab" => lanes::config::set_tab_enabled(id, enabled),
+        "board" => lanes::config::set_board_enabled(id, enabled),
+        _ => unreachable!("set_facet_enabled_or_exit called with an unknown facet {facet:?}"),
+    };
+    if let Err(e) = result {
+        eprintln!("error: {}", e);
+        std::process::exit(1);
+    }
+    println!("{}d {}'s {} facet", if enabled { "enable" } else { "disable" }, id, facet);
 }
 
 /// `snapshot`/`signals` used to build this from `gather_lanes()`, a second,
@@ -411,6 +455,13 @@ fn main() {
                     }
                 }
             }
+
+            ContextCommand::DisableLane { id } => set_facet_enabled_or_exit(&id, "lane", false),
+            ContextCommand::EnableLane { id } => set_facet_enabled_or_exit(&id, "lane", true),
+            ContextCommand::DisableTab { id } => set_facet_enabled_or_exit(&id, "tab", false),
+            ContextCommand::EnableTab { id } => set_facet_enabled_or_exit(&id, "tab", true),
+            ContextCommand::DisableBoard { id } => set_facet_enabled_or_exit(&id, "board", false),
+            ContextCommand::EnableBoard { id } => set_facet_enabled_or_exit(&id, "board", true),
         },
 
         Command::Sessions { command } => match command {
