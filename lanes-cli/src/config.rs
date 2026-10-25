@@ -577,13 +577,18 @@ fn derive_lanes(contexts: &[Context]) -> Vec<Lane> {
 
 /// `Config.boards_targets`, derived from `contexts` the same way - see
 /// `Config.boards_targets`'s own doc comment for why the placeholder
-/// `Target` here only ever needs a correct `driver`.
+/// `Target` here only ever needs a correct `driver`. A lane's own name
+/// wins; a board-only context has no lane name slot, so it falls back to
+/// the board's own `project` (a real human-readable name, not the bare
+/// kebab-case id - same fallback order as `cmd::ls::display_name`), which
+/// is what keeps `doctor`'s display-name-consistency check from comparing
+/// a board-only context's id against board.yaml's title and always losing.
 fn derive_boards_targets(contexts: &[Context]) -> Vec<(String, String, Target)> {
     contexts
         .iter()
         .filter_map(|c| {
             let board = c.board.as_ref()?;
-            let name = c.lane.as_ref().map(|l| l.name.clone()).unwrap_or_else(|| c.id.clone());
+            let name = c.lane.as_ref().map(|l| l.name.clone()).unwrap_or_else(|| board.project.clone());
             Some((c.id.clone(), name, boards_only_target(board.project.clone())))
         })
         .collect()
@@ -1372,5 +1377,18 @@ raise = true
         assert_eq!(ctx.board.as_ref().map(|b| b.project.as_str()), Some("Development"));
 
         std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn derive_boards_targets_uses_the_board_project_not_the_bare_id_for_a_board_only_context() {
+        // Regression: this used to fall back to the bare, kebab-case
+        // context id (e.g. "app-ideas") instead of the board's own real
+        // name, which made `doctor`'s display-name-consistency check
+        // spuriously flag every board-only context against its own
+        // board.yaml title.
+        let contexts = vec![Context { id: "app-ideas".to_string(), lane: None, board: Some(BoardFacet { project: "App Ideas".to_string() }) }];
+        let boards_targets = derive_boards_targets(&contexts);
+        assert_eq!(boards_targets.len(), 1);
+        assert_eq!(boards_targets[0].1, "App Ideas");
     }
 }
