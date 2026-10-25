@@ -93,6 +93,7 @@ enum Command {
     /// hand-editing lane.toml/zellij-tabs.toml/board.yaml directly
     #[command(name = "ctx")]
     Context {
+        id: String,
         #[command(subcommand)]
         command: ContextCommand,
     },
@@ -231,33 +232,60 @@ enum ContextCommand {
     /// Set a context's display name in every file it's shown in today:
     /// lane.toml's `name`, zellij-tabs.toml's `name` for its terminal
     /// session, and its board.yaml `title` - whichever of those apply.
-    SetName { id: String, name: String },
+    SetName { name: String },
 
-    /// Disable a context's lane facet - its lane.toml is kept on disk but
-    /// behaves as if the file didn't exist (no lane, invisible to cycling
-    /// and the dashboard) until re-enabled. Distinct from `lanes
+    /// Enable or disable a context's lane facet
+    Lane {
+        #[command(subcommand)]
+        command: LaneFacetCommand,
+    },
+
+    /// Enable or disable a context's tab facet
+    Tab {
+        #[command(subcommand)]
+        command: TabFacetCommand,
+    },
+
+    /// Enable or disable a context's board facet
+    Board {
+        #[command(subcommand)]
+        command: BoardFacetCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum LaneFacetCommand {
+    /// Disable this context's lane facet - its lane.toml is kept on disk
+    /// but behaves as if the file didn't exist (no lane, invisible to
+    /// cycling and the dashboard) until re-enabled. Distinct from `lanes
     /// deactivate`, which drops a still-visible lane out of the cycling
     /// set without hiding it.
-    DisableLane { id: String },
+    Disable,
 
-    /// Re-enable a context's lane facet, restoring its lane.toml.
-    EnableLane { id: String },
+    /// Re-enable this context's lane facet, restoring its lane.toml.
+    Enable,
+}
 
-    /// Disable a context's tab facet - its tab.toml's `scope` is kept on
-    /// disk but behaves as if the file didn't exist (no zellij session,
-    /// no repo anchor) until re-enabled.
-    DisableTab { id: String },
+#[derive(Subcommand)]
+enum TabFacetCommand {
+    /// Disable this context's tab facet - its tab.toml's `scope` is kept
+    /// on disk but behaves as if the file didn't exist (no zellij
+    /// session, no repo anchor) until re-enabled.
+    Disable,
 
-    /// Re-enable a context's tab facet, restoring its tab.toml's `scope`.
-    EnableTab { id: String },
+    /// Re-enable this context's tab facet, restoring its tab.toml's `scope`.
+    Enable,
+}
 
-    /// Disable a context's board facet - its board.toml is kept on disk
-    /// but behaves as if the file didn't exist (no Boards project, no
-    /// placement folded into the lane's targets) until re-enabled.
-    DisableBoard { id: String },
+#[derive(Subcommand)]
+enum BoardFacetCommand {
+    /// Disable this context's board facet - its board.toml is kept on
+    /// disk but behaves as if the file didn't exist (no Boards project,
+    /// no placement folded into the lane's targets) until re-enabled.
+    Disable,
 
-    /// Re-enable a context's board facet, restoring its board.toml.
-    EnableBoard { id: String },
+    /// Re-enable this context's board facet, restoring its board.toml.
+    Enable,
 }
 
 #[derive(Subcommand)]
@@ -444,8 +472,8 @@ fn main() {
             println!("{}", serde_json::to_string_pretty(&signaled).unwrap());
         }
 
-        Command::Context { command } => match command {
-            ContextCommand::SetName { id, name } => {
+        Command::Context { id, command } => match command {
+            ContextCommand::SetName { name } => {
                 let cfg = lanes::config::Config::load();
                 match lanes::context::set_display_name(&cfg, &id, &name) {
                     Ok(touched) => println!("updated {}: {}", id, touched.join(", ")),
@@ -456,12 +484,18 @@ fn main() {
                 }
             }
 
-            ContextCommand::DisableLane { id } => set_facet_enabled_or_exit(&id, "lane", false),
-            ContextCommand::EnableLane { id } => set_facet_enabled_or_exit(&id, "lane", true),
-            ContextCommand::DisableTab { id } => set_facet_enabled_or_exit(&id, "tab", false),
-            ContextCommand::EnableTab { id } => set_facet_enabled_or_exit(&id, "tab", true),
-            ContextCommand::DisableBoard { id } => set_facet_enabled_or_exit(&id, "board", false),
-            ContextCommand::EnableBoard { id } => set_facet_enabled_or_exit(&id, "board", true),
+            ContextCommand::Lane { command } => match command {
+                LaneFacetCommand::Disable => set_facet_enabled_or_exit(&id, "lane", false),
+                LaneFacetCommand::Enable => set_facet_enabled_or_exit(&id, "lane", true),
+            },
+            ContextCommand::Tab { command } => match command {
+                TabFacetCommand::Disable => set_facet_enabled_or_exit(&id, "tab", false),
+                TabFacetCommand::Enable => set_facet_enabled_or_exit(&id, "tab", true),
+            },
+            ContextCommand::Board { command } => match command {
+                BoardFacetCommand::Disable => set_facet_enabled_or_exit(&id, "board", false),
+                BoardFacetCommand::Enable => set_facet_enabled_or_exit(&id, "board", true),
+            },
         },
 
         Command::Sessions { command } => match command {
