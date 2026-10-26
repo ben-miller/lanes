@@ -977,10 +977,8 @@ raise = true
 
     /// Points `config_dir()`'s result at a throwaway tree for the duration
     /// of one `set_facet_active`-based test, via `$HOME` - the one seam
-    /// those functions have, same as `set_ztabs_name`/`set_ztabs_name_at`
-    /// in context.rs splitting a real vs. injectable-path version for the
-    /// same reason. Serialized by a lock so parallel tests don't race the
-    /// shared `$HOME` env var.
+    /// those functions have. Serialized by a lock so parallel tests don't
+    /// race the shared `$HOME` env var.
     fn with_fake_home<T>(f: impl FnOnce(&Path) -> T) -> T {
         static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
         let _guard = LOCK.lock().unwrap();

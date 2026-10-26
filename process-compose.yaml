@@ -34,6 +34,12 @@ processes:
     log_configuration:
       add_timestamp: true
       flush_each_line: true
+    # A platform app is always running: quitting it, a crash, or a failed
+    # build (tauri dev exits) brings it back; stopping it through
+    # process-compose (dp ps down) doesn't.
+    availability:
+      restart: always
+      backoff_seconds: 5
     shutdown:
       signal: 15
       timeout_seconds: 10
@@ -51,6 +57,12 @@ processes:
     log_configuration:
       add_timestamp: true
       flush_each_line: true
+    # A platform app is always running: quitting it, a crash, or a failed
+    # build (tauri dev exits) brings it back; stopping it through
+    # process-compose (dp ps down) doesn't.
+    availability:
+      restart: always
+      backoff_seconds: 5
     shutdown:
       signal: 15
       timeout_seconds: 10

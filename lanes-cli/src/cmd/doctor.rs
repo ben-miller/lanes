@@ -47,7 +47,6 @@ pub fn run(fix: bool) {
         check_primary_targets(&cfg),
         check_layout_templates(&cfg, &lanes::config::config_dir().join("layout-templates")),
         check_lane_order(&cfg),
-        check_lane_order_vs_ztabs(&cfg),
         check_display_name_consistency(&cfg, &boards_dir),
         check_git_default_branches(&cfg),
         check_lanes_wm(),
@@ -596,96 +595,6 @@ fn check_lane_order(cfg: &lanes::config::Config) -> Check {
     }
 }
 
-/// `ztabs`' own session order, straight from its config file - not a live
-/// query of anything. This is the other tool's core state, same class of
-/// thing as contexts.toml's `order`, just owned by a different tool.
-fn ztabs_session_order() -> Option<Vec<String>> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let path = PathBuf::from(home).join(".config/infra/zellij-tabs.toml");
-    let content = std::fs::read_to_string(path).ok()?;
-    let doc: toml::Value = toml::from_str(&content).ok()?;
-    let tabs = doc.get("tabs")?.as_array()?;
-    Some(
-        tabs.iter()
-            .filter_map(|t| t.get("session").and_then(|v| v.as_str()).map(String::from))
-            .collect(),
-    )
-}
-
-/// `ztabs`' own display name per session - same source as
-/// `ztabs_session_order`, just paired with `name` instead of position.
-fn ztabs_names_by_session() -> Option<std::collections::HashMap<String, String>> {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let path = PathBuf::from(home).join(".config/infra/zellij-tabs.toml");
-    let content = std::fs::read_to_string(path).ok()?;
-    let doc: toml::Value = toml::from_str(&content).ok()?;
-    let tabs = doc.get("tabs")?.as_array()?;
-    Some(
-        tabs.iter()
-            .filter_map(|t| {
-                let session = t.get("session")?.as_str()?.to_string();
-                let name = t.get("name")?.as_str()?.to_string();
-                Some((session, name))
-            })
-            .collect(),
-    )
-}
-
-/// `order`, restricted to whichever entries also appear in `other`, keeping
-/// `order`'s own relative sequence. Used to compare two orderings that may
-/// not cover exactly the same set of sessions (e.g. contexts.toml has a lane
-/// ztabs doesn't manage) without that difference in *membership* being
-/// mistaken for a difference in *order*.
-fn restrict_to_common(order: &[String], other: &[String]) -> Vec<String> {
-    let other_set: std::collections::HashSet<&String> = other.iter().collect();
-    order.iter().filter(|s| other_set.contains(s)).cloned().collect()
-}
-
-fn check_lane_order_vs_ztabs(cfg: &lanes::config::Config) -> Check {
-    let Some(ztabs_order) = ztabs_session_order() else {
-        return Check {
-            label: "lane order vs ztabs",
-            status: Status::Ok,
-            message: "no ztabs config found, skipping".to_string(),
-            hint: None,
-        };
-    };
-
-    let lane_session_order: Vec<String> = cfg
-        .lanes
-        .iter()
-        .filter_map(|l| l.terminal_session())
-        .map(String::from)
-        .collect();
-
-    let lanes_side = restrict_to_common(&lane_session_order, &ztabs_order);
-    let ztabs_side = restrict_to_common(&ztabs_order, &lane_session_order);
-
-    if lanes_side == ztabs_side {
-        Check {
-            label: "lane order vs ztabs",
-            status: Status::Ok,
-            message: "contexts.toml `order` agrees with zellij-tabs.toml's session order".to_string(),
-            hint: None,
-        }
-    } else {
-        Check {
-            label: "lane order vs ztabs",
-            status: Status::Warn,
-            message: format!(
-                "contexts.toml order gives {}, but zellij-tabs.toml gives {}",
-                lanes_side.join(", "),
-                ztabs_side.join(", ")
-            ),
-            hint: Some(
-                "not auto-fixed - edit `order` in ~/.config/lanes/contexts.toml or the tab order in \
-                 ~/.config/infra/zellij-tabs.toml so the two agree."
-                    .to_string(),
-            ),
-        }
-    }
-}
-
 /// `<project>/board.yaml`'s `title`, if the file exists and parses - via
 /// `noyalib`, the same crate Boards itself uses for this file.
 fn board_yaml_title(data_dir: &std::path::Path, project: &str) -> Option<String> {
@@ -698,29 +607,21 @@ fn board_yaml_title(data_dir: &std::path::Path, project: &str) -> Option<String>
     meta.title
 }
 
-/// A context's display name is deliberately denormalized across up to
-/// three files lanes doesn't own the sync between: `lane.toml`'s `name`,
-/// `zellij-tabs.toml`'s `name` (keyed by session), and `board.yaml`'s
-/// `title` (Boards' own file, editable from inside Boards itself). See
-/// DECISIONS.md, "Display names stay denormalized" - this check exists
-/// instead of a sync mechanism: never auto-fixed, never fails the run,
-/// just surfaces drift so fixing it (in whichever file is actually stale)
-/// is a choice, not a silent surprise.
+/// A context's display name is deliberately denormalized across two files
+/// lanes doesn't own the sync between: `lane.toml`'s `name` and
+/// `board.yaml`'s `title` (Boards' own file, editable from inside Boards
+/// itself). See DECISIONS.md, "Display names stay denormalized" - this
+/// check exists instead of a sync mechanism: never auto-fixed, never fails
+/// the run, just surfaces drift so fixing it (in whichever file is
+/// actually stale) is a choice, not a silent surprise.
+///
+/// `zellij-tabs.toml` isn't part of this comparison - `infra zellij` reads
+/// `name`/`session` straight from `lane.toml`/`tab.toml` now (see its own
+/// `load_tabs`'s doc comment), so zellij-tabs.toml isn't a real third
+/// source of this name at all anymore, just an unrelated, separately-owned
+/// file.
 fn check_display_name_consistency(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Check {
-    let ztabs_names = ztabs_names_by_session().unwrap_or_default();
     let mut mismatches = Vec::new();
-
-    for lane in &cfg.lanes {
-        let Some(session) = lane.terminal_session() else { continue };
-        if let Some(ztabs_name) = ztabs_names.get(session) {
-            if ztabs_name != &lane.name {
-                mismatches.push(format!(
-                    "{}: lane.toml says \"{}\", zellij-tabs.toml says \"{}\"",
-                    lane.id, lane.name, ztabs_name
-                ));
-            }
-        }
-    }
 
     for (id, name, target) in &cfg.boards_targets {
         let lanes::model::TargetDriver::Boards { project } = &target.driver else { continue };
@@ -735,7 +636,7 @@ fn check_display_name_consistency(cfg: &lanes::config::Config, data_dir: &std::p
         Check {
             label: "display name consistency",
             status: Status::Ok,
-            message: "lane.toml, zellij-tabs.toml, and board.yaml titles agree wherever compared".to_string(),
+            message: "lane.toml and board.yaml titles agree wherever compared".to_string(),
             hint: None,
         }
     } else {
@@ -1031,8 +932,8 @@ fn derived_boards_order(cfg: &lanes::config::Config) -> Vec<&str> {
 /// standalone, general-purpose kanban app, see PLAN-window-targets.md's
 /// repo-boundary note); this file is lanes-cli pushing its own order to
 /// Boards without Boards needing to understand lanes' config at all - same
-/// pattern as ztabs maintaining zellij-tabs.toml as a derived cache rather
-/// than Zellij/WezTerm knowing anything about lanes.
+/// reasoning `infra zellij`'s `load_tabs` uses to read `contexts.toml`'s
+/// `order` directly rather than keeping its own copy.
 fn boards_order_path(data_dir: &std::path::Path) -> std::path::PathBuf {
     data_dir.join(".order")
 }
@@ -1547,35 +1448,6 @@ mod tests {
         let check = check_lane_order(&cfg);
         assert!(matches!(check.status, Status::Warn));
         assert!(check.message.contains("ghost"));
-    }
-
-    #[test]
-    fn restrict_to_common_keeps_first_list_order_dropping_entries_absent_from_second() {
-        let order = vec!["a".to_string(), "b".to_string(), "c".to_string()];
-        let other = vec!["c".to_string(), "a".to_string()];
-        assert_eq!(restrict_to_common(&order, &other), vec!["a".to_string(), "c".to_string()]);
-    }
-
-    #[test]
-    fn restrict_to_common_detects_a_real_order_disagreement() {
-        // lanes.toml says sheetwork-planner, infra; zellij-tabs.toml says infra, sheetwork-planner.
-        let lane_order = vec!["sheetwork-planner".to_string(), "infra".to_string()];
-        let ztabs_order = vec!["infra".to_string(), "sheetwork-planner".to_string()];
-        assert_ne!(
-            restrict_to_common(&lane_order, &ztabs_order),
-            restrict_to_common(&ztabs_order, &lane_order)
-        );
-    }
-
-    #[test]
-    fn restrict_to_common_agrees_when_orders_match_modulo_extra_entries() {
-        // lanes.toml has an extra lane (spinner) ztabs doesn't manage at all.
-        let lane_order = vec!["sheetwork-planner".to_string(), "infra".to_string(), "spinner".to_string()];
-        let ztabs_order = vec!["sheetwork-planner".to_string(), "infra".to_string()];
-        assert_eq!(
-            restrict_to_common(&lane_order, &ztabs_order),
-            restrict_to_common(&ztabs_order, &lane_order)
-        );
     }
 
     #[test]

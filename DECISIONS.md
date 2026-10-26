@@ -81,24 +81,28 @@ specific process Lanes just talked to, not by app identity.
 
 ## Display names stay denormalized
 
-One context's human-facing name lives in up to three places lanes doesn't
-own the sync between: `lane.toml`'s `name`, `zellij-tabs.toml`'s `name`
-(a different tool's config), and `board.yaml`'s `title` (Boards' own data
-file, editable from inside Boards itself, in a directory lanes only ever
-*points at* via `board.toml`'s `project` key - see `board.toml`/`board.yaml`
-in the lanes-cli README's "Target drivers" section for why those are two
-separate files at all). A CRUD layer for contexts (rename, add, remove)
-could sync all three on every write, but that would mean forcing a
-specific relationship between them (always identical) that isn't actually
-true today in every case - a "<Project> Dev" lane legitimately shares a
-plain "<Project>" Boards project, for instance.
+One context's human-facing name lives in up to two places lanes doesn't own
+the sync between: `lane.toml`'s `name` and `board.yaml`'s `title` (Boards'
+own data file, editable from inside Boards itself, in a directory lanes
+only ever *points at* via `board.toml`'s `project` key - see
+`board.toml`/`board.yaml` in the lanes-cli README's "Target drivers"
+section for why those are two separate files at all). A CRUD layer for
+contexts (rename, add, remove) could sync both on every write, but that
+would mean forcing a specific relationship between them (always identical)
+that isn't actually true today in every case - a "<Project> Dev" lane
+legitimately shares a plain "<Project>" Boards project, for instance.
+
+(A third copy used to live in `zellij-tabs.toml`, a different tool's
+config - moot now that `infra zellij`'s `load_tabs` reads `name` straight
+from `lane.toml` instead of keeping its own copy, so there's nothing left
+there to drift.)
 
 Resolved by *not* syncing: each file stays independently editable, and
 `lanes doctor`'s "display name consistency" check just surfaces drift
-(lane.toml vs zellij-tabs.toml by session, lane display name vs that
-context's board.yaml title) as a warning - never auto-fixed, never fails
-the run. Fixing a real mismatch is a choice made by hand, in whichever
-file is actually stale, not something the tooling decides for you.
+(lane display name vs that context's board.yaml title) as a warning -
+never auto-fixed, never fails the run. Fixing a real mismatch is a choice
+made by hand, in whichever file is actually stale, not something the
+tooling decides for you.
 
 ## Context vs lane: context is the primary type, lane is one of its facets
 

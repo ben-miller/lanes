@@ -90,7 +90,7 @@ enum Command {
     },
 
     /// Scripted edits to a context's own files - a safer alternative to
-    /// hand-editing lane.toml/zellij-tabs.toml/board.yaml directly
+    /// hand-editing lane.toml/board.yaml directly
     #[command(name = "ctx")]
     Context {
         id: String,
@@ -263,8 +263,7 @@ enum ContextCommand {
     },
 
     /// Set a context's display name in every file it's shown in today:
-    /// lane.toml's `name`, zellij-tabs.toml's `name` for its terminal
-    /// session, and its board.yaml `title` - whichever of those apply.
+    /// lane.toml's `name` and its board.yaml `title` - whichever apply.
     SetName { name: String },
 
     /// Enable or disable a context's lane facet

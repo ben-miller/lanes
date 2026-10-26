@@ -60,12 +60,12 @@ active = true
 Example `tab.toml`:
 
 ```toml
-# Whether the WezTerm tab should be open - ztabs' own concern (see the
-# infra repo's `ztabs` command), independent of lane.toml's `active`
-# (switcher visibility). Defaults to true when absent. The two can
-# legitimately disagree: a context can be hidden from the switcher while
-# still having an open terminal tab, or vice versa.
-active = true
+# Whether this tab facet exists at all - disabled behaves exactly as if
+# tab.toml didn't exist (no scope, no WezTerm tab), independent of
+# lane.toml's `active` (switcher/cycling visibility). Defaults to true
+# when absent. The two can legitimately disagree: a context can be hidden
+# from the switcher while still having an open terminal tab, or vice versa.
+enabled = true
 
 [[scope]]
 kind = "repo"
