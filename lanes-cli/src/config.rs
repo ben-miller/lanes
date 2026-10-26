@@ -212,6 +212,65 @@ pub fn append_context_order(id: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, &path)
 }
 
+/// Which neighbor `move_context_order` swaps `id` with.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MoveDirection {
+    Up,
+    Down,
+}
+
+/// What `move_context_order` actually did - distinct from an error, since
+/// "already at that end" is a normal, expected outcome (repeatedly
+/// pressing "move up" eventually hits the top), not a failure.
+#[derive(Debug, PartialEq, Eq)]
+pub enum MoveOutcome {
+    Moved { swapped_with: String },
+    AlreadyFirst,
+    AlreadyLast,
+}
+
+/// Swaps `id` with its adjacent neighbor in `contexts.toml`'s `order` -
+/// `lanes ctx <id> move up`/`down`. This is the one true order (Boards'
+/// own `.order` is derived from it via `doctor --fix`'s
+/// `write_boards_order`; `infra zellij`'s tab order reads it directly too -
+/// see DECISIONS.md), so reordering here is reordering everything that
+/// matters, no second file to keep in sync.
+pub fn move_context_order(id: &str, direction: MoveDirection) -> Result<MoveOutcome, String> {
+    let path = config_dir().join("contexts.toml");
+    let text = std::fs::read_to_string(&path).map_err(|_| format!("'{id}' is not in contexts.toml's order - no contexts.toml found"))?;
+    let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| e.to_string())?;
+    let array = doc
+        .get_mut("order")
+        .and_then(|v| v.as_array_mut())
+        .ok_or_else(|| "contexts.toml has no `order` array".to_string())?;
+
+    let ids: Vec<String> = array.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let pos = ids.iter().position(|x| x == id).ok_or_else(|| format!("'{id}' is not in contexts.toml's order"))?;
+
+    let swap_with = match direction {
+        MoveDirection::Up if pos == 0 => return Ok(MoveOutcome::AlreadyFirst),
+        MoveDirection::Up => pos - 1,
+        MoveDirection::Down if pos + 1 == ids.len() => return Ok(MoveOutcome::AlreadyLast),
+        MoveDirection::Down => pos + 1,
+    };
+
+    let mut new_ids = ids.clone();
+    new_ids.swap(pos, swap_with);
+
+    while !array.is_empty() {
+        array.remove(0);
+    }
+    for new_id in &new_ids {
+        array.push(new_id.as_str());
+    }
+
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
+
+    Ok(MoveOutcome::Moved { swapped_with: ids[swap_with].clone() })
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -1062,6 +1121,59 @@ raise = true
             let text = std::fs::read_to_string(home.join(".config/lanes/contexts.toml")).unwrap();
             let cfg: ContextsConfig = toml::from_str(&text).unwrap();
             assert_eq!(cfg.order, Some(vec!["a".to_string(), "b".to_string()]));
+        });
+    }
+
+    fn read_order(home: &Path) -> Vec<String> {
+        let text = std::fs::read_to_string(home.join(".config/lanes/contexts.toml")).unwrap();
+        toml::from_str::<ContextsConfig>(&text).unwrap().order.unwrap()
+    }
+
+    #[test]
+    fn move_context_order_up_swaps_with_the_previous_entry() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\", \"c\"]\n").unwrap();
+            let outcome = move_context_order("b", MoveDirection::Up).unwrap();
+            assert_eq!(outcome, MoveOutcome::Moved { swapped_with: "a".to_string() });
+            assert_eq!(read_order(home), vec!["b".to_string(), "a".to_string(), "c".to_string()]);
+        });
+    }
+
+    #[test]
+    fn move_context_order_down_swaps_with_the_next_entry() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\", \"c\"]\n").unwrap();
+            let outcome = move_context_order("b", MoveDirection::Down).unwrap();
+            assert_eq!(outcome, MoveOutcome::Moved { swapped_with: "c".to_string() });
+            assert_eq!(read_order(home), vec!["a".to_string(), "c".to_string(), "b".to_string()]);
+        });
+    }
+
+    #[test]
+    fn move_context_order_up_is_a_noop_when_already_first() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\"]\n").unwrap();
+            let outcome = move_context_order("a", MoveDirection::Up).unwrap();
+            assert_eq!(outcome, MoveOutcome::AlreadyFirst);
+            assert_eq!(read_order(home), vec!["a".to_string(), "b".to_string()]);
+        });
+    }
+
+    #[test]
+    fn move_context_order_down_is_a_noop_when_already_last() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\"]\n").unwrap();
+            let outcome = move_context_order("b", MoveDirection::Down).unwrap();
+            assert_eq!(outcome, MoveOutcome::AlreadyLast);
+            assert_eq!(read_order(home), vec!["a".to_string(), "b".to_string()]);
+        });
+    }
+
+    #[test]
+    fn move_context_order_errors_when_the_id_is_not_in_order() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\"]\n").unwrap();
+            assert!(move_context_order("nope", MoveDirection::Up).is_err());
         });
     }
 

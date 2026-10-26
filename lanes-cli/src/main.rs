@@ -283,6 +283,25 @@ enum ContextCommand {
         #[command(subcommand)]
         command: BoardFacetCommand,
     },
+
+    /// Move this context up or down in contexts.toml's `order` - the one
+    /// true order (Boards' own order and infra zellij's tab order both
+    /// derive from it), so this is the only reordering command needed.
+    Move {
+        #[command(subcommand)]
+        command: MoveCommand,
+    },
+}
+
+#[derive(Subcommand)]
+enum MoveCommand {
+    /// Swap with the previous context in contexts.toml's order. A no-op
+    /// if already first.
+    Up,
+
+    /// Swap with the next context in contexts.toml's order. A no-op if
+    /// already last.
+    Down,
 }
 
 #[derive(Subcommand)]
@@ -532,6 +551,22 @@ fn main() {
                 BoardFacetCommand::Disable => set_facet_enabled_or_exit(&id, "board", false),
                 BoardFacetCommand::Enable => set_facet_enabled_or_exit(&id, "board", true),
             },
+
+            ContextCommand::Move { command } => {
+                let direction = match command {
+                    MoveCommand::Up => lanes::config::MoveDirection::Up,
+                    MoveCommand::Down => lanes::config::MoveDirection::Down,
+                };
+                match lanes::config::move_context_order(&id, direction) {
+                    Ok(lanes::config::MoveOutcome::Moved { swapped_with }) => println!("{id} <-> {swapped_with}"),
+                    Ok(lanes::config::MoveOutcome::AlreadyFirst) => println!("{id} is already first"),
+                    Ok(lanes::config::MoveOutcome::AlreadyLast) => println!("{id} is already last"),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
         },
 
         Command::Sessions { command } => match command {
