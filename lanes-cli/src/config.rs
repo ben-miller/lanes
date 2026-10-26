@@ -212,6 +212,22 @@ pub fn append_context_order(id: &str) -> std::io::Result<()> {
     std::fs::rename(&tmp, &path)
 }
 
+/// Removes `id` from `contexts.toml`'s `order` array, in place - the
+/// counterpart to `append_context_order`, used by `lanes ctx <id> remove
+/// --delete`. A no-op, not an error, if `id` was never listed, or if
+/// `contexts.toml` doesn't exist at all - there's nothing to remove it
+/// from either way.
+pub fn remove_context_order(id: &str) -> Result<(), String> {
+    let path = config_dir().join("contexts.toml");
+    if !path.exists() {
+        return Ok(());
+    }
+    edit_context_order(id, |ids| {
+        ids.retain(|x| x != id);
+        Ok(())
+    })
+}
+
 /// Which neighbor `move_context_order` swaps `id` with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveDirection {

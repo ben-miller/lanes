@@ -262,6 +262,16 @@ enum ContextCommand {
         repo: Option<String>,
     },
 
+    /// Remove this context - the counterpart to `add`. By default, a
+    /// soft, reversible removal: disables every facet it has (same as
+    /// disabling each one individually), without deleting anything.
+    Remove {
+        /// Actually delete the context directory and its contexts.toml
+        /// order entry, instead of just disabling its facets. No undo.
+        #[arg(long)]
+        delete: bool,
+    },
+
     /// Set a context's display name in every file it's shown in today:
     /// lane.toml's `name` and its board.yaml `title` - whichever apply.
     SetName { name: String },
@@ -534,6 +544,8 @@ fn main() {
             ContextCommand::Add { name, lane, board, project, session, repo } => {
                 cmd::add::run(&id, &name, cmd::add::Options { lane, board, project, session, repo });
             }
+
+            ContextCommand::Remove { delete } => cmd::remove::run(&id, delete),
 
             ContextCommand::SetName { name } => {
                 let cfg = lanes::config::Config::load();

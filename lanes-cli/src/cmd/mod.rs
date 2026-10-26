@@ -5,4 +5,5 @@ pub mod doctor;
 pub mod focus;
 pub mod ls;
 pub mod logs;
+pub mod remove;
 pub mod shell_init;
