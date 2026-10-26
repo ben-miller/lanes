@@ -276,16 +276,12 @@ enum ContextCommand {
     /// lane.toml's `name` and its board.yaml `title` - whichever apply.
     SetName { name: String },
 
-    /// Enable or disable a context's lane facet
+    /// Enable or disable a context's lane facet - this also governs its
+    /// tab.toml/layout.toml, which have no enable/disable of their own
+    /// (see LaneToml's doc comment in config.rs).
     Lane {
         #[command(subcommand)]
         command: LaneFacetCommand,
-    },
-
-    /// Enable or disable a context's tab facet
-    Tab {
-        #[command(subcommand)]
-        command: TabFacetCommand,
     },
 
     /// Enable or disable a context's board facet
@@ -339,17 +335,6 @@ enum LaneFacetCommand {
     Disable,
 
     /// Re-enable this context's lane facet, restoring its lane.toml.
-    Enable,
-}
-
-#[derive(Subcommand)]
-enum TabFacetCommand {
-    /// Disable this context's tab facet - its tab.toml's `scope` is kept
-    /// on disk but behaves as if the file didn't exist (no zellij
-    /// session, no repo anchor) until re-enabled.
-    Disable,
-
-    /// Re-enable this context's tab facet, restoring its tab.toml's `scope`.
     Enable,
 }
 
@@ -439,14 +424,12 @@ enum TabsCommand {
     Clear { session: String },
 }
 
-/// Shared body for the six `ctx enable-*`/`disable-*` commands: `facet` is
-/// "lane", "tab", or "board", picking which facet file's `enabled` key to
-/// flip (see `config::set_lane_enabled`/`set_tab_enabled`/
-/// `set_board_enabled`).
+/// Shared body for the four `ctx lane/board enable|disable` commands:
+/// `facet` is "lane" or "board", picking which facet file's `enabled` key
+/// to flip (see `config::set_lane_enabled`/`set_board_enabled`).
 fn set_facet_enabled_or_exit(id: &str, facet: &str, enabled: bool) {
     let result = match facet {
         "lane" => lanes::config::set_lane_enabled(id, enabled),
-        "tab" => lanes::config::set_tab_enabled(id, enabled),
         "board" => lanes::config::set_board_enabled(id, enabled),
         _ => unreachable!("set_facet_enabled_or_exit called with an unknown facet {facet:?}"),
     };
@@ -569,10 +552,6 @@ fn main() {
             ContextCommand::Lane { command } => match command {
                 LaneFacetCommand::Disable => set_facet_enabled_or_exit(&id, "lane", false),
                 LaneFacetCommand::Enable => set_facet_enabled_or_exit(&id, "lane", true),
-            },
-            ContextCommand::Tab { command } => match command {
-                TabFacetCommand::Disable => set_facet_enabled_or_exit(&id, "tab", false),
-                TabFacetCommand::Enable => set_facet_enabled_or_exit(&id, "tab", true),
             },
             ContextCommand::Board { command } => match command {
                 BoardFacetCommand::Disable => set_facet_enabled_or_exit(&id, "board", false),

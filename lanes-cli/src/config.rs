@@ -155,12 +155,6 @@ pub fn set_lane_enabled(context_id: &str, enabled: bool) -> std::io::Result<()> 
     set_facet_flag(context_id, "lane.toml", "enabled", enabled)
 }
 
-/// Flip a context's `enabled` flag in its `tab.toml` facet - see TabToml's
-/// doc comment for what disabling it does.
-pub fn set_tab_enabled(context_id: &str, enabled: bool) -> std::io::Result<()> {
-    set_facet_flag(context_id, "tab.toml", "enabled", enabled)
-}
-
 /// Flip a context's `enabled` flag in its `board.toml` facet - see
 /// `read_board_target`'s doc comment for what disabling it does.
 pub fn set_board_enabled(context_id: &str, enabled: bool) -> std::io::Result<()> {
@@ -443,16 +437,19 @@ struct ContextsConfig {
 /// `<context>/lane.toml` - the switcher-facing facet, and the one thing
 /// that makes a context a *lane* at all. A context dir with no `lane.toml`,
 /// or one with `enabled = false`, is not a lane - it's invisible to
-/// `cfg.lanes`, the dashboard, and cycling entirely, even though its other
-/// facets (`tab.toml`, `board.toml`) are still read directly for their own
-/// purposes (see `load_contexts`).
+/// `cfg.lanes`, the dashboard, and cycling entirely. `board.toml` is still
+/// read independently of this (a board-only context doesn't need a lane at
+/// all - see `load_contexts`), but `tab.toml`/`layout.toml` are only ever
+/// read *inside* an enabled lane - this is the sole enable/disable flag for
+/// the whole lane+tab+layout bundle, not one of several independent ones.
 ///
 /// Two independent bits, not one - don't conflate them:
-/// - `enabled` (default true): whether this facet exists at all. `false`
-///   behaves exactly as if `lane.toml` were absent (see `load_contexts`),
-///   but the file's own content (name, whatever else gets added later)
-///   stays on disk, so re-enabling restores it. Set via `lanes ctx
-///   disable-lane`/`enable-lane`.
+/// - `enabled` (default true): whether this facet (and, with it, the
+///   `tab.toml`/`layout.toml` that ride along with it) exists at all.
+///   `false` behaves exactly as if `lane.toml` were absent (see
+///   `load_contexts`), but the file's own content (name, whatever else gets
+///   added later) stays on disk, so re-enabling restores it. Set via `lanes
+///   ctx <id> lane disable`/`enable`.
 /// - `active` (default true): cycling membership for a lane that's still
 ///   fully present and visible - "is this part of the current working
 ///   set," same as before this field existed. Set via `lanes
@@ -472,22 +469,15 @@ struct LaneToml {
 /// do-everything lane file's `[[scope]]` array). Same human-friendly
 /// `ScopeElementRaw` shape as before, just split into its own file.
 ///
-/// `enabled` (default true) disables this facet without deleting it: a
-/// disabled tab behaves exactly as if `tab.toml` didn't exist at all (empty
-/// scope - see `load_contexts`), but its `scope` entries stay on disk so
-/// re-enabling restores them verbatim rather than making you re-author them.
-#[derive(Deserialize)]
+/// No `enabled` key of its own - `lane.toml`'s `enabled` is the single flag
+/// that governs the whole lane+tab+layout bundle (see `LaneToml`'s doc
+/// comment and `load_contexts`): a disabled lane makes this file's `scope`
+/// behave as if it didn't exist, same as before, just gated on one flag
+/// instead of two.
+#[derive(Deserialize, Default)]
 struct TabToml {
-    #[serde(default = "default_true")]
-    enabled: bool,
     #[serde(default)]
     scope: Vec<ScopeElementRaw>,
-}
-
-impl Default for TabToml {
-    fn default() -> Self {
-        Self { enabled: true, scope: Vec::new() }
-    }
 }
 
 fn default_true() -> bool {
@@ -747,15 +737,7 @@ fn load_contexts(dir: &Path, templates_dir: &Path, default_targets: &[Target]) -
                 let mut own_targets = layout_toml.targets;
                 own_targets.extend(board_target.clone());
 
-                // A disabled tab (`enabled: false`) behaves exactly as if
-                // tab.toml didn't exist - empty scope - while its `scope`
-                // entries stay on disk for re-enabling (see TabToml's doc
-                // comment).
-                let scope = if tab_toml.enabled {
-                    tab_toml.scope.into_iter().map(ScopeElement::from).collect()
-                } else {
-                    Vec::new()
-                };
+                let scope = tab_toml.scope.into_iter().map(ScopeElement::from).collect();
 
                 Some(Lane {
                     name: lane_toml.name.unwrap_or_else(|| id.clone()),
@@ -1196,16 +1178,6 @@ raise = true
     }
 
     #[test]
-    fn set_tab_enabled_creates_tab_toml_when_absent() {
-        with_fake_home(|home| {
-            std::fs::create_dir_all(home.join(".config/lanes/contexts/ctx")).unwrap();
-            set_tab_enabled("ctx", false).unwrap();
-            let text = std::fs::read_to_string(home.join(".config/lanes/contexts/ctx/tab.toml")).unwrap();
-            assert!(text.contains("enabled = false"));
-        });
-    }
-
-    #[test]
     fn set_board_enabled_preserves_other_keys() {
         with_fake_home(|home| {
             let dir = home.join(".config/lanes/contexts/ctx");
@@ -1557,9 +1529,13 @@ raise = true
     }
 
     #[test]
-    fn load_contexts_a_disabled_tab_has_empty_scope_but_an_enabled_lane() {
+    fn load_contexts_tab_toml_has_no_independent_enabled_flag_anymore() {
+        // tab.toml no longer has its own `enabled` key - lane.toml's is the
+        // sole flag for the whole bundle now. A stray `enabled = false` left
+        // in tab.toml (e.g. from before this change) is simply an unknown
+        // key TabToml ignores; the scope still comes through.
         let root = std::env::temp_dir().join(format!(
-            "lanes-config-test-disabled-tab-{}-{:?}",
+            "lanes-config-test-tab-no-own-enabled-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));
@@ -1571,12 +1547,29 @@ raise = true
 
         let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
         let lane = contexts[0].lane.as_ref().unwrap();
-        // The tab facet is disabled, so its scope behaves as if tab.toml
-        // doesn't exist - it must not leak through even though the file
-        // still has real entries on disk.
-        assert!(lane.scope.is_empty());
-        // Disabling the tab facet is independent of the lane facet itself.
-        assert!(lane.active);
+        assert_eq!(lane.scope.len(), 1);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn load_contexts_disabling_the_lane_hides_its_tab_scope_too() {
+        // The lane's `enabled` is the sole gate for the whole bundle now -
+        // disabling it hides tab.toml's scope along with everything else,
+        // with no separate tab-level flag to also flip.
+        let root = std::env::temp_dir().join(format!(
+            "lanes-config-test-disabled-lane-hides-tab-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&root);
+        let dir = root.join("ctx");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("lane.toml"), "enabled = false\n").unwrap();
+        std::fs::write(dir.join("tab.toml"), "[[scope]]\nkind = \"repo\"\npath = \"~/src/infra\"\n").unwrap();
+
+        let contexts = load_contexts(&root, Path::new("/nonexistent"), &[]);
+        assert!(contexts[0].lane.is_none());
 
         std::fs::remove_dir_all(&root).ok();
     }

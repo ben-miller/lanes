@@ -1,10 +1,11 @@
 //! `lanes ctx <id> remove`: the counterpart to `add`. Defaults to a soft,
 //! reversible removal - disabling every facet the context has, the same
-//! as running `lane`/`tab`/`board disable` on each one that exists, so it
-//! behaves as if the context were gone without actually deleting
-//! anything. `--delete` instead removes it for real: the whole context
-//! directory, and its entry in `contexts.toml`'s `order` - no undo, same
-//! as any other filesystem delete.
+//! as running `lane`/`board disable` on each one that exists (disabling
+//! the lane facet already hides its `tab.toml`/`layout.toml` along with
+//! it), so it behaves as if the context were gone without actually
+//! deleting anything. `--delete` instead removes it for real: the whole
+//! context directory, and its entry in `contexts.toml`'s `order` - no
+//! undo, same as any other filesystem delete.
 
 pub fn run(id: &str, delete: bool) {
     let dir = lanes::config::config_dir().join("contexts").join(id);
@@ -50,11 +51,12 @@ type FacetDisabler = (&'static str, std::path::PathBuf, fn(&str) -> std::io::Res
 /// Which facet files this context has, and the function that disables
 /// each one - driven entirely by file presence, same as `load_contexts`
 /// itself, rather than hardcoding an assumption about which facets a
-/// context "should" have.
+/// context "should" have. `tab.toml`/`layout.toml` have no disabler of
+/// their own anymore - `lane.toml`'s `enabled` already governs the whole
+/// lane+tab+layout bundle (see `LaneToml`'s doc comment).
 fn facet_disablers(dir: &std::path::Path) -> Vec<FacetDisabler> {
     vec![
         ("lane", dir.join("lane.toml"), |id| lanes::config::set_lane_enabled(id, false)),
-        ("tab", dir.join("tab.toml"), |id| lanes::config::set_tab_enabled(id, false)),
         ("board", dir.join("board.toml"), |id| lanes::config::set_board_enabled(id, false)),
     ]
 }
