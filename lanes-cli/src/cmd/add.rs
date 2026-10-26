@@ -1,13 +1,18 @@
-//! `lanes ctx <id> add`: scaffold a brand-new context - the CRUD primitive
+//! `lanes ctx <id> add`: scaffold a context's facets - the CRUD primitive
 //! that was missing this whole time (`set-name` and the `lane`/`tab`/
-//! `board` `enable`/`disable` pairs only ever operate on a context that
-//! already exists). Writes whichever facet files are requested, with
+//! `board` `enable`/`disable` pairs only ever operate on a facet that
+//! already exists). Works for a brand-new context (directory doesn't
+//! exist yet) and equally for adding a facet an *existing* context never
+//! had (e.g. giving a lane-only context a board too) - the only thing
+//! this ever refuses is a facet that's already there, never the context
+//! existing at all. Writes whichever facet files are requested, with
 //! everything defaulting to enabled (see DECISIONS.md's "disabled means
 //! absent" design - a freshly created facet has no reason to start
-//! disabled), appends the new id to `contexts.toml`'s `order`, and (for
-//! `--board`) materializes its `board.yaml` immediately via the same path
-//! `lanes doctor --fix` uses, so the new context passes every `doctor`
-//! check right away instead of needing a follow-up `--fix` run.
+//! disabled), appends the id to `contexts.toml`'s `order` (a no-op if
+//! it's already listed), and (for `--board`) materializes its
+//! `board.yaml` immediately via the same path `lanes doctor --fix` uses,
+//! so the context passes every `doctor` check right away instead of
+//! needing a follow-up `--fix` run.
 
 use std::io;
 
@@ -26,8 +31,8 @@ pub fn run(id: &str, name: &str, opts: Options) {
     }
 
     let dir = lanes::config::config_dir().join("contexts").join(id);
-    if dir.exists() {
-        eprintln!("context {id:?} already exists ({})", dir.display());
+    if let Err(e) = check_not_already_present(id, &dir, &opts) {
+        eprintln!("{e}");
         std::process::exit(1);
     }
 
@@ -37,17 +42,21 @@ pub fn run(id: &str, name: &str, opts: Options) {
     }
 
     if let Err(e) = lanes::config::append_context_order(id) {
-        eprintln!("created {id:?} but failed to register it in contexts.toml's order: {e}");
+        eprintln!("added to {id:?} but failed to register it in contexts.toml's order: {e}");
         std::process::exit(1);
     }
 
-    let mut created = vec![id.to_string()];
+    let mut created = Vec::new();
+    if opts.lane {
+        created.push("lane.toml".to_string());
+    }
     if opts.board {
+        created.push("board.toml".to_string());
         let cfg = lanes::config::Config::load();
         let board_yaml_created = super::doctor::materialize_boards_projects(&cfg, &lanes::boards_data_dir());
         created.extend(board_yaml_created.into_iter().map(|p| format!("board.yaml for {p:?}")));
     }
-    println!("created: {}", created.join(", "));
+    println!("{id}: {}", created.join(", "));
 }
 
 /// Rejects a request before anything is written: `id` must be kebab-case
@@ -65,6 +74,19 @@ fn validate(id: &str, opts: &Options) -> Result<(), String> {
     }
     if !opts.lane && (opts.session.is_some() || opts.repo.is_some()) {
         return Err("--session/--repo populate tab.toml, which only does anything with --lane".to_string());
+    }
+    Ok(())
+}
+
+/// Refuses to clobber a facet that's already there - the only thing that
+/// blocks `add`, never the context existing at all (see this module's own
+/// doc comment).
+fn check_not_already_present(id: &str, dir: &std::path::Path, opts: &Options) -> Result<(), String> {
+    if opts.lane && dir.join("lane.toml").exists() {
+        return Err(format!("{id:?} already has a lane facet"));
+    }
+    if opts.board && dir.join("board.toml").exists() {
+        return Err(format!("{id:?} already has a board facet"));
     }
     Ok(())
 }
@@ -175,6 +197,26 @@ mod tests {
     #[test]
     fn validate_accepts_lane_with_session() {
         assert!(validate("ctx", &Options { lane: true, session: Some("ctx".to_string()), ..opts() }).is_ok());
+    }
+
+    #[test]
+    fn check_not_already_present_allows_adding_board_to_a_lane_only_context() {
+        with_fake_home(|home| {
+            let dir = home.join(".config/lanes/contexts/ctx");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("lane.toml"), "name = \"Ctx\"\n").unwrap();
+            assert!(check_not_already_present("ctx", &dir, &Options { board: true, ..opts() }).is_ok());
+        });
+    }
+
+    #[test]
+    fn check_not_already_present_rejects_a_facet_that_is_already_there() {
+        with_fake_home(|home| {
+            let dir = home.join(".config/lanes/contexts/ctx");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("board.toml"), "driver = \"boards\"\nproject = \"Ctx\"\n").unwrap();
+            assert!(check_not_already_present("ctx", &dir, &Options { board: true, ..opts() }).is_err());
+        });
     }
 
     #[test]

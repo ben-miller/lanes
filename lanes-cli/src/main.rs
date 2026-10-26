@@ -302,6 +302,13 @@ enum MoveCommand {
     /// Swap with the next context in contexts.toml's order. A no-op if
     /// already last.
     Down,
+
+    /// Move to sit immediately before OTHER, in one jump - however far
+    /// apart they currently are.
+    Before { other: String },
+
+    /// Move to sit immediately after OTHER, in one jump.
+    After { other: String },
 }
 
 #[derive(Subcommand)]
@@ -552,23 +559,44 @@ fn main() {
                 BoardFacetCommand::Enable => set_facet_enabled_or_exit(&id, "board", true),
             },
 
-            ContextCommand::Move { command } => {
-                let direction = match command {
-                    MoveCommand::Up => lanes::config::MoveDirection::Up,
-                    MoveCommand::Down => lanes::config::MoveDirection::Down,
-                };
-                match lanes::config::move_context_order(&id, direction) {
-                    // Boards reads contexts.toml's order directly now (see
-                    // board.rs's lanes_order in the boards repo) - nothing
-                    // to re-push here, it just sees the new order live.
+            // Boards and infra zellij both read contexts.toml's order
+            // directly now - nothing to re-push after any of these, they
+            // just see the new order live.
+            ContextCommand::Move { command: MoveCommand::Up } => {
+                match lanes::config::move_context_order(&id, lanes::config::MoveDirection::Up) {
                     Ok(lanes::config::MoveOutcome::Moved { swapped_with }) => println!("{id} <-> {swapped_with}"),
                     Ok(lanes::config::MoveOutcome::AlreadyFirst) => println!("{id} is already first"),
-                    Ok(lanes::config::MoveOutcome::AlreadyLast) => println!("{id} is already last"),
+                    Ok(lanes::config::MoveOutcome::AlreadyLast) => unreachable!(),
                     Err(e) => {
                         eprintln!("{e}");
                         std::process::exit(1);
                     }
                 }
+            }
+            ContextCommand::Move { command: MoveCommand::Down } => {
+                match lanes::config::move_context_order(&id, lanes::config::MoveDirection::Down) {
+                    Ok(lanes::config::MoveOutcome::Moved { swapped_with }) => println!("{id} <-> {swapped_with}"),
+                    Ok(lanes::config::MoveOutcome::AlreadyLast) => println!("{id} is already last"),
+                    Ok(lanes::config::MoveOutcome::AlreadyFirst) => unreachable!(),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+            ContextCommand::Move { command: MoveCommand::Before { other } } => {
+                if let Err(e) = lanes::config::move_context_before(&id, &other) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("{id} -> before {other}");
+            }
+            ContextCommand::Move { command: MoveCommand::After { other } } => {
+                if let Err(e) = lanes::config::move_context_after(&id, &other) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("{id} -> after {other}");
             }
         },
 

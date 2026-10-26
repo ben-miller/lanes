@@ -229,45 +229,96 @@ pub enum MoveOutcome {
     AlreadyLast,
 }
 
-/// Swaps `id` with its adjacent neighbor in `contexts.toml`'s `order` -
-/// `lanes ctx <id> move up`/`down`. This is the one true order - Boards
-/// and `infra zellij`'s tab order both read it directly (see
-/// DECISIONS.md), nothing derived from it needs a separate push - so
-/// reordering here is reordering everything that matters.
-pub fn move_context_order(id: &str, direction: MoveDirection) -> Result<MoveOutcome, String> {
+/// Shared plumbing for every `contexts.toml` `order`-reordering function:
+/// reads the array into a plain `Vec<String>`, lets `f` reorder it however
+/// it likes (swap, remove+insert, ...), then writes the result back
+/// verbatim. `id_for_error` is only used for the "no contexts.toml at all"
+/// case, where no id-specific error from `f` has a chance to run yet.
+fn edit_context_order<T>(id_for_error: &str, f: impl FnOnce(&mut Vec<String>) -> Result<T, String>) -> Result<T, String> {
     let path = config_dir().join("contexts.toml");
-    let text = std::fs::read_to_string(&path).map_err(|_| format!("'{id}' is not in contexts.toml's order - no contexts.toml found"))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|_| format!("'{id_for_error}' is not in contexts.toml's order - no contexts.toml found"))?;
     let mut doc = text.parse::<toml_edit::DocumentMut>().map_err(|e| e.to_string())?;
     let array = doc
         .get_mut("order")
         .and_then(|v| v.as_array_mut())
         .ok_or_else(|| "contexts.toml has no `order` array".to_string())?;
 
-    let ids: Vec<String> = array.iter().filter_map(|v| v.as_str().map(String::from)).collect();
-    let pos = ids.iter().position(|x| x == id).ok_or_else(|| format!("'{id}' is not in contexts.toml's order"))?;
-
-    let swap_with = match direction {
-        MoveDirection::Up if pos == 0 => return Ok(MoveOutcome::AlreadyFirst),
-        MoveDirection::Up => pos - 1,
-        MoveDirection::Down if pos + 1 == ids.len() => return Ok(MoveOutcome::AlreadyLast),
-        MoveDirection::Down => pos + 1,
-    };
-
-    let mut new_ids = ids.clone();
-    new_ids.swap(pos, swap_with);
+    let mut ids: Vec<String> = array.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+    let result = f(&mut ids)?;
 
     while !array.is_empty() {
         array.remove(0);
     }
-    for new_id in &new_ids {
-        array.push(new_id.as_str());
+    for id in &ids {
+        array.push(id.as_str());
     }
 
     let tmp = path.with_extension("toml.tmp");
     std::fs::write(&tmp, doc.to_string()).map_err(|e| e.to_string())?;
     std::fs::rename(&tmp, &path).map_err(|e| e.to_string())?;
 
-    Ok(MoveOutcome::Moved { swapped_with: ids[swap_with].clone() })
+    Ok(result)
+}
+
+/// Swaps `id` with its adjacent neighbor in `contexts.toml`'s `order` -
+/// `lanes ctx <id> move up`/`down`. This is the one true order - Boards
+/// and `infra zellij`'s tab order both read it directly (see
+/// DECISIONS.md), nothing derived from it needs a separate push - so
+/// reordering here is reordering everything that matters. For moving
+/// further than one step, see `move_context_before`/`move_context_after` -
+/// repeatedly calling this one step at a time is what this function used
+/// to require, and hand-editing contexts.toml was the only alternative.
+pub fn move_context_order(id: &str, direction: MoveDirection) -> Result<MoveOutcome, String> {
+    edit_context_order(id, |ids| {
+        let pos = ids.iter().position(|x| x == id).ok_or_else(|| format!("'{id}' is not in contexts.toml's order"))?;
+        let swap_with = match direction {
+            MoveDirection::Up if pos == 0 => return Ok(MoveOutcome::AlreadyFirst),
+            MoveDirection::Up => pos - 1,
+            MoveDirection::Down if pos + 1 == ids.len() => return Ok(MoveOutcome::AlreadyLast),
+            MoveDirection::Down => pos + 1,
+        };
+        let swapped_with = ids[swap_with].clone();
+        ids.swap(pos, swap_with);
+        Ok(MoveOutcome::Moved { swapped_with })
+    })
+}
+
+/// Moves `id` to sit immediately before `before_id` in `contexts.toml`'s
+/// `order`, in one jump - whatever their current positions, however far
+/// apart. `lanes ctx <id> move before <before_id>`.
+pub fn move_context_before(id: &str, before_id: &str) -> Result<(), String> {
+    if id == before_id {
+        return Err(format!("'{id}' can't move before itself"));
+    }
+    edit_context_order(id, |ids| {
+        let pos = ids.iter().position(|x| x == id).ok_or_else(|| format!("'{id}' is not in contexts.toml's order"))?;
+        ids.remove(pos);
+        let target = ids
+            .iter()
+            .position(|x| x == before_id)
+            .ok_or_else(|| format!("'{before_id}' is not in contexts.toml's order"))?;
+        ids.insert(target, id.to_string());
+        Ok(())
+    })
+}
+
+/// Moves `id` to sit immediately after `after_id` in `contexts.toml`'s
+/// `order`, in one jump. `lanes ctx <id> move after <after_id>`.
+pub fn move_context_after(id: &str, after_id: &str) -> Result<(), String> {
+    if id == after_id {
+        return Err(format!("'{id}' can't move after itself"));
+    }
+    edit_context_order(id, |ids| {
+        let pos = ids.iter().position(|x| x == id).ok_or_else(|| format!("'{id}' is not in contexts.toml's order"))?;
+        ids.remove(pos);
+        let target = ids
+            .iter()
+            .position(|x| x == after_id)
+            .ok_or_else(|| format!("'{after_id}' is not in contexts.toml's order"))?;
+        ids.insert(target + 1, id.to_string());
+        Ok(())
+    })
 }
 
 impl Default for Config {
@@ -1173,6 +1224,43 @@ raise = true
         with_fake_home(|home| {
             std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\"]\n").unwrap();
             assert!(move_context_order("nope", MoveDirection::Up).is_err());
+        });
+    }
+
+    #[test]
+    fn move_context_before_jumps_from_the_end_to_the_front_in_one_call() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\", \"c\", \"admin\"]\n").unwrap();
+            move_context_before("admin", "a").unwrap();
+            assert_eq!(read_order(home), vec!["admin".to_string(), "a".to_string(), "b".to_string(), "c".to_string()]);
+        });
+    }
+
+    #[test]
+    fn move_context_after_jumps_from_the_front_to_the_end_in_one_call() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\", \"c\"]\n").unwrap();
+            move_context_after("a", "c").unwrap();
+            assert_eq!(read_order(home), vec!["b".to_string(), "c".to_string(), "a".to_string()]);
+        });
+    }
+
+    #[test]
+    fn move_context_before_errors_when_moving_before_itself() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\"]\n").unwrap();
+            assert!(move_context_before("a", "a").is_err());
+        });
+    }
+
+    #[test]
+    fn move_context_before_errors_when_the_target_id_is_unknown() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\"]\n").unwrap();
+            assert!(move_context_before("a", "nope").is_err());
+            // Unchanged on error - the removal shouldn't stick if the
+            // reinsertion target can't be found.
+            assert_eq!(read_order(home), vec!["a".to_string(), "b".to_string()]);
         });
     }
 
