@@ -125,11 +125,18 @@ pub struct Target {
     /// a silent auto-open.
     #[serde(default)]
     pub launch: bool,
-    /// Force raising this target's window even though it also has a
-    /// placement - the default (raise only when there's no placement)
-    /// assumes a placed target doesn't need to be seen right away, which
-    /// is true for WezTerm/Firefox but not for a "peek" app whose entire
-    /// purpose is to be glanced at.
+    /// Bring this target's window to the front during `apply_targets`,
+    /// transiently - never the final word on what's focused after a lane
+    /// switch (that's always `primary`, or the terminal by default, both
+    /// applied after every `raise` here - see `land_lane`'s doc comment).
+    /// Independent of whether this target has a placement: a target with
+    /// neither `raise` nor a position is a deliberate no-op, left exactly
+    /// as it is, not implicitly raised just because it's unplaced. Default
+    /// false. Confirmed directly that there's no macOS mechanism to bring
+    /// a window to the front of other apps' windows without also
+    /// activating its owning app - `raise` really does mean "activate,"
+    /// which is why it's always transient here, overridden by whatever
+    /// focus actually lands last.
     #[serde(default)]
     pub raise: bool,
     /// Minimize (true) or de-minimize (false) this target's window via

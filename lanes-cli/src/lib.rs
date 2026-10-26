@@ -1041,16 +1041,15 @@ fn run_command_checked(cmd: &mut std::process::Command, label: &str) -> Result<(
 /// across lanes that each have a different session name.
 ///
 /// `raise_app` controls whether the `app` driver visibly brings its app
-/// forward (`open -a`) - only meaningful there. lanes-wm's `--focused`
+/// forward (`open -a`) - only meaningful there, and just `target.raise`
+/// passed straight through (see its doc comment). lanes-wm's `--focused`
 /// placement selector resolves and repositions a window correctly whether
 /// or not its app is frontmost, so a target that's only being *placed*
-/// (has `monitor` set) doesn't need to steal focus to do that; raising is
-/// reserved for activate-only `app` targets (e.g. a Trello peek app),
-/// whose entire purpose is to be brought into view. Without this, every
-/// target in a lane briefly raised its own app in sequence before the
-/// final terminal-focus step landed - visibly flickering through each app
-/// on every switch instead of just showing the one or two that actually
-/// need to be seen.
+/// doesn't need this to do that - raising is for a target that actually
+/// wants to be seen, placed or not. Without gating this at all, every
+/// target in a lane would briefly raise its own app in sequence before
+/// the final terminal-focus step landed - visibly flickering through each
+/// app on every switch instead of just showing the ones that asked for it.
 fn activate_target(
     driver: &model::TargetDriver,
     raise_app: bool,
@@ -1368,12 +1367,12 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
             .map(|(target, effective)| {
                 scope.spawn(move || {
                     let target_t0 = std::time::Instant::now();
-                    // Only raise an `app` target's window when it isn't
-                    // being placed, unless the target explicitly asks to be
-                    // raised anyway (a "peek" app that also wants
-                    // placement) - see activate_target's doc comment and
-                    // Target::raise's doc comment for why.
-                    let raise_app = effective.is_none() || target.raise;
+                    // `raise` is the sole gate, regardless of whether this
+                    // target has a position - a target with neither is a
+                    // deliberate no-op (left exactly as it is, never
+                    // touched), not an implicit "no position means raise
+                    // it" rule. See Target::raise's doc comment.
+                    let raise_app = target.raise;
                     // Only Boards' own activation can use this - see
                     // activate_boards_target's doc comment for why it
                     // needs its destination before raising, unlike every
