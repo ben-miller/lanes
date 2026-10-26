@@ -34,9 +34,6 @@ pub fn run(fix: bool) {
         for project in materialize_boards_projects(&cfg, &boards_dir) {
             println!("created {}/board.yaml", boards_dir.join(&project).display());
         }
-        if write_boards_order(&cfg, &boards_dir).is_some() {
-            println!("wrote {}", boards_order_path(&boards_dir).display());
-        }
     }
 
     let mut checks = vec![
@@ -57,7 +54,6 @@ pub fn run(fix: bool) {
 
     if has_boards_target(&cfg) {
         checks.push(check_boards_projects(&cfg, &boards_dir));
-        checks.push(check_boards_order(&cfg, &boards_dir));
     }
 
     if cfg.driver_enabled("zellij") {
@@ -913,70 +909,6 @@ fn boards_project_names(cfg: &lanes::config::Config) -> Vec<(&str, &str)> {
         .collect()
 }
 
-/// Every Boards project name, in `boards_project_names`' own (context-)
-/// order, deduplicated keeping the first occurrence - two contexts can
-/// legitimately point at the same project (see e.g. sheetwork-dev/
-/// sheetwork-sandbox sharing one board historically) and it should only
-/// appear once, at whichever context names it first.
-fn derived_boards_order(cfg: &lanes::config::Config) -> Vec<&str> {
-    let mut seen = std::collections::HashSet::new();
-    boards_project_names(cfg)
-        .into_iter()
-        .map(|(_, project)| project)
-        .filter(|project| seen.insert(*project))
-        .collect()
-}
-
-/// `<data_dir>/.order` - one Boards project name per line, in lane order.
-/// Boards itself has no concept of "lane order" (deliberately - it's a
-/// standalone, general-purpose kanban app, see PLAN-window-targets.md's
-/// repo-boundary note); this file is lanes-cli pushing its own order to
-/// Boards without Boards needing to understand lanes' config at all - same
-/// reasoning `infra zellij`'s `load_tabs` uses to read `contexts.toml`'s
-/// `order` directly rather than keeping its own copy.
-fn boards_order_path(data_dir: &std::path::Path) -> std::path::PathBuf {
-    data_dir.join(".order")
-}
-
-/// Writes the order file if its content would actually change (so `--fix`
-/// doesn't touch its mtime on every run for no reason). `None` if nothing
-/// was written (already current, or the write failed).
-fn write_boards_order(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Option<()> {
-    let order = derived_boards_order(cfg);
-    let content = order.join("\n");
-    let path = boards_order_path(data_dir);
-    if std::fs::read_to_string(&path).ok().as_deref() == Some(content.as_str()) {
-        return None;
-    }
-    std::fs::create_dir_all(data_dir).ok()?;
-    std::fs::write(&path, content).ok()
-}
-
-/// Flags when `.order` doesn't match what `contexts.toml`'s order currently
-/// derives - e.g. right after reordering lanes or adding a new board.toml,
-/// before the next `--fix`. Not itself a sign of anything broken in Boards;
-/// it just means the sidebar is showing a stale order until `--fix` runs.
-fn check_boards_order(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Check {
-    let expected = derived_boards_order(cfg).join("\n");
-    let order_path = boards_order_path(data_dir);
-    let actual = std::fs::read_to_string(&order_path).unwrap_or_default();
-    if actual == expected {
-        Check {
-            label: "boards order",
-            status: Status::Ok,
-            message: format!("{} matches the current lane order", order_path.display()),
-            hint: None,
-        }
-    } else {
-        Check {
-            label: "boards order",
-            status: Status::Warn,
-            message: format!("{} is stale or missing", order_path.display()),
-            hint: Some("run `lanes doctor --fix` to refresh it".to_string()),
-        }
-    }
-}
-
 fn has_boards_target(cfg: &lanes::config::Config) -> bool {
     !boards_project_names(cfg).is_empty()
 }
@@ -1281,48 +1213,6 @@ mod tests {
         let content = std::fs::read_to_string(dir.join("infra-board/board.yaml")).unwrap();
         assert!(content.contains("Custom"));
 
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn derived_boards_order_follows_lane_order_and_dedupes() {
-        let cfg = test_config(vec![
-            lane_with_targets("a", vec![boards_target("Shared")]),
-            lane_with_targets("b", vec![boards_target("Only-B")]),
-            lane_with_targets("c", vec![boards_target("Shared")]),
-        ]);
-        assert_eq!(derived_boards_order(&cfg), vec!["Shared", "Only-B"]);
-    }
-
-    #[test]
-    fn write_boards_order_creates_the_order_file() {
-        let dir = boards_test_dir("write-order-new");
-        let cfg = test_config(vec![
-            lane_with_targets("infra", vec![boards_target("Infra")]),
-            lane_with_targets("lanes-dev", vec![boards_target("Lanes")]),
-        ]);
-        assert!(write_boards_order(&cfg, &dir).is_some());
-        let content = std::fs::read_to_string(boards_order_path(&dir)).unwrap();
-        assert_eq!(content, "Infra\nLanes");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn write_boards_order_is_a_noop_when_already_current() {
-        let dir = boards_test_dir("write-order-noop");
-        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("Infra")])]);
-        assert!(write_boards_order(&cfg, &dir).is_some());
-        assert!(write_boards_order(&cfg, &dir).is_none(), "second write with no change should be a no-op");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn check_boards_order_warns_when_missing_then_ok_after_fix() {
-        let dir = boards_test_dir("check-order");
-        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("Infra")])]);
-        assert!(matches!(check_boards_order(&cfg, &dir).status, Status::Warn));
-        write_boards_order(&cfg, &dir);
-        assert!(matches!(check_boards_order(&cfg, &dir).status, Status::Ok));
         let _ = std::fs::remove_dir_all(&dir);
     }
 

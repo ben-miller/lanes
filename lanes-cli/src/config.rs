@@ -230,11 +230,10 @@ pub enum MoveOutcome {
 }
 
 /// Swaps `id` with its adjacent neighbor in `contexts.toml`'s `order` -
-/// `lanes ctx <id> move up`/`down`. This is the one true order (Boards'
-/// own `.order` is derived from it via `doctor --fix`'s
-/// `write_boards_order`; `infra zellij`'s tab order reads it directly too -
-/// see DECISIONS.md), so reordering here is reordering everything that
-/// matters, no second file to keep in sync.
+/// `lanes ctx <id> move up`/`down`. This is the one true order - Boards
+/// and `infra zellij`'s tab order both read it directly (see
+/// DECISIONS.md), nothing derived from it needs a separate push - so
+/// reordering here is reordering everything that matters.
 pub fn move_context_order(id: &str, direction: MoveDirection) -> Result<MoveOutcome, String> {
     let path = config_dir().join("contexts.toml");
     let text = std::fs::read_to_string(&path).map_err(|_| format!("'{id}' is not in contexts.toml's order - no contexts.toml found"))?;

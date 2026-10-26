@@ -285,8 +285,8 @@ enum ContextCommand {
     },
 
     /// Move this context up or down in contexts.toml's `order` - the one
-    /// true order (Boards' own order and infra zellij's tab order both
-    /// derive from it), so this is the only reordering command needed.
+    /// true order (Boards and infra zellij's tab order both read it
+    /// directly now), so this is the only reordering command needed.
     Move {
         #[command(subcommand)]
         command: MoveCommand,
@@ -558,6 +558,9 @@ fn main() {
                     MoveCommand::Down => lanes::config::MoveDirection::Down,
                 };
                 match lanes::config::move_context_order(&id, direction) {
+                    // Boards reads contexts.toml's order directly now (see
+                    // board.rs's lanes_order in the boards repo) - nothing
+                    // to re-push here, it just sees the new order live.
                     Ok(lanes::config::MoveOutcome::Moved { swapped_with }) => println!("{id} <-> {swapped_with}"),
                     Ok(lanes::config::MoveOutcome::AlreadyFirst) => println!("{id} is already first"),
                     Ok(lanes::config::MoveOutcome::AlreadyLast) => println!("{id} is already last"),
