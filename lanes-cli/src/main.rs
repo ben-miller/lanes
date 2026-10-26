@@ -347,6 +347,13 @@ enum BoardFacetCommand {
 
     /// Re-enable this context's board facet, restoring its board.toml.
     Enable,
+
+    /// Repoint this context's board facet at a different Boards project -
+    /// edits board.toml's `project` key in place, leaving placement
+    /// (monitor/position/raise/...) and `enabled` untouched. Fails if the
+    /// context has no board.toml at all - use `ctx <id> add --board` to
+    /// create one first; this never creates one.
+    SetBoard { name: String },
 }
 
 #[derive(Subcommand)]
@@ -556,6 +563,13 @@ fn main() {
             ContextCommand::Board { command } => match command {
                 BoardFacetCommand::Disable => set_facet_enabled_or_exit(&id, "board", false),
                 BoardFacetCommand::Enable => set_facet_enabled_or_exit(&id, "board", true),
+                BoardFacetCommand::SetBoard { name } => match lanes::config::set_board_project(&id, &name) {
+                    Ok(()) => println!("{id}: board set to {name:?}"),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                },
             },
 
             // Boards and infra zellij both read contexts.toml's order

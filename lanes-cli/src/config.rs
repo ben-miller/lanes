@@ -161,6 +161,31 @@ pub fn set_board_enabled(context_id: &str, enabled: bool) -> std::io::Result<()>
     set_facet_flag(context_id, "board.toml", "enabled", enabled)
 }
 
+/// Repoints a context's board facet at a different Boards project - edits
+/// `board.toml`'s `project` key in place, leaving placement
+/// (`monitor`/`position`/`raise`/...) and `enabled` untouched. Unlike
+/// `set_lane_enabled`/`set_board_enabled` (via `set_facet_flag`), this
+/// deliberately does *not* create `board.toml` if it's missing - "repoint
+/// an existing board" and "create one" are different operations (`cmd::add`
+/// is the latter), and silently materializing a facet (and the `board.yaml`
+/// that implies) when the caller only meant to retarget one would be a bad
+/// surprise. Fails loudly instead.
+pub fn set_board_project(context_id: &str, project: &str) -> Result<(), String> {
+    let path = config_dir().join("contexts").join(context_id).join("board.toml");
+    let text = std::fs::read_to_string(&path).map_err(|_| {
+        format!(
+            "{context_id:?} has no board.toml - use `lanes ctx {context_id} add --board` to create one first"
+        )
+    })?;
+    let mut doc = text
+        .parse::<toml_edit::DocumentMut>()
+        .map_err(|e| format!("{path:?}: {e}"))?;
+    doc["project"] = toml_edit::value(project);
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string()).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
 /// Sets `key` to `value` in `<context>/<facet_file>`, in place. Uses
 /// toml_edit rather than the parse-only `toml` crate so the rest of the
 /// file (formatting, key order, any future comments) is left untouched -
@@ -1187,6 +1212,36 @@ raise = true
             let text = std::fs::read_to_string(dir.join("board.toml")).unwrap();
             assert!(text.contains("enabled = false"));
             assert!(text.contains("project = \"infra\""));
+        });
+    }
+
+    #[test]
+    fn set_board_project_repoints_an_existing_board_preserving_placement() {
+        with_fake_home(|home| {
+            let dir = home.join(".config/lanes/contexts/ctx");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(
+                dir.join("board.toml"),
+                "driver = \"boards\"\nproject = \"Infra\"\nmonitor = \"main\"\nraise = true\n",
+            )
+            .unwrap();
+            set_board_project("ctx", "Platform Tools").unwrap();
+            let text = std::fs::read_to_string(dir.join("board.toml")).unwrap();
+            assert!(text.contains("project = \"Platform Tools\""));
+            assert!(!text.contains("Infra"));
+            assert!(text.contains("monitor = \"main\""));
+            assert!(text.contains("raise = true"));
+        });
+    }
+
+    #[test]
+    fn set_board_project_fails_loudly_when_board_toml_is_absent_instead_of_creating_one() {
+        with_fake_home(|home| {
+            let dir = home.join(".config/lanes/contexts/ctx");
+            std::fs::create_dir_all(&dir).unwrap();
+            let err = set_board_project("ctx", "Platform Tools").unwrap_err();
+            assert!(err.contains("has no board.toml"));
+            assert!(!dir.join("board.toml").exists());
         });
     }
 
