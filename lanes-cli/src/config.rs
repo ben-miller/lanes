@@ -1059,6 +1059,26 @@ position = "full"
     }
 
     #[test]
+    fn parses_layout_toml_with_an_appctl_target_raised_in_place() {
+        let content = r#"
+[[targets]]
+driver = "appctl"
+app = "console"
+cmd = "show"
+raise = true
+"#;
+        let file: LayoutToml = toml::from_str(content).unwrap();
+        assert_eq!(file.targets.len(), 1);
+        assert_eq!(file.targets[0].driver.name(), "appctl");
+        assert!(file.targets[0].monitor.is_none(), "raised in place - no position at all");
+        assert!(file.targets[0].raise);
+        assert!(matches!(
+            &file.targets[0].driver,
+            crate::model::TargetDriver::Appctl { app, cmd, .. } if app == "console" && cmd == "show"
+        ));
+    }
+
+    #[test]
     fn parses_layout_toml_with_a_minimized_target_and_no_monitor() {
         let content = r#"
 [[targets]]

@@ -987,6 +987,10 @@ fn target_bundle_id(driver: &model::TargetDriver) -> Option<&str> {
         // "app" has no fixed identity, so placement only works when the
         // config author supplied a bundle_id explicitly.
         model::TargetDriver::App { bundle_id, .. } => bundle_id.as_deref(),
+        // Same as Boards: its own activation already returns the exact
+        // pid to place by, so placement never needs a bundle id for this
+        // driver at all.
+        model::TargetDriver::Appctl { .. } => None,
         model::TargetDriver::Zellij { .. } => None,
     }
 }
@@ -1109,6 +1113,17 @@ fn activate_target(
             }
             Ok(None)
         }
+        // Gated on raise_app, same as `App` above and for the same
+        // reason - unlike Boards' own driver (always switches project
+        // regardless), a generic appctl command's whole purpose here is
+        // to be seen, so `raise = false` means leave it alone entirely.
+        model::TargetDriver::Appctl { app, cmd, args } => {
+            if raise_app {
+                activate_appctl_target(app, cmd, args.clone(), pre_place)
+            } else {
+                Ok(None)
+            }
+        }
     }
 }
 
@@ -1117,28 +1132,23 @@ fn activate_target(
 /// `PLAN-boards-via-appctl.md`), falling back to `open 'boards://...'` when
 /// no instance is reachable. Returns the instance's pid when the socket
 /// path was used, so `apply_targets` can place that exact process instead
-/// of guessing by bundle id (which only resolves the installed copy).
-///
-/// `pre_place`, when given (a resolved monitor uuid + position, only ever
-/// supplied by `apply_targets` for a target that's actually getting
-/// placed), moves the window to its destination *before* `open_project` is
-/// called - `open_project` raises Boards' window as a side effect of
-/// switching projects (same as the `open 'boards://...'` link always did),
-/// so without this the window becomes visible wherever it last was for the
-/// ~200-600ms gap until the lane switch's own (separate, batched) lanes-wm
-/// apply call catches up. Moving it first means the raise reveals a window
-/// that's already in the right place - no visible flash on the wrong
-/// screen. See the "Boards target: appctl socket first" DECISIONS.md entry.
+/// of guessing by bundle id (which only resolves the installed copy). Just
+/// Boards' own argument-shape wrapper around `activate_via_appctl` - see
+/// its doc comment for the actual mechanism, shared with `TargetDriver::Appctl`.
 fn activate_boards_target(project: &str, pre_place: Option<(String, serde_json::Value)>) -> Result<Option<u32>, String> {
     let t0 = std::time::Instant::now();
+    let mut args = serde_json::Map::new();
+    args.insert("project".to_string(), serde_json::json!(project));
     let outcome = match appctl::default_state_root() {
-        Some(root) => activate_boards_via_appctl(&root, project, pre_place),
-        None => BoardsAppctlOutcome::Fallback,
+        Some(root) => activate_via_appctl(&root, "boards", "open_project", args, pre_place),
+        None => AppctlOutcome::NoInstance,
     };
     let result = match outcome {
-        BoardsAppctlOutcome::Switched(pid) => Ok(Some(pid)),
-        BoardsAppctlOutcome::AppError(msg) => Err(msg),
-        BoardsAppctlOutcome::Fallback => {
+        AppctlOutcome::Activated(pid) => Ok(Some(pid)),
+        AppctlOutcome::AppError(msg) => Err(msg),
+        // The normal "Boards isn't running" case - `open boards://` cold-launches
+        // the installed app on that project, same as always, so this is quiet.
+        AppctlOutcome::NoInstance => {
             let uri = format!("boards://open?project={}", percent_encode(project));
             run_command_checked(std::process::Command::new("open").arg(uri), "open boards:// URI")
                 .map(|()| None)
@@ -1152,17 +1162,48 @@ fn activate_boards_target(project: &str, pre_place: Option<(String, serde_json::
     result
 }
 
+/// Generic `appctl`-based activation for the `appctl` driver (any app that
+/// registers its own command the way Boards registers `open_project` -
+/// see DECISIONS.md, "Boards target: appctl socket first," the pattern
+/// this generalizes). No URL-scheme fallback of its own, unlike Boards'
+/// `boards://` - most apps don't have one, so "not running" is just a
+/// plain failure here.
+fn activate_appctl_target(
+    app: &str,
+    cmd: &str,
+    args: serde_json::Map<String, serde_json::Value>,
+    pre_place: Option<(String, serde_json::Value)>,
+) -> Result<Option<u32>, String> {
+    let outcome = match appctl::default_state_root() {
+        Some(root) => activate_via_appctl(&root, app, cmd, args, pre_place),
+        None => AppctlOutcome::NoInstance,
+    };
+    match outcome {
+        AppctlOutcome::Activated(pid) => Ok(Some(pid)),
+        AppctlOutcome::AppError(msg) => Err(msg),
+        AppctlOutcome::NoInstance => Err(format!("{app} isn't running")),
+    }
+}
+
 /// `open boards://...` failing with the raw macOS LaunchServices error
 /// ("No application knows how to open URL boards://...",
 /// kLSApplicationNotFoundErr) means one specific, common thing on this
 /// setup: no dev Boards instance is running (so there was nothing for
-/// `activate_boards_via_appctl` to reach), and nothing is installed to
-/// register the scheme as a fallback either (deliberately - see
-/// DECISIONS.md, "Boards target: appctl socket first"). That's an
-/// actionable, ordinary state, not a mysterious OS failure - so surface it
-/// as one instead of the cryptic `NSOSStatusErrorDomain Code=-10814` text.
-/// Any other `open` failure (a different error, or a future installed
-/// build hitting something else) passes through unchanged.
+/// `activate_via_appctl` to reach), and nothing is installed to register
+/// the scheme as a fallback either (deliberately - see DECISIONS.md,
+/// "Boards target: appctl socket first"). That's an actionable, ordinary
+/// state, not a mysterious OS failure - so surface it as one instead of
+/// the cryptic `NSOSStatusErrorDomain Code=-10814` text. Any other `open`
+/// failure (a different error, or a future installed build hitting
+/// something else) passes through unchanged.
+fn rewrite_boards_open_error(e: String) -> String {
+    if e.contains("No application knows how to open URL") {
+        "Boards isn't running".to_string()
+    } else {
+        e
+    }
+}
+
 /// Prepends "target '{driver}': " to `e`, unless `e` already names the
 /// driver itself (e.g. "Boards isn't running") - that's already
 /// self-identifying, so the prefix is only noise on top of it.
@@ -1174,64 +1215,68 @@ fn prefix_target_error(driver: &str, e: String) -> String {
     }
 }
 
-fn rewrite_boards_open_error(e: String) -> String {
-    if e.contains("No application knows how to open URL") {
-        "Boards isn't running".to_string()
-    } else {
-        e
-    }
-}
-
 #[derive(Debug)]
-enum BoardsAppctlOutcome {
-    Switched(u32),
+enum AppctlOutcome {
+    Activated(u32),
     AppError(String),
-    Fallback,
+    NoInstance,
 }
 
-fn activate_boards_via_appctl(
+/// Connects to `app`'s `appctl` instance and sends it `cmd`/`args` -
+/// the one mechanism behind both `TargetDriver::Boards` (`cmd =
+/// "open_project"`, generalized out of what used to be Boards-specific
+/// code here) and `TargetDriver::Appctl` (any `cmd` the target app
+/// registered for itself). Getting `pid` needs nothing app-specific -
+/// every `appctl` app has it for free, from the connection handshake
+/// (`appctl`'s own built-in `info`), before `cmd` is ever sent.
+///
+/// `pre_place`, when given (a resolved monitor uuid + position, only ever
+/// supplied by `apply_targets` for a target that's actually getting
+/// placed), moves the window to its destination *before* `cmd` runs -
+/// most such commands raise the app's window as a side effect (same as
+/// `open 'boards://...'` always did for Boards), so without this the
+/// window becomes visible wherever it last was for the ~200-600ms gap
+/// until the lane switch's own (separate, batched) lanes-wm apply call
+/// catches up. Moving it first means the raise reveals a window that's
+/// already in the right place - no visible flash on the wrong screen.
+fn activate_via_appctl(
     root: &std::path::Path,
-    project: &str,
+    app: &str,
+    cmd: &str,
+    args: serde_json::Map<String, serde_json::Value>,
     pre_place: Option<(String, serde_json::Value)>,
-) -> BoardsAppctlOutcome {
-    let mut conn = match appctl::client::connect(root, "boards", None) {
+) -> AppctlOutcome {
+    let mut conn = match appctl::client::connect(root, app, None) {
         Ok(conn) => conn,
-        // The normal "Boards isn't running" case - `open boards://` cold-launches
-        // the installed app on that project, same as always, so this is quiet.
-        Err(appctl::client::ClientError::NoRunningInstance { .. }) => return BoardsAppctlOutcome::Fallback,
+        Err(appctl::client::ClientError::NoRunningInstance { .. }) => return AppctlOutcome::NoInstance,
         Err(e) => {
-            eprintln!("warning: boards appctl: {e}, falling back to 'open boards://'");
-            return BoardsAppctlOutcome::Fallback;
+            eprintln!("warning: {app} appctl: {e}");
+            return AppctlOutcome::NoInstance;
         }
     };
     let pid = conn.hello().pid;
 
-    // Move the window to its destination while it's still in the background,
-    // before `open_project` raises it - see activate_boards_target's doc
-    // comment. `Selector::Any` (no "focused"/"title" in this request) is
-    // only valid when the app has exactly one window - true for Boards'
-    // single board view, so this never needs the window focused first.
-    // Best-effort: a failure here (e.g. two Boards windows open) just means
-    // we fall back to the old raise-then-place timing for this one switch,
-    // not a hard error.
+    // `Selector::Any` (no "focused"/"title" in this request) is only valid
+    // when the app has exactly one window - true for every app this has
+    // been used with so far (Boards' single board view). Best-effort: a
+    // failure here (e.g. two windows) just means falling back to the old
+    // raise-then-place timing for this one switch, not a hard error.
     if let Some((monitor, position)) = pre_place {
         let mut placement = serde_json::Map::new();
         placement.insert("pid".to_string(), serde_json::json!(pid));
         placement.insert("monitor".to_string(), serde_json::json!(monitor));
         placement.insert("position".to_string(), position);
         for warning in run_lanes_wm_apply(&[serde_json::Value::Object(placement)]) {
-            eprintln!("warning: boards pre-placement: {warning}");
+            eprintln!("warning: {app} pre-placement: {warning}");
         }
     }
 
-    let mut args = serde_json::Map::new();
-    args.insert("project".to_string(), serde_json::json!(project));
-    match conn.request("open_project", args) {
-        Ok(_) => BoardsAppctlOutcome::Switched(pid),
-        Err(appctl::client::RequestError::App(msg)) => BoardsAppctlOutcome::AppError(msg),
+    match conn.request(cmd, args) {
+        Ok(_) => AppctlOutcome::Activated(pid),
+        Err(appctl::client::RequestError::App(msg)) => AppctlOutcome::AppError(msg),
         Err(appctl::client::RequestError::Io(msg)) => {
-            eprintln!("warning: boards appctl: {msg}, falling back to 'open boards://'");
-            BoardsAppctlOutcome::Fallback
+            eprintln!("warning: {app} appctl: {msg}");
+            AppctlOutcome::NoInstance
         }
     }
 }
@@ -1373,16 +1418,17 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
                     // touched), not an implicit "no position means raise
                     // it" rule. See Target::raise's doc comment.
                     let raise_app = target.raise;
-                    // Only Boards' own activation can use this - see
-                    // activate_boards_target's doc comment for why it
-                    // needs its destination before raising, unlike every
-                    // other driver here. `.ok()` deliberately throws the
-                    // error away: an unresolvable monitor handle is
-                    // reported properly below, in the placement loop that
-                    // runs for every target uniformly - this is only a
-                    // best-effort head start for Boards specifically.
+                    // Only an appctl-activated driver (Boards, or the
+                    // generic Appctl one) can use this - see
+                    // activate_via_appctl's doc comment for why it needs
+                    // its destination before raising, unlike every other
+                    // driver here. `.ok()` deliberately throws the error
+                    // away: an unresolvable monitor handle is reported
+                    // properly below, in the placement loop that runs for
+                    // every target uniformly - this is only a best-effort
+                    // head start for these two drivers specifically.
                     let pre_place = match (&target.driver, effective) {
-                        (model::TargetDriver::Boards { .. }, Some((monitor, position))) => {
+                        (model::TargetDriver::Boards { .. } | model::TargetDriver::Appctl { .. }, Some((monitor, position))) => {
                             resolve_placement_json(cfg, monitor, position).ok()
                         }
                         _ => None,
@@ -2044,30 +2090,66 @@ mod tests {
         appctl::start(config).unwrap()
     }
 
+    fn boards_args(project: &str) -> serde_json::Map<String, serde_json::Value> {
+        let mut args = serde_json::Map::new();
+        args.insert("project".to_string(), serde_json::json!(project));
+        args
+    }
+
     #[test]
-    fn boards_appctl_switches_a_live_instance_and_returns_its_pid() {
+    fn appctl_switches_a_live_instance_and_returns_its_pid() {
         let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
         let handle = serve_boards("main", &repo, &state);
-        match activate_boards_via_appctl(&state.0, "myproj", None) {
-            BoardsAppctlOutcome::Switched(pid) => assert_eq!(pid, handle.info().pid),
-            other => panic!("expected Switched, got {other:?}"),
+        match activate_via_appctl(&state.0, "boards", "open_project", boards_args("myproj"), None) {
+            AppctlOutcome::Activated(pid) => assert_eq!(pid, handle.info().pid),
+            other => panic!("expected Activated, got {other:?}"),
         }
     }
 
     #[test]
-    fn boards_appctl_app_error_is_not_a_fallback() {
+    fn appctl_app_error_is_not_no_instance() {
         let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
         let _handle = serve_boards("main", &repo, &state);
-        match activate_boards_via_appctl(&state.0, "missing", None) {
-            BoardsAppctlOutcome::AppError(msg) => assert_eq!(msg, "no such project: missing"),
+        match activate_via_appctl(&state.0, "boards", "open_project", boards_args("missing"), None) {
+            AppctlOutcome::AppError(msg) => assert_eq!(msg, "no such project: missing"),
             other => panic!("expected AppError, got {other:?}"),
         }
     }
 
     #[test]
-    fn boards_appctl_falls_back_when_nothing_is_running() {
+    fn appctl_reports_no_instance_when_nothing_is_running() {
         let state = TempDir::new("st");
-        assert!(matches!(activate_boards_via_appctl(&state.0, "myproj", None), BoardsAppctlOutcome::Fallback));
+        assert!(matches!(
+            activate_via_appctl(&state.0, "boards", "open_project", boards_args("myproj"), None),
+            AppctlOutcome::NoInstance
+        ));
+    }
+
+    #[test]
+    fn appctl_is_generic_over_the_app_name_and_command() {
+        // Same mechanism, a different app/command entirely - not Boards-
+        // specific at all, which is the whole point of factoring this out.
+        let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
+        let config = appctl::Config::new("console", &repo.0, "1.0.0")
+            .state_dir(&state.0)
+            .command("show", |_| Ok(serde_json::json!(null)));
+        let handle = appctl::start(config).unwrap();
+        match activate_via_appctl(&state.0, "console", "show", serde_json::Map::new(), None) {
+            AppctlOutcome::Activated(pid) => assert_eq!(pid, handle.info().pid),
+            other => panic!("expected Activated, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn activate_appctl_target_turns_no_instance_into_a_plain_error() {
+        let state = TempDir::new("st");
+        // No appctl::default_state_root() override in this test process,
+        // so there's nothing running under whatever root it resolves to
+        // either - either way, no instance means a plain, named failure,
+        // never a silent success.
+        let _ = &state;
+        let err = activate_appctl_target("definitely-not-running", "show", serde_json::Map::new(), None).unwrap_err();
+        assert_eq!(err, "definitely-not-running isn't running");
     }
 
     #[test]
@@ -2096,27 +2178,30 @@ mod tests {
     }
 
     #[test]
-    fn boards_appctl_pre_placement_failure_does_not_block_the_project_switch() {
+    fn appctl_pre_placement_failure_does_not_block_the_activation() {
         // No real Boards window exists in a test process, so the pre-place
         // call to lanes-wm is guaranteed to fail (or lanes-wm may not even
-        // be on PATH) - exactly the "best-effort" case activate_boards_target's
+        // be on PATH) - exactly the "best-effort" case activate_via_appctl's
         // doc comment describes: a failed pre-placement must never stop the
-        // actual project switch from happening.
+        // actual command from running.
         let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
         let handle = serve_boards("main", &repo, &state);
         let pre_place = Some(("not-a-real-monitor-uuid".to_string(), serde_json::json!("full")));
-        match activate_boards_via_appctl(&state.0, "myproj", pre_place) {
-            BoardsAppctlOutcome::Switched(pid) => assert_eq!(pid, handle.info().pid),
-            other => panic!("expected Switched despite a failed pre-placement, got {other:?}"),
+        match activate_via_appctl(&state.0, "boards", "open_project", boards_args("myproj"), pre_place) {
+            AppctlOutcome::Activated(pid) => assert_eq!(pid, handle.info().pid),
+            other => panic!("expected Activated despite a failed pre-placement, got {other:?}"),
         }
     }
 
     #[test]
-    fn boards_appctl_falls_back_when_ambiguous() {
+    fn appctl_reports_no_instance_when_ambiguous() {
         let (repo_a, repo_b, state) = (appctl_test_repo("dev-a"), appctl_test_repo("dev-b"), TempDir::new("st"));
         let _a = serve_boards("dev-a", &repo_a, &state);
         let _b = serve_boards("dev-b", &repo_b, &state);
-        assert!(matches!(activate_boards_via_appctl(&state.0, "myproj", None), BoardsAppctlOutcome::Fallback));
+        assert!(matches!(
+            activate_via_appctl(&state.0, "boards", "open_project", boards_args("myproj"), None),
+            AppctlOutcome::NoInstance
+        ));
     }
 
     #[test]

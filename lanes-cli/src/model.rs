@@ -206,6 +206,26 @@ pub enum TargetDriver {
         #[serde(default)]
         bundle_id: Option<String>,
     },
+    /// Activate a dev-platform app via its own `appctl` instance, instead
+    /// of `App`'s `open -a <name>` - for a dev-only build with no
+    /// installed `.app` bundle (same situation Boards used to be in, see
+    /// `TargetDriver::Boards`'s own doc comment and DECISIONS.md, "Boards
+    /// target: appctl socket first"), or where `open -a` would resolve to
+    /// the wrong app entirely (a name collision with something already
+    /// installed). `app` is the `appctl` instance name (e.g. "boards",
+    /// "console"); `cmd` is whatever command that app registered for
+    /// itself (Boards registers `open_project`; a generic app might only
+    /// have something minimal like `show`) - `cmd`'s existence is on that
+    /// app's own side, not something this driver can supply. `args` are
+    /// passed through to it untouched. No running instance is always a
+    /// plain failure here - unlike Boards, there's no `<scheme>://` link
+    /// to fall back to for an arbitrary app.
+    Appctl {
+        app: String,
+        cmd: String,
+        #[serde(default)]
+        args: serde_json::Map<String, serde_json::Value>,
+    },
 }
 
 impl TargetDriver {
@@ -221,6 +241,7 @@ impl TargetDriver {
             TargetDriver::Sourcetree { .. } => "sourcetree",
             TargetDriver::Vscode { .. } => "vscode",
             TargetDriver::App { .. } => "app",
+            TargetDriver::Appctl { .. } => "appctl",
         }
     }
 }
