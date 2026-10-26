@@ -301,6 +301,14 @@ enum ContextCommand {
         #[command(subcommand)]
         command: MoveCommand,
     },
+
+    /// Flag this context to render indented one level - a bare rendering
+    /// cue (Boards' sidebar draws it one level in), not a parent/child
+    /// relationship: it doesn't name or reference any other context.
+    Indent,
+
+    /// Clear the indent flag set by `indent`. A no-op if not set.
+    Unindent,
 }
 
 #[derive(Subcommand)]
@@ -609,6 +617,21 @@ fn main() {
                     std::process::exit(1);
                 }
                 println!("{id} -> after {other}");
+            }
+
+            ContextCommand::Indent => {
+                if let Err(e) = lanes::config::set_context_indented(&id, true) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("{id}: indented");
+            }
+            ContextCommand::Unindent => {
+                if let Err(e) = lanes::config::set_context_indented(&id, false) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("{id}: not indented");
             }
         },
 

@@ -2210,6 +2210,7 @@ mod tests {
             drivers: None,
             monitors: std::collections::HashMap::new(),
             order: None,
+            indented: Vec::new(),
             cycle_policy: model::CyclePolicy::default(),
             contexts: Vec::new(),
             lanes,

@@ -25,6 +25,13 @@ pub struct Config {
     /// Contexts not listed fall back to alphabetical-by-id, after any listed
     /// ones.
     pub order: Option<Vec<String>>,
+    /// Context ids to render indented one level, from `contexts.toml`'s
+    /// `indented` - purely a rendering cue (Boards' sidebar draws these
+    /// one level in). It doesn't reference any other context: there's no
+    /// "parent," nothing is assumed about what a reader finds above an
+    /// indented context in `order` besides whatever's already there. See
+    /// `set_context_indented`.
+    pub indented: Vec<String>,
     /// Which candidate list `lanes cycle` steps through - see
     /// `CyclePolicy`'s own doc comment.
     pub cycle_policy: CyclePolicy,
@@ -68,6 +75,7 @@ impl Config {
     pub fn load() -> Self {
         let (drivers, monitors, cycle_policy, shell_ignored_commands) = load_global_config();
         let order = load_context_order();
+        let indented = load_context_indented();
         // "default" is just a template like any other - it's the one every
         // context implicitly, unconditionally starts its cascade from (no
         // opt-out).
@@ -81,7 +89,7 @@ impl Config {
         if let Some(order) = &order {
             sort_by_order(&mut lanes, order);
         }
-        Self { drivers, monitors, order, cycle_policy, contexts, lanes, boards_targets, context_ids, shell_ignored_commands }
+        Self { drivers, monitors, order, indented, cycle_policy, contexts, lanes, boards_targets, context_ids, shell_ignored_commands }
     }
 
     pub fn monitor_uuid(&self, handle: &str) -> Option<&str> {
@@ -228,6 +236,39 @@ pub fn remove_context_order(id: &str) -> Result<(), String> {
     })
 }
 
+/// Adds or removes `id` from `contexts.toml`'s `indented` array, in place -
+/// `lanes ctx <id> indent`/`unindent`. Purely a rendering flag (Boards'
+/// sidebar draws these one level in); doesn't touch `order` at all, and
+/// adding/removing it is independent of whatever else is happening to
+/// `order`. A no-op if `id` is already in the requested state.
+pub fn set_context_indented(id: &str, indented: bool) -> std::io::Result<()> {
+    let path = config_dir().join("contexts.toml");
+    let mut doc = match std::fs::read_to_string(&path) {
+        Ok(text) => text
+            .parse::<toml_edit::DocumentMut>()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?,
+        Err(_) => toml_edit::DocumentMut::new(),
+    };
+    if doc.get("indented").is_none() {
+        doc["indented"] = toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new()));
+    }
+    let array = doc["indented"].as_array_mut().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "contexts.toml's `indented` is not an array")
+    })?;
+    let already = array.iter().any(|v| v.as_str() == Some(id));
+    if indented && !already {
+        array.push(id);
+    } else if !indented && already {
+        let pos = array.iter().position(|v| v.as_str() == Some(id)).expect("just checked `already`");
+        array.remove(pos);
+    } else {
+        return Ok(());
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    std::fs::rename(&tmp, &path)
+}
+
 /// Which neighbor `move_context_order` swaps `id` with.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MoveDirection {
@@ -343,6 +384,7 @@ impl Default for Config {
             drivers: None,
             monitors: HashMap::new(),
             order: None,
+            indented: Vec::new(),
             cycle_policy: CyclePolicy::default(),
             contexts: Vec::new(),
             lanes: Vec::new(),
@@ -394,6 +436,8 @@ struct MonitorConfigRaw {
 struct ContextsConfig {
     #[serde(default)]
     order: Option<Vec<String>>,
+    #[serde(default)]
+    indented: Option<Vec<String>>,
 }
 
 /// `<context>/lane.toml` - the switcher-facing facet, and the one thing
@@ -524,6 +568,15 @@ fn load_context_order() -> Option<Vec<String>> {
     let content = std::fs::read_to_string(&path).ok()?;
     let cfg: ContextsConfig = toml::from_str(&content).unwrap_or_default();
     cfg.order
+}
+
+fn load_context_indented() -> Vec<String> {
+    let path = config_dir().join("contexts.toml");
+    let Ok(content) = std::fs::read_to_string(&path) else {
+        return Vec::new();
+    };
+    let cfg: ContextsConfig = toml::from_str(&content).unwrap_or_default();
+    cfg.indented.unwrap_or_default()
 }
 
 /// A target's identity for cascade purposes: a lane's own target overrides
@@ -811,6 +864,7 @@ mod tests {
             drivers: None,
             monitors: HashMap::new(),
             order: order.map(|o| o.into_iter().map(String::from).collect()),
+            indented: Vec::new(),
             cycle_policy: CyclePolicy::default(),
             contexts,
             lanes,
@@ -1295,6 +1349,7 @@ raise = true
             drivers: Some(vec!["zellij".to_string(), "claude".to_string()]),
             monitors: HashMap::new(),
             order: None,
+            indented: Vec::new(),
             cycle_policy: CyclePolicy::default(),
             contexts: Vec::new(),
             lanes: Vec::new(),
@@ -1320,6 +1375,7 @@ raise = true
             drivers: None,
             monitors: HashMap::new(),
             order: None,
+            indented: Vec::new(),
             cycle_policy: CyclePolicy::default(),
             contexts: Vec::new(),
             lanes: vec![
@@ -1355,6 +1411,7 @@ raise = true
             drivers: None,
             monitors: HashMap::new(),
             order: None,
+            indented: Vec::new(),
             cycle_policy: CyclePolicy::default(),
             contexts: Vec::new(),
             lanes: vec![

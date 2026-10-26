@@ -651,6 +651,7 @@ mod tests {
             drivers: None,
             monitors: HashMap::new(),
             order: None,
+            indented: Vec::new(),
             cycle_policy: crate::model::CyclePolicy::default(),
             contexts: Vec::new(),
             lanes: vec![lane],
