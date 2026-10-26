@@ -229,6 +229,39 @@ enum ComponentCommand {
 
 #[derive(Subcommand)]
 enum ContextCommand {
+    /// Create this context - the id comes from `lanes ctx <id> add`, not a
+    /// flag here. At least one of --lane/--board is required; a bare
+    /// `add` with neither is an error, not a no-op.
+    Add {
+        /// Display name - becomes lane.toml's `name` (if --lane) and the
+        /// default Boards project name (if --board and --project is
+        /// omitted).
+        name: String,
+
+        /// Give this context a lane facet (lane.toml).
+        #[arg(long)]
+        lane: bool,
+
+        /// Give this context a board facet (board.toml), and materialize
+        /// its board.yaml immediately (same as `lanes doctor --fix`).
+        #[arg(long)]
+        board: bool,
+
+        /// Boards project name, if it should differ from `name`. Only
+        /// meaningful with --board.
+        #[arg(long)]
+        project: Option<String>,
+
+        /// Zellij session name for this lane's tab.toml scope. Requires
+        /// --lane.
+        #[arg(long)]
+        session: Option<String>,
+
+        /// Repo path for this lane's tab.toml scope. Requires --lane.
+        #[arg(long)]
+        repo: Option<String>,
+    },
+
     /// Set a context's display name in every file it's shown in today:
     /// lane.toml's `name`, zellij-tabs.toml's `name` for its terminal
     /// session, and its board.yaml `title` - whichever of those apply.
@@ -473,6 +506,10 @@ fn main() {
         }
 
         Command::Context { id, command } => match command {
+            ContextCommand::Add { name, lane, board, project, session, repo } => {
+                cmd::add::run(&id, &name, cmd::add::Options { lane, board, project, session, repo });
+            }
+
             ContextCommand::SetName { name } => {
                 let cfg = lanes::config::Config::load();
                 match lanes::context::set_display_name(&cfg, &id, &name) {

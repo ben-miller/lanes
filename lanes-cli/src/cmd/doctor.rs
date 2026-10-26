@@ -357,7 +357,7 @@ fn live_wezterm_tab_ids() -> std::collections::HashSet<u64> {
 /// above) - env vars and registry files don't get updated when a session
 /// is renamed, so a name that's easy to typo or rename inconsistently is
 /// a real hazard, not just a style nitpick.
-fn is_kebab_case(s: &str) -> bool {
+pub(crate) fn is_kebab_case(s: &str) -> bool {
     if s.is_empty() {
         return false;
     }
@@ -1118,7 +1118,7 @@ fn check_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path
 /// once created, its content (columns, cards) is Boards' to own, not
 /// lanes-cli's to overwrite on every `--fix`. Returns the project names
 /// actually created.
-fn materialize_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Vec<String> {
+pub(crate) fn materialize_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Vec<String> {
     let mut created = Vec::new();
     for (name, project) in boards_project_names(cfg) {
         let board_yaml = data_dir.join(project).join("board.yaml");

@@ -1,4 +1,5 @@
 pub mod activate;
+pub mod add;
 pub mod deactivate;
 pub mod doctor;
 pub mod focus;

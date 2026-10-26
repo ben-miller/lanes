@@ -184,6 +184,34 @@ fn set_facet_flag(context_id: &str, facet_file: &str, key: &str, value: bool) ->
     std::fs::rename(&tmp, &path)
 }
 
+/// Appends `id` to `contexts.toml`'s `order` array, in place - creating the
+/// file (and the array) if either doesn't exist yet. `lanes ctx <id> add`
+/// calls this so a freshly created context is immediately covered by
+/// `doctor`'s "context order" check, the same as every other context,
+/// rather than silently landing in `unregistered_contexts`. A no-op if
+/// `id` is already listed (so this is safe to call more than once).
+pub fn append_context_order(id: &str) -> std::io::Result<()> {
+    let path = config_dir().join("contexts.toml");
+    let mut doc = match std::fs::read_to_string(&path) {
+        Ok(text) => text.parse::<toml_edit::DocumentMut>().map_err(|e| {
+            std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string())
+        })?,
+        Err(_) => toml_edit::DocumentMut::new(),
+    };
+    if doc.get("order").is_none() {
+        doc["order"] = toml_edit::Item::Value(toml_edit::Value::Array(toml_edit::Array::new()));
+    }
+    let array = doc["order"].as_array_mut().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, "contexts.toml's `order` is not an array")
+    })?;
+    if !array.iter().any(|v| v.as_str() == Some(id)) {
+        array.push(id);
+    }
+    let tmp = path.with_extension("toml.tmp");
+    std::fs::write(&tmp, doc.to_string())?;
+    std::fs::rename(&tmp, &path)
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -1004,6 +1032,38 @@ raise = true
             assert!(text.contains("enabled = false"));
             // The unrelated `active` (cycling membership) key is untouched.
             assert!(text.contains("active = true"));
+        });
+    }
+
+    #[test]
+    fn append_context_order_creates_contexts_toml_when_absent() {
+        with_fake_home(|home| {
+            append_context_order("new-ctx").unwrap();
+            let text = std::fs::read_to_string(home.join(".config/lanes/contexts.toml")).unwrap();
+            let cfg: ContextsConfig = toml::from_str(&text).unwrap();
+            assert_eq!(cfg.order, Some(vec!["new-ctx".to_string()]));
+        });
+    }
+
+    #[test]
+    fn append_context_order_preserves_existing_entries_and_their_order() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\"]\n").unwrap();
+            append_context_order("c").unwrap();
+            let text = std::fs::read_to_string(home.join(".config/lanes/contexts.toml")).unwrap();
+            let cfg: ContextsConfig = toml::from_str(&text).unwrap();
+            assert_eq!(cfg.order, Some(vec!["a".to_string(), "b".to_string(), "c".to_string()]));
+        });
+    }
+
+    #[test]
+    fn append_context_order_is_a_noop_when_the_id_is_already_listed() {
+        with_fake_home(|home| {
+            std::fs::write(home.join(".config/lanes/contexts.toml"), "order = [\"a\", \"b\"]\n").unwrap();
+            append_context_order("a").unwrap();
+            let text = std::fs::read_to_string(home.join(".config/lanes/contexts.toml")).unwrap();
+            let cfg: ContextsConfig = toml::from_str(&text).unwrap();
+            assert_eq!(cfg.order, Some(vec!["a".to_string(), "b".to_string()]));
         });
     }
 

@@ -100,13 +100,12 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "appctl"
 version = "0.1.0"
-source = "git+file:///Users/bmiller/src/dev-infra?branch=master#a15427a9cb894162b267a2ade8cff255af4a892f"
+source = "git+file:///Users/bmiller/src/dev-infra?branch=master#793a8f9f7c3fc167cda28e6fb60450c0498fd47d"
 dependencies = [
  "jiff",
  "rustix",
  "serde",
  "serde_json",
- "signal-hook",
  "toml 0.8.2",
  "tracing",
  "tracing-appender",
@@ -1736,7 +1735,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -3634,16 +3633,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0fda2ff0d084019ba4d7c6f371c95d8fd75ce3524c3cb8fb653a3023f6323e64"
 
 [[package]]
-name = "signal-hook"
-version = "0.3.18"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d881a16cf4426aa584979d30bd82cb33429027e42122b169753d6ef1085ed6e2"
-dependencies = [
- "libc",
- "signal-hook-registry",
-]
-
-[[package]]
 name = "signal-hook-registry"
 version = "1.4.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4051,7 +4040,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-appctl"
 version = "0.1.0"
-source = "git+file:///Users/bmiller/src/dev-infra?branch=master#a15427a9cb894162b267a2ade8cff255af4a892f"
+source = "git+file:///Users/bmiller/src/dev-infra?branch=master#793a8f9f7c3fc167cda28e6fb60450c0498fd47d"
 dependencies = [
  "appctl",
  "serde_json",
@@ -5015,7 +5004,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
