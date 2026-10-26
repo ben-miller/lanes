@@ -408,7 +408,7 @@ fn set_facet_enabled_or_exit(id: &str, facet: &str, enabled: bool) {
         _ => unreachable!("set_facet_enabled_or_exit called with an unknown facet {facet:?}"),
     };
     if let Err(e) = result {
-        eprintln!("error: {}", e);
+        eprintln!("{}", e);
         std::process::exit(1);
     }
     println!("{}d {}'s {} facet", if enabled { "enable" } else { "disable" }, id, facet);
@@ -426,7 +426,7 @@ fn lanes_snapshot_from_lensd() -> lanes::model::LanewiseSnapshot {
     let mirror = match lanes::lensd::read_snapshot(&path, std::time::Duration::from_secs(5)) {
         Ok(m) => m,
         Err(e) => {
-            eprintln!("error: cannot read lensd socket {}: {e}", path.display());
+            eprintln!("cannot read lensd socket {}: {e}", path.display());
             std::process::exit(1);
         }
     };
@@ -459,7 +459,7 @@ fn main() {
                     match cfg.lanes.iter().find(|l| l.id == id) {
                         Some(lane) => println!("{}", lane.name),
                         None => {
-                            eprintln!("error: focused lane '{}' not found in config", id);
+                            eprintln!("focused lane '{}' not found in config", id);
                             std::process::exit(1);
                         }
                     }
@@ -474,7 +474,7 @@ fn main() {
 
         Command::ActivateDriver { driver } => {
             if let Err(e) = lanes::activate_context(&driver) {
-                eprintln!("error: {e}");
+                eprintln!("{e}");
                 std::process::exit(1);
             }
         }
@@ -515,7 +515,7 @@ fn main() {
                 match lanes::context::set_display_name(&cfg, &id, &name) {
                     Ok(touched) => println!("updated {}: {}", id, touched.join(", ")),
                     Err(e) => {
-                        eprintln!("error: {}", e);
+                        eprintln!("{}", e);
                         std::process::exit(1);
                     }
                 }
@@ -538,7 +538,7 @@ fn main() {
         Command::Sessions { command } => match command {
             SessionsCommand::Switch { id } => {
                 if let Err(e) = lanes::switch_claude_session(&id) {
-                    eprintln!("error: {}", e);
+                    eprintln!("{}", e);
                     std::process::exit(1);
                 }
             }
@@ -554,7 +554,7 @@ fn main() {
                     lanes::notify_switch_show();
                 }
                 if let Err(e) = lanes::cycle_claude_session(1) {
-                    eprintln!("error: {}", e);
+                    eprintln!("{}", e);
                     std::process::exit(1);
                 }
             }
@@ -564,7 +564,7 @@ fn main() {
                     lanes::notify_switch_show();
                 }
                 if let Err(e) = lanes::cycle_claude_session(-1) {
-                    eprintln!("error: {}", e);
+                    eprintln!("{}", e);
                     std::process::exit(1);
                 }
             }
@@ -576,7 +576,7 @@ fn main() {
                     lanes::notify_switch_show();
                 }
                 if let Err(e) = lanes::cycle_lane(1) {
-                    eprintln!("error: {}", e);
+                    eprintln!("{}", e);
                     std::process::exit(1);
                 }
             }
@@ -586,7 +586,7 @@ fn main() {
                     lanes::notify_switch_show();
                 }
                 if let Err(e) = lanes::cycle_lane(-1) {
-                    eprintln!("error: {}", e);
+                    eprintln!("{}", e);
                     std::process::exit(1);
                 }
             }
@@ -598,7 +598,7 @@ fn main() {
                     lanes::notify_switch_show();
                 }
                 if let Err(e) = lanes::cycle(1) {
-                    eprintln!("error: {}", e);
+                    eprintln!("{}", e);
                     std::process::exit(1);
                 }
             }
@@ -608,7 +608,7 @@ fn main() {
                     lanes::notify_switch_show();
                 }
                 if let Err(e) = lanes::cycle(-1) {
-                    eprintln!("error: {}", e);
+                    eprintln!("{}", e);
                     std::process::exit(1);
                 }
             }

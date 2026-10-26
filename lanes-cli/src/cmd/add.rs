@@ -21,23 +21,23 @@ pub struct Options {
 
 pub fn run(id: &str, name: &str, opts: Options) {
     if let Err(e) = validate(id, &opts) {
-        eprintln!("error: {e}");
+        eprintln!("{e}");
         std::process::exit(1);
     }
 
     let dir = lanes::config::config_dir().join("contexts").join(id);
     if dir.exists() {
-        eprintln!("error: context {id:?} already exists ({})", dir.display());
+        eprintln!("context {id:?} already exists ({})", dir.display());
         std::process::exit(1);
     }
 
     if let Err(e) = scaffold(&dir, name, &opts) {
-        eprintln!("error: {e}");
+        eprintln!("{e}");
         std::process::exit(1);
     }
 
     if let Err(e) = lanes::config::append_context_order(id) {
-        eprintln!("error: created {id:?} but failed to register it in contexts.toml's order: {e}");
+        eprintln!("created {id:?} but failed to register it in contexts.toml's order: {e}");
         std::process::exit(1);
     }
 

@@ -1141,7 +1141,9 @@ fn activate_boards_target(project: &str, pre_place: Option<(String, serde_json::
         BoardsAppctlOutcome::AppError(msg) => Err(msg),
         BoardsAppctlOutcome::Fallback => {
             let uri = format!("boards://open?project={}", percent_encode(project));
-            run_command_checked(std::process::Command::new("open").arg(uri), "open boards:// URI").map(|()| None)
+            run_command_checked(std::process::Command::new("open").arg(uri), "open boards:// URI")
+                .map(|()| None)
+                .map_err(rewrite_boards_open_error)
         }
     };
     logging::perf(
@@ -1149,6 +1151,36 @@ fn activate_boards_target(project: &str, pre_place: Option<(String, serde_json::
         &format!("outcome={} elapsed_us={}", if matches!(result, Ok(Some(_))) { "appctl" } else { "fallback" }, t0.elapsed().as_micros()),
     );
     result
+}
+
+/// `open boards://...` failing with the raw macOS LaunchServices error
+/// ("No application knows how to open URL boards://...",
+/// kLSApplicationNotFoundErr) means one specific, common thing on this
+/// setup: no dev Boards instance is running (so there was nothing for
+/// `activate_boards_via_appctl` to reach), and nothing is installed to
+/// register the scheme as a fallback either (deliberately - see
+/// DECISIONS.md, "Boards target: appctl socket first"). That's an
+/// actionable, ordinary state, not a mysterious OS failure - so surface it
+/// as one instead of the cryptic `NSOSStatusErrorDomain Code=-10814` text.
+/// Any other `open` failure (a different error, or a future installed
+/// build hitting something else) passes through unchanged.
+/// Prepends "target '{driver}': " to `e`, unless `e` already names the
+/// driver itself (e.g. "Boards isn't running") - that's already
+/// self-identifying, so the prefix is only noise on top of it.
+fn prefix_target_error(driver: &str, e: String) -> String {
+    if e.to_lowercase().contains(driver) {
+        e
+    } else {
+        format!("target '{driver}': {e}")
+    }
+}
+
+fn rewrite_boards_open_error(e: String) -> String {
+    if e.contains("No application knows how to open URL") {
+        "Boards isn't running".to_string()
+    } else {
+        e
+    }
 }
 
 #[derive(Debug)]
@@ -1298,7 +1330,6 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
                     "target '{}' has `minimized` set but its driver can't be addressed by bundle id",
                     target.driver.name()
                 );
-                eprintln!("warning: {e}");
                 warnings.push(e);
                 continue;
             };
@@ -1376,9 +1407,7 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
         let activated_pid = match result {
             Ok(pid) => pid,
             Err(e) => {
-                let e = format!("target '{}': {e}", target.driver.name());
-                eprintln!("warning: {e}");
-                warnings.push(e);
+                warnings.push(prefix_target_error(target.driver.name(), e));
                 continue;
             }
         };
@@ -1389,12 +1418,10 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
             None => match target_bundle_id(&target.driver) {
                 Some(bundle_id) => ("app", serde_json::json!(bundle_id)),
                 None => {
-                    let e = format!(
+                    warnings.push(format!(
                         "target '{}' has monitor/position set but its driver can't be placed",
                         target.driver.name()
-                    );
-                    eprintln!("warning: {e}");
-                    warnings.push(e);
+                    ));
                     continue;
                 }
             },
@@ -1402,9 +1429,7 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
         let (uuid, position_json) = match resolve_placement_json(cfg, monitor, position) {
             Ok(v) => v,
             Err(e) => {
-                let e = format!("target '{}': {e}", target.driver.name());
-                eprintln!("warning: {e}");
-                warnings.push(e);
+                warnings.push(prefix_target_error(target.driver.name(), e));
                 continue;
             }
         };
@@ -1637,7 +1662,6 @@ fn land_lane(lane: &model::Lane, explicit_pane_id: Option<u64>, t0: std::time::I
 
     if let Some(session) = lane.terminal_session() {
         if let Err(e) = activate_wezterm_tab(session, should_raise_wezterm(primary)) {
-            eprintln!("warning: {}", e);
             warnings.push(e);
         } else {
             logging::perf("focus.wezterm_activated", &format!("elapsed_us={}", t0.elapsed().as_micros()));
@@ -1645,7 +1669,6 @@ fn land_lane(lane: &model::Lane, explicit_pane_id: Option<u64>, t0: std::time::I
                 .or_else(|| first_pane_id(session).map(|p| p as u64));
             if let Some(pane_id) = pane_id {
                 if let Err(e) = focus_zellij_pane(session, pane_id) {
-                    eprintln!("warning: {}", e);
                     warnings.push(e);
                 }
             }
@@ -1656,9 +1679,7 @@ fn land_lane(lane: &model::Lane, explicit_pane_id: Option<u64>, t0: std::time::I
     if let Some(target) = primary {
         if !primary_is_terminal(primary) {
             if let Err(e) = activate_and_raise(target, lane.terminal_session()) {
-                let e = format!("primary target '{}': {e}", target.driver.name());
-                eprintln!("warning: {e}");
-                warnings.push(e);
+                warnings.push(format!("primary target '{}': {e}", target.driver.name()));
             }
             logging::perf("focus.primary_target_activated", &format!("elapsed_us={}", t0.elapsed().as_micros()));
         }
@@ -2048,6 +2069,31 @@ mod tests {
     fn boards_appctl_falls_back_when_nothing_is_running() {
         let state = TempDir::new("st");
         assert!(matches!(activate_boards_via_appctl(&state.0, "myproj", None), BoardsAppctlOutcome::Fallback));
+    }
+
+    #[test]
+    fn rewrite_boards_open_error_replaces_the_cryptic_launch_services_message() {
+        let raw = "open boards:// URI failed: No application knows how to open URL boards://open?project=Pikabu \
+                    (Error Domain=NSOSStatusErrorDomain Code=-10814 \"kLSApplicationNotFoundErr\")"
+            .to_string();
+        let rewritten = rewrite_boards_open_error(raw);
+        assert_eq!(rewritten, "Boards isn't running");
+    }
+
+    #[test]
+    fn rewrite_boards_open_error_passes_through_an_unrelated_failure() {
+        let raw = "open boards:// URI failed: something else entirely".to_string();
+        assert_eq!(rewrite_boards_open_error(raw.clone()), raw);
+    }
+
+    #[test]
+    fn prefix_target_error_skips_a_message_that_already_names_the_driver() {
+        assert_eq!(prefix_target_error("boards", "Boards isn't running".to_string()), "Boards isn't running");
+    }
+
+    #[test]
+    fn prefix_target_error_adds_the_prefix_otherwise() {
+        assert_eq!(prefix_target_error("wezterm", "no socket".to_string()), "target 'wezterm': no socket");
     }
 
     #[test]

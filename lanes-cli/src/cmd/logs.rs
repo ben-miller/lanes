@@ -21,7 +21,7 @@ pub fn run(file_name: &str, follow: bool) {
         Ok(status) if !status.success() => std::process::exit(status.code().unwrap_or(1)),
         Ok(_) => {}
         Err(e) => {
-            eprintln!("error: failed to run tail: {}", e);
+            eprintln!("failed to run tail: {}", e);
             std::process::exit(1);
         }
     }

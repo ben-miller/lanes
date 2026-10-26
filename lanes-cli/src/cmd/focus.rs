@@ -4,12 +4,12 @@ pub fn run(id: Option<String>, cfg: &Config) {
     let lane_id = match lanes::resolve_lane_id(id, cfg) {
         Ok(id) => id,
         Err(e) => {
-            eprintln!("error: {}", e);
+            eprintln!("{}", e);
             std::process::exit(1);
         }
     };
     if let Err(e) = lanes::focus_lane(&lane_id) {
-        eprintln!("error: {}", e);
+        eprintln!("{}", e);
         std::process::exit(1);
     }
 }
