@@ -98,6 +98,18 @@ enum Command {
         command: ContextCommand,
     },
 
+    /// Reorder a Boards project - edits Boards' own `<data_dir>/.order`
+    /// directly (NAME is a project name, e.g. "Platform Tools", not a
+    /// context id). Fully independent of `ctx <id> move`/contexts.toml's
+    /// order - lanes-cli's context order and Boards' project order are
+    /// two different concepts since the divorce (see
+    /// PLAN-lane-board-consolidation.md).
+    Boards {
+        name: String,
+        #[command(subcommand)]
+        command: BoardsCommand,
+    },
+
     /// Cycle through active, reachable lanes directly - independent of
     /// whether anything (Claude or otherwise) is running inside them. A
     /// separate policy from `sessions next`/`prev`, not a replacement.
@@ -314,6 +326,24 @@ enum MoveCommand {
     Up,
 
     /// Swap with the next context in contexts.toml's order. A no-op if
+    /// already last.
+    Down,
+
+    /// Move to sit immediately before OTHER, in one jump - however far
+    /// apart they currently are.
+    Before { other: String },
+
+    /// Move to sit immediately after OTHER, in one jump.
+    After { other: String },
+}
+
+#[derive(Subcommand)]
+enum BoardsCommand {
+    /// Swap with the previous project in Boards' own order. A no-op if
+    /// already first.
+    Up,
+
+    /// Swap with the next project in Boards' own order. A no-op if
     /// already last.
     Down,
 
@@ -660,6 +690,41 @@ fn main() {
                     eprintln!("{}", e);
                     std::process::exit(1);
                 }
+            }
+        },
+
+        Command::Boards { name, command } => match command {
+            BoardsCommand::Up => match lanes::config::move_board_order(&name, lanes::config::MoveDirection::Up) {
+                Ok(lanes::config::MoveOutcome::Moved { swapped_with }) => println!("{name} <-> {swapped_with}"),
+                Ok(lanes::config::MoveOutcome::AlreadyFirst) => println!("{name} is already first"),
+                Ok(lanes::config::MoveOutcome::AlreadyLast) => unreachable!(),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            },
+            BoardsCommand::Down => match lanes::config::move_board_order(&name, lanes::config::MoveDirection::Down) {
+                Ok(lanes::config::MoveOutcome::Moved { swapped_with }) => println!("{name} <-> {swapped_with}"),
+                Ok(lanes::config::MoveOutcome::AlreadyLast) => println!("{name} is already last"),
+                Ok(lanes::config::MoveOutcome::AlreadyFirst) => unreachable!(),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            },
+            BoardsCommand::Before { other } => {
+                if let Err(e) = lanes::config::move_board_before(&name, &other) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("{name} -> before {other}");
+            }
+            BoardsCommand::After { other } => {
+                if let Err(e) = lanes::config::move_board_after(&name, &other) {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+                println!("{name} -> after {other}");
             }
         },
 

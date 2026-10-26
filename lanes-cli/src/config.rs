@@ -397,6 +397,139 @@ pub fn move_context_after(id: &str, after_id: &str) -> Result<(), String> {
     })
 }
 
+/// Boards' own project-order file - `<data_dir>/.order`, one project name
+/// per line. Boards' `board.rs` only ever reads this (see its
+/// `order_file_path` doc comment); nothing wrote it automatically after
+/// the order divorce (`PLAN-lane-board-consolidation.md`, decision 2) -
+/// these are the functions that fill that gap, fully independent of
+/// `move_context_order`/contexts.toml.
+fn boards_order_path(data_dir: &Path) -> PathBuf {
+    data_dir.join(".order")
+}
+
+/// Every real Boards project - directories with a `board.yaml` directly
+/// under the data root. Same definition Boards' own `list_projects` uses.
+fn boards_project_names(data_dir: &Path) -> Vec<String> {
+    let Ok(entries) = std::fs::read_dir(data_dir) else {
+        return Vec::new();
+    };
+    entries
+        .flatten()
+        .filter_map(|entry| {
+            let path = entry.path();
+            if path.is_dir() && path.join("board.yaml").exists() {
+                path.file_name().map(|n| n.to_string_lossy().into_owned())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// The order Boards is actually applying right now - whatever `.order`
+/// lists first, then every other real project alphabetically (mirrors
+/// Boards' own `apply_order` exactly). Every move below starts from this,
+/// not from `.order`'s raw content: a project never explicitly listed (the
+/// common case - nothing adds a new project to `.order` automatically) can
+/// still be moved relative to another instead of erroring just because it
+/// was missing, and a stale name left over from a rename/delete quietly
+/// drops out on write instead of accumulating forever.
+fn effective_boards_order_at(data_dir: &Path) -> Vec<String> {
+    let listed: Vec<String> = std::fs::read_to_string(boards_order_path(data_dir))
+        .map(|content| content.lines().map(str::to_string).collect())
+        .unwrap_or_default();
+    let mut names = boards_project_names(data_dir);
+    names.sort();
+    let mut ordered: Vec<String> = Vec::with_capacity(names.len());
+    for name in &listed {
+        if let Some(pos) = names.iter().position(|n| n == name) {
+            ordered.push(names.remove(pos));
+        }
+    }
+    ordered.extend(names);
+    ordered
+}
+
+fn write_boards_order(data_dir: &Path, names: &[String]) -> Result<(), String> {
+    let path = boards_order_path(data_dir);
+    let content: String = names.iter().map(|n| format!("{n}\n")).collect();
+    let tmp = path.with_extension("order.tmp");
+    std::fs::write(&tmp, content).map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
+/// Swaps `name` with its adjacent neighbor in Boards' effective project
+/// order - `lanes boards <name> up`/`down`.
+pub fn move_board_order(name: &str, direction: MoveDirection) -> Result<MoveOutcome, String> {
+    move_board_order_at(&crate::boards_data_dir(), name, direction)
+}
+
+fn move_board_order_at(data_dir: &Path, name: &str, direction: MoveDirection) -> Result<MoveOutcome, String> {
+    let mut names = effective_boards_order_at(data_dir);
+    let pos = names
+        .iter()
+        .position(|n| n == name)
+        .ok_or_else(|| format!("{name:?} is not a known Boards project"))?;
+    let swap_with = match direction {
+        MoveDirection::Up if pos == 0 => return Ok(MoveOutcome::AlreadyFirst),
+        MoveDirection::Up => pos - 1,
+        MoveDirection::Down if pos + 1 == names.len() => return Ok(MoveOutcome::AlreadyLast),
+        MoveDirection::Down => pos + 1,
+    };
+    let swapped_with = names[swap_with].clone();
+    names.swap(pos, swap_with);
+    write_boards_order(data_dir, &names)?;
+    Ok(MoveOutcome::Moved { swapped_with })
+}
+
+/// Moves `name` to sit immediately before `before`, in one jump - however
+/// far apart they currently are. `lanes boards <name> before <before>`.
+pub fn move_board_before(name: &str, before: &str) -> Result<(), String> {
+    move_board_before_at(&crate::boards_data_dir(), name, before)
+}
+
+fn move_board_before_at(data_dir: &Path, name: &str, before: &str) -> Result<(), String> {
+    if name == before {
+        return Err(format!("{name:?} can't move before itself"));
+    }
+    let mut names = effective_boards_order_at(data_dir);
+    let pos = names
+        .iter()
+        .position(|n| n == name)
+        .ok_or_else(|| format!("{name:?} is not a known Boards project"))?;
+    names.remove(pos);
+    let target = names
+        .iter()
+        .position(|n| n == before)
+        .ok_or_else(|| format!("{before:?} is not a known Boards project"))?;
+    names.insert(target, name.to_string());
+    write_boards_order(data_dir, &names)
+}
+
+/// Moves `name` to sit immediately after `after`, in one jump. `lanes
+/// boards <name> after <after>`.
+pub fn move_board_after(name: &str, after: &str) -> Result<(), String> {
+    move_board_after_at(&crate::boards_data_dir(), name, after)
+}
+
+fn move_board_after_at(data_dir: &Path, name: &str, after: &str) -> Result<(), String> {
+    if name == after {
+        return Err(format!("{name:?} can't move after itself"));
+    }
+    let mut names = effective_boards_order_at(data_dir);
+    let pos = names
+        .iter()
+        .position(|n| n == name)
+        .ok_or_else(|| format!("{name:?} is not a known Boards project"))?;
+    names.remove(pos);
+    let target = names
+        .iter()
+        .position(|n| n == after)
+        .ok_or_else(|| format!("{after:?} is not a known Boards project"))?;
+    names.insert(target + 1, name.to_string());
+    write_boards_order(data_dir, &names)
+}
+
 impl Default for Config {
     fn default() -> Self {
         Self {
@@ -1788,5 +1921,119 @@ raise = true
         let boards_targets = derive_boards_targets(&contexts);
         assert_eq!(boards_targets.len(), 1);
         assert_eq!(boards_targets[0].1, "App Ideas");
+    }
+
+    /// A throwaway Boards data dir with one subdirectory (containing
+    /// board.yaml, so it counts as a real project) per name in `projects`,
+    /// and `.order` written iff `order` is `Some`.
+    fn fake_boards_data_dir(label: &str, projects: &[&str], order: Option<&[&str]>) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "lanes-config-test-boards-order-{label}-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        for project in projects {
+            let project_dir = dir.join(project);
+            std::fs::create_dir_all(&project_dir).unwrap();
+            std::fs::write(project_dir.join("board.yaml"), "title: \"x\"\ncolumns: [Inbox]\n").unwrap();
+        }
+        if let Some(order) = order {
+            let content: String = order.iter().map(|n| format!("{n}\n")).collect();
+            std::fs::write(dir.join(".order"), content).unwrap();
+        }
+        dir
+    }
+
+    fn read_boards_order(data_dir: &Path) -> Vec<String> {
+        std::fs::read_to_string(data_dir.join(".order"))
+            .unwrap()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    #[test]
+    fn effective_boards_order_puts_unlisted_projects_after_the_listed_ones_alphabetically() {
+        let dir = fake_boards_data_dir("effective", &["Zebra", "Alpha", "Infra"], Some(&["Infra"]));
+        assert_eq!(effective_boards_order_at(&dir), vec!["Infra", "Alpha", "Zebra"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn effective_boards_order_drops_a_stale_listed_name_with_no_matching_project() {
+        let dir = fake_boards_data_dir("stale", &["Infra"], Some(&["Renamed Away", "Infra"]));
+        assert_eq!(effective_boards_order_at(&dir), vec!["Infra"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn move_board_order_up_swaps_with_the_previous_entry_and_persists_the_full_order() {
+        let dir = fake_boards_data_dir("up", &["Infra", "Lanes", "Boards"], Some(&["Infra", "Lanes", "Boards"]));
+        let outcome = move_board_order_at(&dir, "Lanes", MoveDirection::Up).unwrap();
+        assert_eq!(outcome, MoveOutcome::Moved { swapped_with: "Infra".to_string() });
+        assert_eq!(read_boards_order(&dir), vec!["Lanes", "Infra", "Boards"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn move_board_order_down_is_a_noop_when_already_last() {
+        let dir = fake_boards_data_dir("down-last", &["Infra", "Lanes"], Some(&["Infra", "Lanes"]));
+        let outcome = move_board_order_at(&dir, "Lanes", MoveDirection::Down).unwrap();
+        assert_eq!(outcome, MoveOutcome::AlreadyLast);
+        assert_eq!(read_boards_order(&dir), vec!["Infra", "Lanes"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn move_board_order_works_on_a_project_never_listed_in_order_at_all() {
+        // .order only has "Infra" - "Lanes" and "Boards" fall back to
+        // alphabetical (Boards, Lanes) per effective_boards_order_at. This
+        // confirms a never-listed project can still be moved, not just
+        // errored on for being absent.
+        let dir = fake_boards_data_dir("never-listed", &["Infra", "Lanes", "Boards"], Some(&["Infra"]));
+        let outcome = move_board_order_at(&dir, "Boards", MoveDirection::Down).unwrap();
+        assert_eq!(outcome, MoveOutcome::Moved { swapped_with: "Lanes".to_string() });
+        assert_eq!(read_boards_order(&dir), vec!["Infra", "Lanes", "Boards"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn move_board_order_errors_on_an_unknown_project() {
+        let dir = fake_boards_data_dir("unknown", &["Infra"], None);
+        assert!(move_board_order_at(&dir, "Nope", MoveDirection::Up).is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn move_board_before_jumps_from_the_end_to_the_front_in_one_call() {
+        let dir = fake_boards_data_dir("before", &["Infra", "Lanes", "Boards"], Some(&["Infra", "Lanes", "Boards"]));
+        move_board_before_at(&dir, "Boards", "Infra").unwrap();
+        assert_eq!(read_boards_order(&dir), vec!["Boards", "Infra", "Lanes"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn move_board_after_jumps_from_the_front_to_the_end_in_one_call() {
+        let dir = fake_boards_data_dir("after", &["Infra", "Lanes", "Boards"], Some(&["Infra", "Lanes", "Boards"]));
+        move_board_after_at(&dir, "Infra", "Boards").unwrap();
+        assert_eq!(read_boards_order(&dir), vec!["Lanes", "Boards", "Infra"]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn move_board_before_rejects_moving_a_project_before_itself() {
+        let dir = fake_boards_data_dir("self-before", &["Infra"], Some(&["Infra"]));
+        assert!(move_board_before_at(&dir, "Infra", "Infra").is_err());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn move_board_order_self_heals_a_stale_name_on_write() {
+        let dir = fake_boards_data_dir("self-heal", &["Infra", "Lanes"], Some(&["Gone", "Infra", "Lanes"]));
+        move_board_order_at(&dir, "Infra", MoveDirection::Down).unwrap();
+        assert_eq!(read_boards_order(&dir), vec!["Lanes", "Infra"]);
+        std::fs::remove_dir_all(&dir).ok();
     }
 }
