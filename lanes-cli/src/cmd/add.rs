@@ -31,7 +31,7 @@ pub fn run(id: &str, name: &str, opts: Options) {
     }
 
     let dir = lanes::config::config_dir().join("contexts").join(id);
-    if let Err(e) = check_not_already_present(id, &dir, &opts) {
+    if let Err(e) = check_against_existing_facets(id, &dir, &opts) {
         eprintln!("{e}");
         std::process::exit(1);
     }
@@ -50,6 +50,9 @@ pub fn run(id: &str, name: &str, opts: Options) {
     if opts.lane {
         created.push("lane.toml".to_string());
     }
+    if opts.session.is_some() || opts.repo.is_some() {
+        created.push("tab.toml".to_string());
+    }
     if opts.board {
         created.push("board.toml".to_string());
         let cfg = lanes::config::Config::load();
@@ -59,34 +62,42 @@ pub fn run(id: &str, name: &str, opts: Options) {
     println!("{id}: {}", created.join(", "));
 }
 
-/// Rejects a request before anything is written: `id` must be kebab-case
-/// (same rule `doctor`'s "session naming" check enforces, but checked up
-/// front here instead of letting a bad id land and get caught later),
-/// at least one facet must actually be requested, and `--session`/`--repo`
-/// (which only ever populate `tab.toml`'s scope, read only when a lane
-/// facet exists - see `load_contexts`) require `--lane`.
+/// Rejects a request before anything touches the filesystem: `id` must be
+/// kebab-case (same rule `doctor`'s "session naming" check enforces, but
+/// checked up front here instead of letting a bad id land and get caught
+/// later), and at least one facet must actually be requested.
+/// `--session`/`--repo` populate `tab.toml`'s scope, read only when a lane
+/// facet exists at all (see `load_contexts`) - whether that means "pass
+/// --lane too" depends on whether the context already has one, which
+/// `check_against_existing_facets` (filesystem-aware) decides, not this.
 fn validate(id: &str, opts: &Options) -> Result<(), String> {
     if !super::doctor::is_kebab_case(id) {
         return Err(format!("{id:?} is not kebab-case (lowercase letters, digits, single hyphens)"));
     }
-    if !opts.lane && !opts.board {
-        return Err("nothing to create - pass --lane and/or --board".to_string());
-    }
-    if !opts.lane && (opts.session.is_some() || opts.repo.is_some()) {
-        return Err("--session/--repo populate tab.toml, which only does anything with --lane".to_string());
+    if !opts.lane && !opts.board && opts.session.is_none() && opts.repo.is_none() {
+        return Err("nothing to create - pass --lane, --board, --session, and/or --repo".to_string());
     }
     Ok(())
 }
 
-/// Refuses to clobber a facet that's already there - the only thing that
-/// blocks `add`, never the context existing at all (see this module's own
-/// doc comment).
-fn check_not_already_present(id: &str, dir: &std::path::Path, opts: &Options) -> Result<(), String> {
-    if opts.lane && dir.join("lane.toml").exists() {
+/// Refuses to clobber a facet that's already there (the only thing that
+/// blocks `add`, never the context existing at all - see this module's
+/// own doc comment), and makes sure `--session`/`--repo` have an actual
+/// lane facet to attach to: either `--lane` is creating one right now, or
+/// the context already has one.
+fn check_against_existing_facets(id: &str, dir: &std::path::Path, opts: &Options) -> Result<(), String> {
+    let lane_exists = dir.join("lane.toml").exists();
+    if opts.lane && lane_exists {
         return Err(format!("{id:?} already has a lane facet"));
     }
     if opts.board && dir.join("board.toml").exists() {
         return Err(format!("{id:?} already has a board facet"));
+    }
+    if (opts.session.is_some() || opts.repo.is_some()) && !opts.lane && !lane_exists {
+        return Err(
+            "--session/--repo populate tab.toml, which needs a lane facet - pass --lane to create one here too"
+                .to_string(),
+        );
     }
     Ok(())
 }
@@ -96,9 +107,9 @@ fn scaffold(dir: &std::path::Path, name: &str, opts: &Options) -> io::Result<()>
 
     if opts.lane {
         write_lane_toml(dir, name)?;
-        if opts.session.is_some() || opts.repo.is_some() {
-            write_tab_toml(dir, opts.session.as_deref(), opts.repo.as_deref())?;
-        }
+    }
+    if opts.session.is_some() || opts.repo.is_some() {
+        write_tab_toml(dir, opts.session.as_deref(), opts.repo.as_deref())?;
     }
 
     if opts.board {
@@ -190,32 +201,59 @@ mod tests {
     }
 
     #[test]
-    fn validate_rejects_session_without_lane() {
-        assert!(validate("ctx", &Options { board: true, session: Some("ctx".to_string()), ..opts() }).is_err());
+    fn validate_accepts_bare_session_with_no_lane_or_board_flag() {
+        // --session alone is a real request ("add a tab facet to an
+        // existing lane") - validate can't know yet whether a lane facet
+        // exists, only that this isn't an empty request.
+        assert!(validate("ctx", &Options { session: Some("ctx".to_string()), ..opts() }).is_ok());
     }
 
     #[test]
-    fn validate_accepts_lane_with_session() {
-        assert!(validate("ctx", &Options { lane: true, session: Some("ctx".to_string()), ..opts() }).is_ok());
+    fn validate_accepts_session_without_lane_up_front() {
+        // Whether this is actually OK depends on whether a lane facet
+        // already exists on disk - validate() itself can't know that, so
+        // it defers to check_against_existing_facets.
+        assert!(validate("ctx", &Options { board: true, session: Some("ctx".to_string()), ..opts() }).is_ok());
     }
 
     #[test]
-    fn check_not_already_present_allows_adding_board_to_a_lane_only_context() {
+    fn check_against_existing_facets_allows_adding_board_to_a_lane_only_context() {
         with_fake_home(|home| {
             let dir = home.join(".config/lanes/contexts/ctx");
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("lane.toml"), "name = \"Ctx\"\n").unwrap();
-            assert!(check_not_already_present("ctx", &dir, &Options { board: true, ..opts() }).is_ok());
+            assert!(check_against_existing_facets("ctx", &dir, &Options { board: true, ..opts() }).is_ok());
         });
     }
 
     #[test]
-    fn check_not_already_present_rejects_a_facet_that_is_already_there() {
+    fn check_against_existing_facets_rejects_a_facet_that_is_already_there() {
         with_fake_home(|home| {
             let dir = home.join(".config/lanes/contexts/ctx");
             std::fs::create_dir_all(&dir).unwrap();
             std::fs::write(dir.join("board.toml"), "driver = \"boards\"\nproject = \"Ctx\"\n").unwrap();
-            assert!(check_not_already_present("ctx", &dir, &Options { board: true, ..opts() }).is_err());
+            assert!(check_against_existing_facets("ctx", &dir, &Options { board: true, ..opts() }).is_err());
+        });
+    }
+
+    #[test]
+    fn check_against_existing_facets_rejects_session_with_no_lane_facet_at_all() {
+        with_fake_home(|home| {
+            let dir = home.join(".config/lanes/contexts/ctx");
+            std::fs::create_dir_all(&dir).unwrap();
+            let opts = Options { board: true, session: Some("ctx".to_string()), ..opts() };
+            assert!(check_against_existing_facets("ctx", &dir, &opts).is_err());
+        });
+    }
+
+    #[test]
+    fn check_against_existing_facets_allows_session_against_an_existing_lane_without_the_lane_flag() {
+        with_fake_home(|home| {
+            let dir = home.join(".config/lanes/contexts/ctx");
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("lane.toml"), "name = \"Ctx\"\n").unwrap();
+            let opts = Options { board: true, session: Some("ctx".to_string()), ..opts() };
+            assert!(check_against_existing_facets("ctx", &dir, &opts).is_ok());
         });
     }
 
