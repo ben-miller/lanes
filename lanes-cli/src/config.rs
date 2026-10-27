@@ -736,6 +736,9 @@ fn load_context_indented() -> Vec<String> {
 fn target_identity(t: &Target) -> (&'static str, Option<&str>) {
     match &t.driver {
         TargetDriver::App { name, .. } => ("app", Some(name.as_str())),
+        // One per app: a lane's own target for benoxer-app mustn't replace
+        // a template's target for Console.
+        TargetDriver::Appctl { app, .. } => ("appctl", Some(app.as_str())),
         other => (other.name(), None),
     }
 }
@@ -1040,6 +1043,18 @@ mod tests {
         let mut cfg = config_with(vec![lane("infra")], Some(vec!["infra"]));
         cfg.context_ids.push("development".to_string());
         assert_eq!(cfg.unregistered_contexts(), vec!["development"]);
+    }
+
+    #[test]
+    fn appctl_targets_for_different_apps_dont_override_each_other() {
+        let appctl = |app: &str| crate::model::Target {
+            driver: crate::model::TargetDriver::Appctl { app: app.into(), cmd: "show".into(), args: Default::default() },
+            ..app_target("x")
+        };
+        let merged = merge_targets(&[appctl("console")], vec![appctl("benoxer-app")]);
+        assert_eq!(merged.len(), 2, "both kept");
+        let merged = merge_targets(&[appctl("console")], vec![appctl("console")]);
+        assert_eq!(merged.len(), 1, "the same app's overrides");
     }
 
     #[test]

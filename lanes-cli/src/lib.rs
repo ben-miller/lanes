@@ -1368,6 +1368,12 @@ fn attached_monitor_count() -> Option<usize> {
 /// override its usual position, not just unresolvable ones (WezTerm).
 /// `None` means this target isn't placed at all this switch, same as a
 /// bare `target.monitor` check before this field existed.
+/// Whether a target applies only on a single screen: it has a
+/// `position_solo` and no `monitor` of its own.
+fn single_screen_only(target: &model::Target) -> bool {
+    target.position_solo.is_some() && target.monitor.is_none()
+}
+
 fn effective_destination(target: &model::Target, solo: bool) -> Option<(String, Option<toml::Value>)> {
     if solo {
         if let Some(position) = &target.position_solo {
@@ -1421,6 +1427,14 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
         // couldn't be landed on at all: every switch would hard-error on a
         // target that was never meant to apply to it in the first place.
         if terminal_target_has_no_resolvable_session(&target.driver, default_session) {
+            continue;
+        }
+
+        // A target with only a single-screen position (`position_solo`, no
+        // `monitor`) is for a single screen: with several, it's left alone
+        // entirely (not raised either), as a target the layout doesn't
+        // place anywhere.
+        if single_screen_only(target) && !solo {
             continue;
         }
 
@@ -1524,6 +1538,14 @@ fn apply_targets(targets: &[model::Target], cfg: &config::Config, default_sessio
         placement.insert(identity_key.to_string(), identity_value);
         placement.insert("monitor".to_string(), serde_json::json!(uuid));
         placement.insert("position".to_string(), position_json);
+        // Raised as it's placed: lanes-wm applies the batch in order, so the
+        // raising targets stack in the lane's target order (the template's,
+        // then the lane's own, then its board), deterministically, though
+        // their activations above ran concurrently. land_lane then puts the
+        // terminal (or the primary target) on top.
+        if target.raise {
+            placement.insert("raise".to_string(), serde_json::json!(true));
+        }
         match &target.driver {
             model::TargetDriver::Obsidian { vault } => {
                 placement.insert(
@@ -2309,6 +2331,15 @@ mod tests {
             minimized: None,
             primary: false,
         }
+    }
+
+    #[test]
+    fn a_target_with_only_a_single_screen_position_is_single_screen_only() {
+        let mut solo_only = solo_target("main", Some("left-half"));
+        solo_only.monitor = None;
+        assert!(single_screen_only(&solo_only));
+        assert!(!single_screen_only(&solo_target("lg-right", Some("left-half"))), "it has a monitor too");
+        assert!(!single_screen_only(&solo_target("main", None)));
     }
 
     #[test]
