@@ -69,6 +69,10 @@ struct LaneToml {
     name: Option<String>,
     #[serde(default)]
     active: Option<bool>,
+    /// `false`: the lane is disabled, as if it didn't exist (as everywhere
+    /// else in Lanes, `load_contexts`): it publishes nothing.
+    #[serde(default)]
+    enabled: Option<bool>,
 }
 
 #[derive(Deserialize, Default)]
@@ -117,6 +121,9 @@ pub fn scan_contexts(dir: &Path) -> Vec<FactRow> {
             continue;
         }
         let lane: LaneToml = read_facet(&path.join("lane.toml"));
+        if lane.enabled == Some(false) {
+            continue;
+        }
         let tab: TabToml = read_facet(&path.join("tab.toml"));
         let board: BoardToml = read_facet(&path.join("board.toml"));
 
@@ -245,6 +252,20 @@ mod tests {
         if let Some(content) = board_toml {
             std::fs::write(ctx.join("board.toml"), content).unwrap();
         }
+    }
+
+    #[test]
+    fn a_disabled_lane_publishes_nothing() {
+        let dir = std::env::temp_dir().join(format!("lanes-facts-disabled-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        for (id, toml) in [("on", "name = \"On\"\n"), ("off", "name = \"Off\"\nenabled = false\n")] {
+            std::fs::create_dir_all(dir.join(id)).unwrap();
+            std::fs::write(dir.join(id).join("lane.toml"), toml).unwrap();
+        }
+        let rows = scan_contexts(&dir);
+        assert!(rows.iter().any(|r| r.relation == "lane" && r.values == vec![FactValue::from("on")]));
+        assert!(!rows.iter().any(|r| r.values.first() == Some(&FactValue::from("off"))), "{rows:?}");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
