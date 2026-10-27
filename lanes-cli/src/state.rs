@@ -2,7 +2,9 @@ use std::path::{Path, PathBuf};
 
 use kdl::{KdlDocument, KdlNode};
 
-fn state_path() -> PathBuf {
+/// `~/.local/state/lanes/state.kdl`: the focused lane and the rest of
+/// Lanes' own mutable state.
+pub fn state_path() -> PathBuf {
     let home = std::env::var("HOME").unwrap_or_default();
     PathBuf::from(home).join(".local/state/lanes/state.kdl")
 }

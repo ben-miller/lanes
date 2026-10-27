@@ -16,6 +16,10 @@ pub const RELATIONS: &[(&str, &[&str])] = &[
     ("lane", &["lane"]),
     ("lane_name", &["lane", "name"]),
     ("lane_active", &["lane"]),
+    // The lane being worked in now (state.kdl's focused-lane): at most one
+    // row. Apps follow it (tauri_plugin_appctl's lane following: Console
+    // shows that lane's repos).
+    ("lane_focused", &["lane"]),
     ("lane_zellij", &["lane", "session"]),
     ("lane_repo", &["lane", "repo"]),
     ("lane_repo_path", &["lane", "path"]),
@@ -36,10 +40,16 @@ fn row(relation: &str, values: Vec<FactValue>) -> FactRow {
 pub fn publish(facts: &appctl::facts::Facts) {
     let mut rows = scan_contexts(&contexts_dir());
     rows.extend(scan_shell(&shell_dir()));
+    rows.extend(focused(crate::state::read_focused_lane()));
     for (relation, _) in RELATIONS {
         let mine = rows.iter().filter(|r| r.relation == *relation).map(|r| r.values.clone());
         let _ = facts.replace(relation, mine);
     }
+}
+
+/// The `lane_focused` row: the focused lane, if one is recorded.
+fn focused(lane: Option<String>) -> Vec<FactRow> {
+    lane.into_iter().filter(|l| !l.is_empty()).map(|l| row("lane_focused", vec![FactValue::from(l)])).collect()
 }
 
 pub fn contexts_dir() -> PathBuf {
@@ -235,6 +245,13 @@ mod tests {
         if let Some(content) = board_toml {
             std::fs::write(ctx.join("board.toml"), content).unwrap();
         }
+    }
+
+    #[test]
+    fn the_focused_lane_is_one_row_or_none() {
+        assert_eq!(focused(Some("dev-infra".into())), vec![row("lane_focused", vec![FactValue::from("dev-infra")])]);
+        assert!(focused(None).is_empty());
+        assert!(focused(Some(String::new())).is_empty());
     }
 
     #[test]

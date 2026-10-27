@@ -582,8 +582,9 @@ fn watch_paths(
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
-/// Publishes Lanes' facts now, and again whenever a context or a shell
-/// record changes (debounced), for as long as the app runs.
+/// Publishes Lanes' facts now, and again whenever a context, a shell
+/// record or state.kdl (the focused lane) changes (debounced), for as long
+/// as the app runs.
 fn publish_lanes_facts(facts: appctl::facts::Facts) {
     lanes::facts::publish(&facts);
     std::thread::spawn(move || {
@@ -592,6 +593,10 @@ fn publish_lanes_facts(facts: appctl::facts::Facts) {
         // Missing directories are skipped; the facts then just lack them.
         watcher.watch(&lanes::facts::contexts_dir(), RecursiveMode::Recursive).ok();
         watcher.watch(&lanes::facts::shell_dir(), RecursiveMode::NonRecursive).ok();
+        // state.kdl's directory, not the file: it's replaced by a rename.
+        if let Some(dir) = lanes::state::state_path().parent() {
+            watcher.watch(dir, RecursiveMode::NonRecursive).ok();
+        }
         while rx.recv().is_ok() {
             // A burst of writes (an editor's save, a hook's rewrite) settles first.
             std::thread::sleep(std::time::Duration::from_millis(150));

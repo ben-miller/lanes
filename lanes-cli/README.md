@@ -195,6 +195,15 @@ records are landing.
 Phase 2 (see `PLAN-shell-signal.md`) will add a live `running` chip and
 `bash`/`zsh` hooks.
 
+## Facts Lanes Switch publishes
+
+While it runs, Lanes Switch publishes Lanes' state as `appctl` facts
+(`lanes-cli/src/facts.rs`; lensd sees them as `lanes.*`): each lane, its
+name, whether it's active, its zellij session, its repos, its board, the
+shell's commands, and **`lane_focused`**, the lane being worked in
+(`state.kdl`'s focused lane), republished on every switch. Apps follow it
+(`appctl::Config::follow_lanes` in dev-infra): Console shows that lane.
+
 ## lensd
 
 Lanes' rule set for the lensd daemon, `lanes.dl`, lives centrally in
