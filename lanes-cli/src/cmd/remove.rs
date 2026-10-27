@@ -66,8 +66,7 @@ mod tests {
     use super::*;
 
     fn with_fake_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
+        let _guard = crate::cmd::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!("lanes-remove-test-home-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join(".config/lanes/contexts")).unwrap();

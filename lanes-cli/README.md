@@ -76,6 +76,21 @@ kind = "zellij_session"
 session = "job-hunting"
 ```
 
+A lane can name several repos (one `[[scope]] kind = "repo"` each); a
+repo can be in several lanes. Edit them with the CLI, which changes the
+file in place and keeps everything else in it (the session, other repos,
+comments):
+
+```sh
+lanes ctx dev-infra repo add ~/src/dev-infra ~/src/projects/lanes   # each must be a git repo; one already there is skipped
+lanes ctx dev-infra repo remove ~/src/projects/lanes
+lanes ctx dev-infra repo ls
+lanes ctx dev-infra add "Dev Infra" --session dev-infra --repo ~/src/x   # on an existing lane: sets the session, adds the repo
+```
+
+(`src/cmd/scope.rs`. `add --session/--repo` used to rewrite `tab.toml`
+from scratch, dropping the session and every other repo.)
+
 Example `layout.toml` (same shape whether this is a context's own `contexts/<id>/layout.toml`, a `layout-templates/<name>.toml`, or `layout-templates/default.toml` - see the "Contexts" section above for the cascade):
 
 ```toml

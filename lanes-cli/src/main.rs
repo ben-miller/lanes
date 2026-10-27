@@ -269,9 +269,18 @@ enum ContextCommand {
         #[arg(long)]
         session: Option<String>,
 
-        /// Repo path for this lane's tab.toml scope. Requires --lane.
+        /// A repo for this lane's tab.toml scope, added to any already
+        /// there (repeat for several). Requires a lane facet.
         #[arg(long)]
-        repo: Option<String>,
+        repo: Vec<String>,
+    },
+
+    /// The repos this lane works in (tab.toml's `repo` scope entries):
+    /// add, remove, list. Edits in place: the session and other entries
+    /// stay.
+    Repo {
+        #[command(subcommand)]
+        command: RepoCommand,
     },
 
     /// Remove this context - the counterpart to `add`. By default, a
@@ -366,6 +375,23 @@ enum LaneFacetCommand {
 
     /// Re-enable this context's lane facet, restoring its lane.toml.
     Enable,
+}
+
+#[derive(Subcommand)]
+enum RepoCommand {
+    /// Add one or more repos (each must be a git repo; one already listed
+    /// is skipped)
+    Add {
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+    /// Remove one or more repos (naming one the lane doesn't have changes nothing)
+    Remove {
+        #[arg(required = true)]
+        paths: Vec<String>,
+    },
+    /// List the lane's repos
+    Ls,
 }
 
 #[derive(Subcommand)]
@@ -574,6 +600,38 @@ fn main() {
             }
 
             ContextCommand::Remove { delete } => cmd::remove::run(&id, delete),
+
+            ContextCommand::Repo { command } => {
+                let dir = lanes::config::config_dir().join("contexts").join(&id);
+                if !dir.join("lane.toml").exists() {
+                    eprintln!("{id:?} has no lane facet: repos belong to a lane (lanes ctx {id} add <name> --lane)");
+                    std::process::exit(1);
+                }
+                let result = match command {
+                    RepoCommand::Add { paths } => cmd::scope::merge(&dir, None, &paths).map(|c| {
+                        for r in &c.added {
+                            println!("{id}: added {r}");
+                        }
+                        for r in &c.already {
+                            println!("{id}: {r} already listed");
+                        }
+                    }),
+                    RepoCommand::Remove { paths } => cmd::scope::remove(&dir, &paths).map(|removed| {
+                        for r in removed {
+                            println!("{id}: removed {r}");
+                        }
+                    }),
+                    RepoCommand::Ls => cmd::scope::repos(&dir).map(|repos| {
+                        for r in repos {
+                            println!("{r}");
+                        }
+                    }),
+                };
+                if let Err(e) = result {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
 
             ContextCommand::SetName { name } => {
                 let cfg = lanes::config::Config::load();

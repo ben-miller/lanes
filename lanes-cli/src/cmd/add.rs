@@ -21,7 +21,8 @@ pub struct Options {
     pub board: bool,
     pub project: Option<String>,
     pub session: Option<String>,
-    pub repo: Option<String>,
+    /// Repos to add to the lane's scope (`--repo`, any number).
+    pub repo: Vec<String>,
 }
 
 pub fn run(id: &str, name: &str, opts: Options) {
@@ -50,7 +51,7 @@ pub fn run(id: &str, name: &str, opts: Options) {
     if opts.lane {
         created.push("lane.toml".to_string());
     }
-    if opts.session.is_some() || opts.repo.is_some() {
+    if opts.session.is_some() || !opts.repo.is_empty() {
         created.push("tab.toml".to_string());
     }
     if opts.board {
@@ -74,7 +75,7 @@ fn validate(id: &str, opts: &Options) -> Result<(), String> {
     if !super::doctor::is_kebab_case(id) {
         return Err(format!("{id:?} is not kebab-case (lowercase letters, digits, single hyphens)"));
     }
-    if !opts.lane && !opts.board && opts.session.is_none() && opts.repo.is_none() {
+    if !opts.lane && !opts.board && opts.session.is_none() && opts.repo.is_empty() {
         return Err("nothing to create - pass --lane, --board, --session, and/or --repo".to_string());
     }
     Ok(())
@@ -93,7 +94,7 @@ fn check_against_existing_facets(id: &str, dir: &std::path::Path, opts: &Options
     if opts.board && dir.join("board.toml").exists() {
         return Err(format!("{id:?} already has a board facet"));
     }
-    if (opts.session.is_some() || opts.repo.is_some()) && !opts.lane && !lane_exists {
+    if (opts.session.is_some() || !opts.repo.is_empty()) && !opts.lane && !lane_exists {
         return Err(
             "--session/--repo populate tab.toml, which needs a lane facet - pass --lane to create one here too"
                 .to_string(),
@@ -108,8 +109,10 @@ fn scaffold(dir: &std::path::Path, name: &str, opts: &Options) -> io::Result<()>
     if opts.lane {
         write_lane_toml(dir, name)?;
     }
-    if opts.session.is_some() || opts.repo.is_some() {
-        write_tab_toml(dir, opts.session.as_deref(), opts.repo.as_deref())?;
+    if opts.session.is_some() || !opts.repo.is_empty() {
+        // Merged into what's there (the session replaced, repos added),
+        // never written fresh: that dropped a lane's session and repos.
+        super::scope::merge(dir, opts.session.as_deref(), &opts.repo).map_err(io::Error::other)?;
     }
 
     if opts.board {
@@ -124,25 +127,6 @@ fn write_lane_toml(dir: &std::path::Path, name: &str) -> io::Result<()> {
     let mut doc = toml_edit::DocumentMut::new();
     doc["name"] = toml_edit::value(name);
     std::fs::write(dir.join("lane.toml"), doc.to_string())
-}
-
-fn write_tab_toml(dir: &std::path::Path, session: Option<&str>, repo: Option<&str>) -> io::Result<()> {
-    let mut doc = toml_edit::DocumentMut::new();
-    let mut scope = toml_edit::ArrayOfTables::new();
-    if let Some(session) = session {
-        let mut t = toml_edit::Table::new();
-        t["kind"] = toml_edit::value("zellij_session");
-        t["session"] = toml_edit::value(session);
-        scope.push(t);
-    }
-    if let Some(repo) = repo {
-        let mut t = toml_edit::Table::new();
-        t["kind"] = toml_edit::value("repo");
-        t["path"] = toml_edit::value(repo);
-        scope.push(t);
-    }
-    doc["scope"] = toml_edit::Item::ArrayOfTables(scope);
-    std::fs::write(dir.join("tab.toml"), doc.to_string())
 }
 
 /// Same placement template every hand-authored board.toml in this config
@@ -170,8 +154,7 @@ mod tests {
     use super::*;
 
     fn with_fake_home<T>(f: impl FnOnce(&std::path::Path) -> T) -> T {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
+        let _guard = crate::cmd::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!("lanes-add-test-home-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join(".config/lanes/contexts")).unwrap();
@@ -187,7 +170,7 @@ mod tests {
     }
 
     fn opts() -> Options {
-        Options { lane: false, board: false, project: None, session: None, repo: None }
+        Options { lane: false, board: false, project: None, session: None, repo: Vec::new() }
     }
 
     #[test]
@@ -274,10 +257,11 @@ mod tests {
     fn scaffold_lane_with_session_and_repo_writes_both_scope_entries() {
         with_fake_home(|home| {
             let dir = home.join(".config/lanes/contexts/ctx");
+            std::fs::create_dir_all(home.join("src/ctx/.git")).unwrap(); // a repo to add (it must be one)
             scaffold(
                 &dir,
                 "Ctx",
-                &Options { lane: true, session: Some("ctx".to_string()), repo: Some("~/src/ctx".to_string()), ..opts() },
+                &Options { lane: true, session: Some("ctx".to_string()), repo: vec!["~/src/ctx".to_string()], ..opts() },
             )
             .unwrap();
             let text = std::fs::read_to_string(dir.join("tab.toml")).unwrap();
