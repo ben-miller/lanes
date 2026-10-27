@@ -20,6 +20,9 @@ pub const RELATIONS: &[(&str, &[&str])] = &[
     // row. Apps follow it (tauri_plugin_appctl's lane following: Console
     // shows that lane's repos).
     ("lane_focused", &["lane"]),
+    // Each lane's place in Lanes' canonical order (contexts.toml's `order`,
+    // as Lanes Switch shows them): 0 first.
+    ("lane_order", &["lane", "position"]),
     ("lane_zellij", &["lane", "session"]),
     ("lane_repo", &["lane", "repo"]),
     ("lane_repo_path", &["lane", "path"]),
@@ -41,10 +44,29 @@ pub fn publish(facts: &appctl::facts::Facts) {
     let mut rows = scan_contexts(&contexts_dir());
     rows.extend(scan_shell(&shell_dir()));
     rows.extend(focused(crate::state::read_focused_lane()));
+    rows.extend(ordered(&rows, &crate::config::Config::load().lanes.iter().map(|l| l.id.clone()).collect::<Vec<_>>()));
     for (relation, _) in RELATIONS {
         let mine = rows.iter().filter(|r| r.relation == *relation).map(|r| r.values.clone());
         let _ = facts.replace(relation, mine);
     }
+}
+
+/// The `lane_order` rows: each published lane's position in `canonical` (the
+/// lanes' ids in Lanes' order); a lane not in it goes after, by id.
+fn ordered(rows: &[FactRow], canonical: &[String]) -> Vec<FactRow> {
+    let mut lanes: Vec<String> = rows
+        .iter()
+        .filter(|r| r.relation == "lane")
+        .filter_map(|r| match r.values.first() {
+            Some(FactValue::Str(id)) => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    lanes.sort_by(|a, b| {
+        let pos = |id: &String| canonical.iter().position(|c| c == id).unwrap_or(canonical.len());
+        pos(a).cmp(&pos(b)).then_with(|| a.cmp(b))
+    });
+    lanes.into_iter().enumerate().map(|(i, id)| row("lane_order", vec![FactValue::from(id), FactValue::Int(i as i64)])).collect()
 }
 
 /// The `lane_focused` row: the focused lane, if one is recorded.
@@ -266,6 +288,20 @@ mod tests {
         assert!(rows.iter().any(|r| r.relation == "lane" && r.values == vec![FactValue::from("on")]));
         assert!(!rows.iter().any(|r| r.values.first() == Some(&FactValue::from("off"))), "{rows:?}");
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn lanes_are_ordered_canonically_then_by_id() {
+        let rows: Vec<FactRow> = ["c", "a", "b", "z"].iter().map(|id| row("lane", vec![FactValue::from(*id)])).collect();
+        let order = ordered(&rows, &["b".to_string(), "c".to_string()]);
+        let got: Vec<(String, i64)> = order
+            .iter()
+            .map(|r| match (&r.values[0], &r.values[1]) {
+                (FactValue::Str(id), FactValue::Int(n)) => (id.clone(), *n),
+                _ => unreachable!(),
+            })
+            .collect();
+        assert_eq!(got, [("b".into(), 0), ("c".into(), 1), ("a".into(), 2), ("z".into(), 3)]);
     }
 
     #[test]

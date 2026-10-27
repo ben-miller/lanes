@@ -82,7 +82,13 @@ impl Config {
         let templates_dir = config_dir().join("layout-templates");
         let default_targets = load_layout_template(&templates_dir, "default");
         let contexts_dir = config_dir().join("contexts");
-        let contexts = load_contexts(&contexts_dir, &templates_dir, &default_targets);
+        let mut contexts = load_contexts(&contexts_dir, &templates_dir, &default_targets);
+        // Contexts in the canonical order too (contexts.toml's `order`, then
+        // any unlisted, alphabetically), so `lanes ls --json` lists them the
+        // way Lanes Switch does.
+        if let Some(order) = &order {
+            contexts.sort_by_key(|c| order.iter().position(|id| *id == c.id).unwrap_or(order.len()));
+        }
         let mut lanes = derive_lanes(&contexts);
         let boards_targets = derive_boards_targets(&contexts);
         let context_ids = contexts.iter().map(|c| c.id.clone()).collect();

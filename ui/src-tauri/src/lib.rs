@@ -593,6 +593,8 @@ fn publish_lanes_facts(facts: appctl::facts::Facts) {
         // Missing directories are skipped; the facts then just lack them.
         watcher.watch(&lanes::facts::contexts_dir(), RecursiveMode::Recursive).ok();
         watcher.watch(&lanes::facts::shell_dir(), RecursiveMode::NonRecursive).ok();
+        // contexts.toml (the order) sits beside contexts/, not in it.
+        watcher.watch(&lanes::config::config_dir(), RecursiveMode::NonRecursive).ok();
         // state.kdl's directory, not the file: it's replaced by a rename.
         if let Some(dir) = lanes::state::state_path().parent() {
             watcher.watch(dir, RecursiveMode::NonRecursive).ok();
