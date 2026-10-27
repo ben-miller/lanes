@@ -114,6 +114,7 @@ Each target's `driver` picks one of these; fields beyond it are driver-specific:
 | `sourcetree` | `repo` | `cd <repo> && stree` |
 | `vscode` | `folder` | `code -r <folder>` (reuse window) |
 | `app` | `name`, `bundle_id` (optional) | `open -a <name>`; `bundle_id` unlocks placement, otherwise activate-only |
+| `appctl` | `app`, `cmd`, `args` (optional) | sends `cmd` with `args` over the app's `appctl` socket on every switch (e.g. `navigate` to show this lane's repos); `raise = true` also sends `show` afterwards and places the window by pid. Sending and raising are independent: `raise = false` changes what the app shows without bringing it forward, and skips an app that isn't running quietly. `cmd = "show"` is the raise itself, sent only with `raise` |
 
 `boards`'s instance choice is `appctl`'s own default policy: one live `dev-*`
 instance wins, else the `installed` copy, else fall back to `open

@@ -1,4 +1,11 @@
 pub mod config;
+
+/// Tests that read or fake HOME take this first: HOME is the whole
+/// process's, so a test faking it (config.rs's `with_fake_home`) and one
+/// using the real one (drivers::zellij's cache test) can't overlap.
+#[cfg(test)]
+pub(crate) static HOME_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 pub mod context;
 pub mod drivers;
 pub mod facts;
@@ -1113,17 +1120,11 @@ fn activate_target(
             }
             Ok(None)
         }
-        // Gated on raise_app, same as `App` above and for the same
-        // reason - unlike Boards' own driver (always switches project
-        // regardless), a generic appctl command's whole purpose here is
-        // to be seen, so `raise = false` means leave it alone entirely.
-        model::TargetDriver::Appctl { app, cmd, args } => {
-            if raise_app {
-                activate_appctl_target(app, cmd, args.clone(), pre_place)
-            } else {
-                Ok(None)
-            }
-        }
+        // The command (`navigate view=... lane=...`) is what the app should
+        // do on this switch, and is sent either way; raising is a separate
+        // decision (`raise`), carried out with the app's `show` - never
+        // folded into the command.
+        model::TargetDriver::Appctl { app, cmd, args } => activate_appctl_target(app, cmd, args.clone(), raise_app, pre_place),
     }
 }
 
@@ -1140,7 +1141,7 @@ fn activate_boards_target(project: &str, pre_place: Option<(String, serde_json::
     let mut args = serde_json::Map::new();
     args.insert("project".to_string(), serde_json::json!(project));
     let outcome = match appctl::default_state_root() {
-        Some(root) => activate_via_appctl(&root, "boards", "open_project", args, pre_place),
+        Some(root) => activate_via_appctl(&root, "boards", vec![("open_project", args)], pre_place),
         None => AppctlOutcome::NoInstance,
     };
     let result = match outcome {
@@ -1168,20 +1169,29 @@ fn activate_boards_target(project: &str, pre_place: Option<(String, serde_json::
 /// this generalizes). No URL-scheme fallback of its own, unlike Boards'
 /// `boards://` - most apps don't have one, so "not running" is just a
 /// plain failure here.
+/// An `appctl` target: sends `cmd` (unless it's `show` itself, which is
+/// the raise), and with `raise` also `show`s the app and returns its pid for
+/// placement. An app that isn't running is an error only when it was to be
+/// raised; a target that only sends a command (`navigate` to follow the
+/// lane) skips it quietly, so a closed app doesn't fail every switch.
 fn activate_appctl_target(
     app: &str,
     cmd: &str,
     args: serde_json::Map<String, serde_json::Value>,
+    raise: bool,
     pre_place: Option<(String, serde_json::Value)>,
 ) -> Result<Option<u32>, String> {
+    let requests = appctl_requests(cmd, args, raise);
+    let pre_place = pre_place.filter(|_| raise);
     let outcome = match appctl::default_state_root() {
-        Some(root) => activate_via_appctl(&root, app, cmd, args, pre_place),
+        Some(root) => activate_via_appctl(&root, app, requests, pre_place),
         None => AppctlOutcome::NoInstance,
     };
     match outcome {
-        AppctlOutcome::Activated(pid) => Ok(Some(pid)),
+        AppctlOutcome::Activated(pid) => Ok(raise.then_some(pid)),
         AppctlOutcome::AppError(msg) => Err(msg),
-        AppctlOutcome::NoInstance => Err(format!("{app} isn't running")),
+        AppctlOutcome::NoInstance if raise => Err(format!("{app} isn't running")),
+        AppctlOutcome::NoInstance => Ok(None),
     }
 }
 
@@ -1239,11 +1249,28 @@ enum AppctlOutcome {
 /// until the lane switch's own (separate, batched) lanes-wm apply call
 /// catches up. Moving it first means the raise reveals a window that's
 /// already in the right place - no visible flash on the wrong screen.
+/// The commands to send an app, in order.
+type Requests<'a> = Vec<(&'a str, serde_json::Map<String, serde_json::Value>)>;
+
+/// What an `appctl` target sends: its command first (what to show), then,
+/// with `raise`, `show`, so the window comes forward already showing the
+/// right thing. `show` as the command is the raise itself: sent only with
+/// `raise`, and once.
+fn appctl_requests(cmd: &str, args: serde_json::Map<String, serde_json::Value>, raise: bool) -> Requests<'_> {
+    let mut requests: Requests = Vec::new();
+    if cmd != "show" {
+        requests.push((cmd, args));
+    }
+    if raise {
+        requests.push(("show", serde_json::Map::new()));
+    }
+    requests
+}
+
 fn activate_via_appctl(
     root: &std::path::Path,
     app: &str,
-    cmd: &str,
-    args: serde_json::Map<String, serde_json::Value>,
+    requests: Requests<'_>,
     pre_place: Option<(String, serde_json::Value)>,
 ) -> AppctlOutcome {
     let mut conn = match appctl::client::connect(root, app, None) {
@@ -1271,14 +1298,17 @@ fn activate_via_appctl(
         }
     }
 
-    match conn.request(cmd, args) {
-        Ok(_) => AppctlOutcome::Activated(pid),
-        Err(appctl::client::RequestError::App(msg)) => AppctlOutcome::AppError(msg),
-        Err(appctl::client::RequestError::Io(msg)) => {
-            eprintln!("warning: {app} appctl: {msg}");
-            AppctlOutcome::NoInstance
+    for (name, args) in requests {
+        match conn.request(name, args) {
+            Ok(_) => {}
+            Err(appctl::client::RequestError::App(msg)) => return AppctlOutcome::AppError(msg),
+            Err(appctl::client::RequestError::Io(msg)) => {
+                eprintln!("warning: {app} appctl: {msg}");
+                return AppctlOutcome::NoInstance;
+            }
         }
     }
+    AppctlOutcome::Activated(pid)
 }
 
 /// Whether a wezterm/zellij target has no session to act on at all - no
@@ -2100,7 +2130,7 @@ mod tests {
     fn appctl_switches_a_live_instance_and_returns_its_pid() {
         let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
         let handle = serve_boards("main", &repo, &state);
-        match activate_via_appctl(&state.0, "boards", "open_project", boards_args("myproj"), None) {
+        match activate_via_appctl(&state.0, "boards", vec![("open_project", boards_args("myproj"))], None) {
             AppctlOutcome::Activated(pid) => assert_eq!(pid, handle.info().pid),
             other => panic!("expected Activated, got {other:?}"),
         }
@@ -2110,7 +2140,7 @@ mod tests {
     fn appctl_app_error_is_not_no_instance() {
         let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
         let _handle = serve_boards("main", &repo, &state);
-        match activate_via_appctl(&state.0, "boards", "open_project", boards_args("missing"), None) {
+        match activate_via_appctl(&state.0, "boards", vec![("open_project", boards_args("missing"))], None) {
             AppctlOutcome::AppError(msg) => assert_eq!(msg, "no such project: missing"),
             other => panic!("expected AppError, got {other:?}"),
         }
@@ -2120,7 +2150,7 @@ mod tests {
     fn appctl_reports_no_instance_when_nothing_is_running() {
         let state = TempDir::new("st");
         assert!(matches!(
-            activate_via_appctl(&state.0, "boards", "open_project", boards_args("myproj"), None),
+            activate_via_appctl(&state.0, "boards", vec![("open_project", boards_args("myproj"))], None),
             AppctlOutcome::NoInstance
         ));
     }
@@ -2134,10 +2164,39 @@ mod tests {
             .state_dir(&state.0)
             .command("show", |_| Ok(serde_json::json!(null)));
         let handle = appctl::start(config).unwrap();
-        match activate_via_appctl(&state.0, "console", "show", serde_json::Map::new(), None) {
+        match activate_via_appctl(&state.0, "console", vec![("show", serde_json::Map::new())], None) {
             AppctlOutcome::Activated(pid) => assert_eq!(pid, handle.info().pid),
             other => panic!("expected Activated, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn an_appctl_target_sends_its_command_and_raises_separately() {
+        let names = |cmd: &str, raise: bool| appctl_requests(cmd, serde_json::Map::new(), raise).into_iter().map(|(n, _)| n.to_string()).collect::<Vec<_>>();
+        assert_eq!(names("navigate", false), ["navigate"], "following the lane, not raising");
+        assert_eq!(names("navigate", true), ["navigate", "show"], "the view first, then the raise");
+        assert_eq!(names("show", true), ["show"], "show as the command is the raise, once");
+        assert!(names("show", false).is_empty(), "and never without raise");
+
+        // Both reach the app, in that order.
+        let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let (a, b) = (seen.clone(), seen.clone());
+        let config = appctl::Config::new("console", &repo.0, "1.0.0")
+            .state_dir(&state.0)
+            .command("navigate", move |req| {
+                a.lock().unwrap().push(format!("navigate {}", req["lane"].as_str().unwrap_or_default()));
+                Ok(serde_json::json!(null))
+            })
+            .command("show", move |_| {
+                b.lock().unwrap().push("show".into());
+                Ok(serde_json::json!(null))
+            });
+        let _handle = appctl::start(config).unwrap();
+        let mut args = serde_json::Map::new();
+        args.insert("lane".into(), serde_json::json!("dev-infra"));
+        assert!(matches!(activate_via_appctl(&state.0, "console", appctl_requests("navigate", args, true), None), AppctlOutcome::Activated(_)));
+        assert_eq!(*seen.lock().unwrap(), ["navigate dev-infra", "show"]);
     }
 
     #[test]
@@ -2148,8 +2207,11 @@ mod tests {
         // either - either way, no instance means a plain, named failure,
         // never a silent success.
         let _ = &state;
-        let err = activate_appctl_target("definitely-not-running", "show", serde_json::Map::new(), None).unwrap_err();
+        let err = activate_appctl_target("definitely-not-running", "show", serde_json::Map::new(), true, None).unwrap_err();
         assert_eq!(err, "definitely-not-running isn't running");
+        // Only sending a command (no raise): a closed app is skipped, not a failure.
+        let quiet = activate_appctl_target("definitely-not-running", "navigate", serde_json::Map::new(), false, None);
+        assert_eq!(quiet, Ok(None));
     }
 
     #[test]
@@ -2187,7 +2249,7 @@ mod tests {
         let (repo, state) = (appctl_test_repo("main"), TempDir::new("st"));
         let handle = serve_boards("main", &repo, &state);
         let pre_place = Some(("not-a-real-monitor-uuid".to_string(), serde_json::json!("full")));
-        match activate_via_appctl(&state.0, "boards", "open_project", boards_args("myproj"), pre_place) {
+        match activate_via_appctl(&state.0, "boards", vec![("open_project", boards_args("myproj"))], pre_place) {
             AppctlOutcome::Activated(pid) => assert_eq!(pid, handle.info().pid),
             other => panic!("expected Activated despite a failed pre-placement, got {other:?}"),
         }
@@ -2199,7 +2261,7 @@ mod tests {
         let _a = serve_boards("dev-a", &repo_a, &state);
         let _b = serve_boards("dev-b", &repo_b, &state);
         assert!(matches!(
-            activate_via_appctl(&state.0, "boards", "open_project", boards_args("myproj"), None),
+            activate_via_appctl(&state.0, "boards", vec![("open_project", boards_args("myproj"))], None),
             AppctlOutcome::NoInstance
         ));
     }

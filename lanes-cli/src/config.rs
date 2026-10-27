@@ -1319,8 +1319,7 @@ raise = true
     /// those functions have. Serialized by a lock so parallel tests don't
     /// race the shared `$HOME` env var.
     fn with_fake_home<T>(f: impl FnOnce(&Path) -> T) -> T {
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _guard = LOCK.lock().unwrap();
+        let _guard = crate::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let home = std::env::temp_dir().join(format!("lanes-config-test-home-{}-{:?}", std::process::id(), std::thread::current().id()));
         let _ = std::fs::remove_dir_all(&home);
         std::fs::create_dir_all(home.join(".config/lanes/contexts")).unwrap();

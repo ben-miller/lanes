@@ -441,6 +441,8 @@ mod tests {
         // Uses the real HOME-derived cache path (same as production code) -
         // acceptable here since it's the same pattern state.rs's own tests
         // rely on for state.kdl, and this test cleans up after itself.
+        // The real HOME: not while another test has faked it.
+        let _guard = crate::HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let session = "test-cache-round-trip";
         let path = list_panes_cache_path(session);
         let _ = std::fs::remove_file(&path);
