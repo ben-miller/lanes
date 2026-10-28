@@ -28,6 +28,6 @@ noyalib = "0.0"
 [dev-dependencies]
 tempfile = "3"
 
-# No `unsafe` code, so no direct C calls (~/src/projects/CONVENTIONS.md, "Rust").
+# No `unsafe` code, so no direct C calls (~/src/projects/CONVENTIONS.md, `rust`).
 [lints.rust]
 unsafe_code = "forbid"

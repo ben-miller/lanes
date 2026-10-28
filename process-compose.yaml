@@ -1,5 +1,5 @@
 # What runs in this repo, under process-compose (~/src/projects/CONVENTIONS.md,
-# "Running a long-lived local daemon"; Boards is the reference):
+# `process-compose`; Boards is the reference):
 #   process-compose up             attached, in its TUI (both processes)
 #   process-compose up lanes       just Lanes Switch (or: up lanes-cli)
 #   process-compose up -D          in the background
@@ -22,8 +22,8 @@ processes:
 
   # Lanes Switch, the dev app. It depends on lanes-cli by path; tauri dev
   # watches it too through build.additionalWatchFolders in
-  # src-tauri/tauri.conf.json (CONVENTIONS.md, "Hot-reloading a Rust path
-  # dependency during tauri dev"), so no cargo watch wrapper is needed.
+  # src-tauri/tauri.conf.json (CONVENTIONS.md,
+  # `watch-path-deps`), so no cargo watch wrapper is needed.
   lanes:
     command: "npm run tauri dev"
     working_dir: "ui"
@@ -45,7 +45,7 @@ processes:
       timeout_seconds: 10
 
   # `lanes` (the binary ~/.local/bin/lanes symlinks to; CONVENTIONS.md,
-  # "Keeping a plain CLI binary fresh during development") is invoked fresh
+  # `process-compose`) is invoked fresh
   # on every call, not a long-running process, so there's nothing to
   # restart, only something to keep rebuilt: a rebuild on every source
   # change, so the next `lanes` (a hotkey, Lanes Switch, `lanes focus ...`)
