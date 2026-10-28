@@ -324,10 +324,14 @@ The hypo+J/K window auto-hides on Control-Option release regardless of edit mode
 
 ## Building and installing
 
+Tasks are recipes in the repo root's `justfile` (`just --list`): `just dev`
+(Lanes Switch and a lanes-cli rebuild on every change, under
+process-compose), `just test`, `just clippy`, `just build`. `~/.local/bin/lanes`
+links to the debug build, which `just dev` keeps current:
+
 ```bash
-cd lanes-cli
-cargo build --release
-ln -sf $(pwd)/target/release/lanes ~/.local/bin/lanes
+just build
+ln -sf $(pwd)/lanes-cli/target/debug/lanes ~/.local/bin/lanes   # once, from the repo root
 ```
 
 ## Architecture
