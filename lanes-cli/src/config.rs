@@ -13,6 +13,7 @@ pub struct MonitorConfig {
     pub name: Option<String>,
 }
 
+#[derive(Default)]
 pub struct Config {
     /// Drivers to run. None means all drivers.
     pub drivers: Option<Vec<String>>,
@@ -536,22 +537,6 @@ fn move_board_after_at(data_dir: &Path, name: &str, after: &str) -> Result<(), S
     write_boards_order(data_dir, &names)
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            drivers: None,
-            monitors: HashMap::new(),
-            order: None,
-            indented: Vec::new(),
-            cycle_policy: CyclePolicy::default(),
-            contexts: Vec::new(),
-            lanes: Vec::new(),
-            boards_targets: Vec::new(),
-            context_ids: Vec::new(),
-            shell_ignored_commands: Vec::new(),
-        }
-    }
-}
 
 /// Reorders `lanes` in place: lanes whose id appears in `order` come first,
 /// in `order`'s sequence; any lanes not listed keep their existing

@@ -13,7 +13,7 @@ fn load_doc() -> KdlDocument {
     std::fs::read_to_string(state_path())
         .ok()
         .and_then(|s| s.parse().ok())
-        .unwrap_or_else(KdlDocument::new)
+        .unwrap_or_default()
 }
 
 fn save_doc(doc: &KdlDocument) {
@@ -238,8 +238,8 @@ pub fn all_wezterm_tab_ids() -> Vec<(String, u64)> {
 /// cycling - keyed by its own session_id (the UUID from
 /// `~/.claude/active-sessions/*.json`), not the Zellij pane it happens to
 /// be running in. That UUID is regenerated every time `claude` restarts in
-/// that pane, so this exclusion resets on restart rather than surviving it
-/// - a deliberate choice, not a gap: re-excluding a freshly restarted
+/// that pane, so this exclusion resets on restart rather than surviving it -
+/// a deliberate choice, not a gap: re-excluding a freshly restarted
 /// session is one click, and a stale entry for a session that's gone never
 /// matches anything again, so nothing needs cleaning up either. Absence =
 /// included (the default).
@@ -523,15 +523,15 @@ mod tests {
     #[test]
     fn scalar_bool_defaults_false_when_absent() {
         let doc = KdlDocument::new();
-        assert_eq!(get_scalar_bool(&doc, "switch-pinned"), false);
+        assert!(!get_scalar_bool(&doc, "switch-pinned"));
     }
 
     #[test]
     fn scalar_bool_or_uses_default_when_absent_but_not_when_present() {
         let mut doc = KdlDocument::new();
-        assert_eq!(get_scalar_bool_or(&doc, "diagnostics-enabled", true), true);
+        assert!(get_scalar_bool_or(&doc, "diagnostics-enabled", true));
         put_scalar(&mut doc, "diagnostics-enabled", false);
-        assert_eq!(get_scalar_bool_or(&doc, "diagnostics-enabled", true), false);
+        assert!(!get_scalar_bool_or(&doc, "diagnostics-enabled", true));
     }
 
     #[test]
@@ -540,11 +540,11 @@ mod tests {
         put_scalar(&mut doc, "focused-lane", "lanes-dev");
         put_scalar(&mut doc, "switch-pinned", true);
         assert_eq!(get_scalar_str(&doc, "focused-lane"), Some("lanes-dev".to_string()));
-        assert_eq!(get_scalar_bool(&doc, "switch-pinned"), true);
+        assert!(get_scalar_bool(&doc, "switch-pinned"));
 
         // updating one field later shouldn't touch the other
         put_scalar(&mut doc, "focused-lane", "infra");
-        assert_eq!(get_scalar_bool(&doc, "switch-pinned"), true);
+        assert!(get_scalar_bool(&doc, "switch-pinned"));
     }
 
     #[test]

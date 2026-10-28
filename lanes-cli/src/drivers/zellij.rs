@@ -58,8 +58,8 @@ fn list_panes_lock_path(session: &str) -> std::path::PathBuf {
 /// Pure freshness check, pulled out of `read_cached_panes` so the TTL
 /// boundary is testable without touching the filesystem or the real clock.
 /// `now < fetched_at` (a clock adjustment, or a cache write racing ahead of
-/// this check) counts as stale rather than panicking on underflow or - worse
-/// - wrapping around to "very fresh": a saturating age of 0 would otherwise
+/// this check) counts as stale rather than panicking on underflow or - worse -
+/// wrapping around to "very fresh": a saturating age of 0 would otherwise
 /// read as fresh, when "the timestamp doesn't make sense" should always
 /// fall back to the real `list-panes` call instead.
 fn cache_is_fresh(fetched_at_epoch_ms: u128, now_epoch_ms: u128, ttl: Duration) -> bool {
@@ -145,7 +145,7 @@ fn fetch_via_single_flight(session: &str) -> Vec<RawPaneInfo> {
     if std::fs::create_dir_all(dir).is_err() {
         return fetch_live_and_cache(session);
     }
-    let Ok(lock_file) = std::fs::OpenOptions::new().create(true).write(true).open(&lock_path) else {
+    let Ok(lock_file) = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&lock_path) else {
         return fetch_live_and_cache(session);
     };
 
@@ -468,10 +468,10 @@ mod tests {
         let path = std::env::temp_dir().join(format!("lanes-test-lock-{}.lock", std::process::id()));
         let _ = std::fs::remove_file(&path);
 
-        let f1 = std::fs::OpenOptions::new().create(true).write(true).open(&path).unwrap();
+        let f1 = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).unwrap();
         f1.try_lock().expect("first handle should acquire an uncontended lock");
 
-        let f2 = std::fs::OpenOptions::new().create(true).write(true).open(&path).unwrap();
+        let f2 = std::fs::OpenOptions::new().create(true).truncate(false).write(true).open(&path).unwrap();
         assert!(f2.try_lock().is_err(), "second handle should not acquire an already-held lock");
 
         f1.unlock().expect("holder should be able to release its own lock");

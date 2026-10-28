@@ -45,7 +45,7 @@ pub fn enumerate() -> Vec<ClaudeSession> {
 
     entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |x| x == "json"))
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| load_session(&e.path(), &live_zellij_sessions))
         .collect()
 }
@@ -98,7 +98,7 @@ pub fn possibly_renamed_sessions() -> Vec<RenamedCandidate> {
 
     entries
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |x| x == "json"))
+        .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
         .filter_map(|e| check_renamed(&e.path(), &live_zellij_sessions))
         .collect()
 }

@@ -918,7 +918,7 @@ fn wezterm_socket_in(dir: &std::path::Path) -> Option<String> {
             Some((modified, e.path()))
         })
         .collect();
-    socks.sort_by(|a, b| b.0.cmp(&a.0));
+    socks.sort_by_key(|s| std::cmp::Reverse(s.0));
     socks.into_iter()
         .map(|(_, p)| p)
         .find(|p| std::os::unix::net::UnixStream::connect(p).is_ok())

@@ -476,8 +476,8 @@ pub enum LanesReason {
     /// A lane that's active but whose Zellij session has no cached WezTerm
     /// tab, so there's nothing for a switch to actually land on.
     SessionMissing,
-    /// A lane whose declared Zellij session isn't a running process at all
-    /// - distinct from SessionMissing (a WezTerm-tab-caching fact). Fires
+    /// A lane whose declared Zellij session isn't a running process at all -
+    /// distinct from SessionMissing (a WezTerm-tab-caching fact). Fires
     /// regardless of the lane's active state: an inactive lane with no
     /// session is the common case (you tore the environment down), an
     /// active one is more surprising, but both are the same underlying

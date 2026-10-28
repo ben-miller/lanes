@@ -323,112 +323,6 @@ fn is_relevant_change(
     false
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn state_kdl_change_is_relevant() {
-        let state_dir = Path::new("/home/x/.local/state/lanes");
-        assert!(is_relevant_change(
-            &[],
-            Path::new("/home/x/.claude/active-sessions"),
-            state_dir,
-            Path::new("/home/x/.config/lanes"),
-            Path::new("/home/x/.config/lanes/lanes.toml"),
-            &state_dir.join("state.kdl"),
-        ));
-    }
-
-    #[test]
-    fn log_files_in_state_dir_are_never_relevant() {
-        // Regression test: perf.log is written on every single logging::perf
-        // call - if the watcher ever treats a *.log write in state_dir as
-        // relevant again, every refresh re-triggers itself forever (log the
-        // refresh -> watcher fires -> refresh again).
-        let state_dir = Path::new("/home/x/.local/state/lanes");
-        for name in ["perf.log", "switch-ui.log", "hammerspoon.log"] {
-            assert!(
-                !is_relevant_change(
-                    &[],
-                    Path::new("/home/x/.claude/active-sessions"),
-                    state_dir,
-                    Path::new("/home/x/.config/lanes"),
-                    Path::new("/home/x/.config/lanes/lanes.toml"),
-                    &state_dir.join(name),
-                ),
-                "{name} should not be treated as relevant"
-            );
-        }
-    }
-
-    #[test]
-    fn state_kdl_tmp_staging_writes_are_never_relevant() {
-        // state::atomic_write stages every state.kdl write in a sibling
-        // state.kdl.tmp before rename(2) - the real change lands as the
-        // rename onto state.kdl itself, so reacting to the .tmp write too
-        // is just a redundant refresh.
-        let state_dir = Path::new("/home/x/.local/state/lanes");
-        assert!(
-            !is_relevant_change(
-                &[],
-                Path::new("/home/x/.claude/active-sessions"),
-                state_dir,
-                Path::new("/home/x/.config/lanes"),
-                Path::new("/home/x/.config/lanes/lanes.toml"),
-                &state_dir.join("state.kdl.tmp"),
-            ),
-            "a state.kdl.tmp write should not be treated as relevant"
-        );
-        // ...but the rename target still is.
-        assert!(is_relevant_change(
-            &[],
-            Path::new("/home/x/.claude/active-sessions"),
-            state_dir,
-            Path::new("/home/x/.config/lanes"),
-            Path::new("/home/x/.config/lanes/lanes.toml"),
-            &state_dir.join("state.kdl"),
-        ));
-    }
-
-    #[test]
-    fn lane_toml_tmp_staging_writes_are_never_relevant() {
-        // config::set_lane_active stages the toggle write the same way.
-        let cfg_dir = Path::new("/home/x/.config/lanes");
-        let args = |p: &Path| is_relevant_change(
-            &[],
-            Path::new("/home/x/.claude/active-sessions"),
-            Path::new("/home/x/.local/state/lanes"),
-            cfg_dir,
-            Path::new("/home/x/.config/lanes/lanes.toml"),
-            p,
-        );
-        assert!(!args(&cfg_dir.join("lanes-wm.toml.tmp")));
-        assert!(args(&cfg_dir.join("lanes-wm.toml")));
-    }
-
-    #[test]
-    fn cache_dir_writes_in_state_dir_are_never_relevant() {
-        // Same class of regression as the *.log exclusion above:
-        // drivers::zellij's list-panes TTL cache lives at
-        // state_dir/cache/*.json, and gather_lanes() is itself one of the
-        // things that populates it - treating a cache write as relevant
-        // would trigger the exact refresh that just populated it.
-        let state_dir = Path::new("/home/x/.local/state/lanes");
-        assert!(
-            !is_relevant_change(
-                &[],
-                Path::new("/home/x/.claude/active-sessions"),
-                state_dir,
-                Path::new("/home/x/.config/lanes"),
-                Path::new("/home/x/.config/lanes/lanes.toml"),
-                &state_dir.join("cache").join("list-panes-formation.json"),
-            ),
-            "a cache/ write should not be treated as relevant"
-        );
-    }
-}
-
 fn apply_pin(app: &tauri::AppHandle, pin_item: &CheckMenuItem<tauri::Wry>, pinned: bool) {
     let _ = pin_item.set_checked(pinned);
     if let Some(win) = app.get_webview_window("main") {
@@ -539,43 +433,41 @@ fn watch_paths(
         let mut last_pinned = lanes::state::read_switch_pinned();
         let mut last_show_inactive = lanes::state::read_show_inactive();
 
-        for res in rx {
-            if let Ok(event) = res {
-                use notify::EventKind::*;
-                if !matches!(event.kind, Create(_) | Modify(_) | Remove(_)) {
-                    continue;
+        for event in rx.into_iter().flatten() {
+            use notify::EventKind::*;
+            if !matches!(event.kind, Create(_) | Modify(_) | Remove(_)) {
+                continue;
+            }
+            if event.paths.iter().any(|p| p.starts_with(&state_dir)) {
+                let pinned = lanes::state::read_switch_pinned();
+                if pinned != last_pinned {
+                    last_pinned = pinned;
+                    apply_pin(&handle, &pin_item, pinned);
                 }
-                if event.paths.iter().any(|p| p.starts_with(&state_dir)) {
-                    let pinned = lanes::state::read_switch_pinned();
-                    if pinned != last_pinned {
-                        last_pinned = pinned;
-                        apply_pin(&handle, &pin_item, pinned);
-                    }
-                    let edit_mode = lanes::state::read_edit_mode();
-                    if last_applied_edit_mode.swap(edit_mode, Ordering::SeqCst) != edit_mode {
-                        apply_edit_mode(&handle, &edit_mode_item, &show_inactive_item, edit_mode, false);
-                    }
-                    let show_inactive = lanes::state::read_show_inactive();
-                    if show_inactive != last_show_inactive {
-                        last_show_inactive = show_inactive;
-                        // Keeps both the tray checkbox and the dashboard's
-                        // own filtering (see App.svelte's visibleLanes) from
-                        // going stale when the write came from outside the
-                        // tray (hypo+I, the CLI directly).
-                        let _ = show_inactive_item.set_checked(show_inactive);
-                        handle.emit("show-inactive-changed", show_inactive).ok();
-                    }
+                let edit_mode = lanes::state::read_edit_mode();
+                if last_applied_edit_mode.swap(edit_mode, Ordering::SeqCst) != edit_mode {
+                    apply_edit_mode(&handle, &edit_mode_item, &show_inactive_item, edit_mode, false);
                 }
-                let relevant = event.paths.iter()
-                    .any(|p| is_relevant_change(&repo_watches, &sessions_dir, &state_dir, &lanes_config_dir, &global_config_path, p));
-                if relevant && last_emit.map_or(true, |t| t.elapsed() >= debounce) {
-                    lanes::logging::perf(
-                        "ui.fs_watcher_emitted_sessions_changed",
-                        &format!("paths={:?}", event.paths),
-                    );
-                    handle.emit("sessions-changed", ()).ok();
-                    last_emit = Some(Instant::now());
+                let show_inactive = lanes::state::read_show_inactive();
+                if show_inactive != last_show_inactive {
+                    last_show_inactive = show_inactive;
+                    // Keeps both the tray checkbox and the dashboard's
+                    // own filtering (see App.svelte's visibleLanes) from
+                    // going stale when the write came from outside the
+                    // tray (hypo+I, the CLI directly).
+                    let _ = show_inactive_item.set_checked(show_inactive);
+                    handle.emit("show-inactive-changed", show_inactive).ok();
                 }
+            }
+            let relevant = event.paths.iter()
+                .any(|p| is_relevant_change(&repo_watches, &sessions_dir, &state_dir, &lanes_config_dir, &global_config_path, p));
+            if relevant && last_emit.is_none_or(|t| t.elapsed() >= debounce) {
+                lanes::logging::perf(
+                    "ui.fs_watcher_emitted_sessions_changed",
+                    &format!("paths={:?}", event.paths),
+                );
+                handle.emit("sessions-changed", ()).ok();
+                last_emit = Some(Instant::now());
             }
         }
     });
@@ -746,4 +638,110 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn state_kdl_change_is_relevant() {
+        let state_dir = Path::new("/home/x/.local/state/lanes");
+        assert!(is_relevant_change(
+            &[],
+            Path::new("/home/x/.claude/active-sessions"),
+            state_dir,
+            Path::new("/home/x/.config/lanes"),
+            Path::new("/home/x/.config/lanes/lanes.toml"),
+            &state_dir.join("state.kdl"),
+        ));
+    }
+
+    #[test]
+    fn log_files_in_state_dir_are_never_relevant() {
+        // Regression test: perf.log is written on every single logging::perf
+        // call - if the watcher ever treats a *.log write in state_dir as
+        // relevant again, every refresh re-triggers itself forever (log the
+        // refresh -> watcher fires -> refresh again).
+        let state_dir = Path::new("/home/x/.local/state/lanes");
+        for name in ["perf.log", "switch-ui.log", "hammerspoon.log"] {
+            assert!(
+                !is_relevant_change(
+                    &[],
+                    Path::new("/home/x/.claude/active-sessions"),
+                    state_dir,
+                    Path::new("/home/x/.config/lanes"),
+                    Path::new("/home/x/.config/lanes/lanes.toml"),
+                    &state_dir.join(name),
+                ),
+                "{name} should not be treated as relevant"
+            );
+        }
+    }
+
+    #[test]
+    fn state_kdl_tmp_staging_writes_are_never_relevant() {
+        // state::atomic_write stages every state.kdl write in a sibling
+        // state.kdl.tmp before rename(2) - the real change lands as the
+        // rename onto state.kdl itself, so reacting to the .tmp write too
+        // is just a redundant refresh.
+        let state_dir = Path::new("/home/x/.local/state/lanes");
+        assert!(
+            !is_relevant_change(
+                &[],
+                Path::new("/home/x/.claude/active-sessions"),
+                state_dir,
+                Path::new("/home/x/.config/lanes"),
+                Path::new("/home/x/.config/lanes/lanes.toml"),
+                &state_dir.join("state.kdl.tmp"),
+            ),
+            "a state.kdl.tmp write should not be treated as relevant"
+        );
+        // ...but the rename target still is.
+        assert!(is_relevant_change(
+            &[],
+            Path::new("/home/x/.claude/active-sessions"),
+            state_dir,
+            Path::new("/home/x/.config/lanes"),
+            Path::new("/home/x/.config/lanes/lanes.toml"),
+            &state_dir.join("state.kdl"),
+        ));
+    }
+
+    #[test]
+    fn lane_toml_tmp_staging_writes_are_never_relevant() {
+        // config::set_lane_active stages the toggle write the same way.
+        let cfg_dir = Path::new("/home/x/.config/lanes");
+        let args = |p: &Path| is_relevant_change(
+            &[],
+            Path::new("/home/x/.claude/active-sessions"),
+            Path::new("/home/x/.local/state/lanes"),
+            cfg_dir,
+            Path::new("/home/x/.config/lanes/lanes.toml"),
+            p,
+        );
+        assert!(!args(&cfg_dir.join("lanes-wm.toml.tmp")));
+        assert!(args(&cfg_dir.join("lanes-wm.toml")));
+    }
+
+    #[test]
+    fn cache_dir_writes_in_state_dir_are_never_relevant() {
+        // Same class of regression as the *.log exclusion above:
+        // drivers::zellij's list-panes TTL cache lives at
+        // state_dir/cache/*.json, and gather_lanes() is itself one of the
+        // things that populates it - treating a cache write as relevant
+        // would trigger the exact refresh that just populated it.
+        let state_dir = Path::new("/home/x/.local/state/lanes");
+        assert!(
+            !is_relevant_change(
+                &[],
+                Path::new("/home/x/.claude/active-sessions"),
+                state_dir,
+                Path::new("/home/x/.config/lanes"),
+                Path::new("/home/x/.config/lanes/lanes.toml"),
+                &state_dir.join("cache").join("list-panes-formation.json"),
+            ),
+            "a cache/ write should not be treated as relevant"
+        );
+    }
 }

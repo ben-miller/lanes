@@ -135,7 +135,7 @@ fn check_claude() -> Check {
         Ok(entries) => {
             let count = entries
                 .filter_map(|e| e.ok())
-                .filter(|e| e.path().extension().map_or(false, |x| x == "json"))
+                .filter(|e| e.path().extension().is_some_and(|x| x == "json"))
                 .count();
             Check {
                 label: "claude sessions",
@@ -359,8 +359,8 @@ pub(crate) fn is_kebab_case(s: &str) -> bool {
     s.split('-').all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit()))
 }
 
-/// The one check in this file that makes a real network call, deliberately
-/// - the live dashboard's own non-default-branch signal (lensd's
+/// The one check in this file that makes a real network call, deliberately -
+/// the live dashboard's own non-default-branch signal (lensd's
 /// `default_branch` relation) reads a repo's cached
 /// refs/remotes/origin/HEAD purely locally, which is fast but can silently
 /// go stale if the remote's own default branch changes after clone (git has
