@@ -16,6 +16,10 @@ const FISH_HOOK: &str = r####"# lanes shell-init fish - long-running-command sig
 set -q LANES_SHELL_LATCH_SECS; or set -g LANES_SHELL_LATCH_SECS 30
 set -g __lanes_shell_dir "$HOME/.local/state/lanes/shell"
 
+# Records are written whole: to a sibling .tmp, then renamed into place
+# (CONVENTIONS.md, `app-state`), since Lanes Switch's watcher reads them
+# the moment they change (lanes::facts reads only *.json).
+
 # Path for this pane's record, or empty if we can't identify the pane
 # (not inside zellij, or $ZELLIJ_PANE_ID unset) - in which case the hook
 # does nothing.
@@ -33,7 +37,8 @@ function __lanes_shell_preexec --on-event fish_preexec
     set -l cmd (string replace -a '\\' '\\\\' -- "$__lanes_shell_cmd" | string replace -a '"' '\\"')
     set -l argv0 (string split -- ' ' "$__lanes_shell_cmd")[1]
     printf '{"v":1,"shell":"fish","session":"%s","pane":%s,"argv0":"%s","cmd":"%s","started_at":"%s","state":"running","ended_at":null,"exit_code":null}\n' \
-        "$ZELLIJ_SESSION_NAME" "$ZELLIJ_PANE_ID" "$argv0" "$cmd" "$__lanes_shell_started" >"$p"
+        "$ZELLIJ_SESSION_NAME" "$ZELLIJ_PANE_ID" "$argv0" "$cmd" "$__lanes_shell_started" >"$p.tmp"
+    and command mv -f "$p.tmp" "$p"
 end
 
 function __lanes_shell_postexec --on-event fish_postexec
@@ -60,7 +65,8 @@ function __lanes_shell_postexec --on-event fish_postexec
 
     printf '{"v":1,"shell":"fish","session":"%s","pane":%s,"argv0":"%s","cmd":"%s","started_at":"%s","state":"%s","ended_at":"%s","exit_code":%s}\n' \
         "$ZELLIJ_SESSION_NAME" "$ZELLIJ_PANE_ID" "$argv0" "$cmd" \
-        "$__lanes_shell_started" "$state" "$now" "$code" >"$p"
+        "$__lanes_shell_started" "$state" "$now" "$code" >"$p.tmp"
+    and command mv -f "$p.tmp" "$p"
 end
 "####;
 
@@ -104,6 +110,16 @@ mod tests {
         let postexec = FISH_HOOK.split("function __lanes_shell_postexec").nth(1).unwrap();
         let early_return = postexec.split("mkdir -p").next().unwrap();
         assert!(early_return.contains(r#"rm -f "$p""#));
+    }
+
+    #[test]
+    fn fish_hook_writes_each_record_whole() {
+        // Every record goes to a sibling .tmp and is renamed into place, so
+        // a reader (Lanes Switch's facts watcher) never sees a truncated
+        // file; never written straight to the record path.
+        assert!(!FISH_HOOK.contains(r#">"$p""#));
+        assert_eq!(FISH_HOOK.matches(r#">"$p.tmp""#).count(), 2);
+        assert_eq!(FISH_HOOK.matches(r#"and command mv -f "$p.tmp" "$p""#).count(), 2);
     }
 
     #[test]
