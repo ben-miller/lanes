@@ -100,7 +100,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "appctl"
 version = "0.1.0"
-source = "git+file:///Users/bmiller/src/dev-infra?branch=master#676168dadc457adb35d734d1eebefa7e294022fc"
+source = "git+file:///Users/bmiller/src/dev-infra?branch=master#323ea7eafd215db81d9b81e7c2058c91602ebace"
 dependencies = [
  "jiff",
  "rustix",
@@ -1735,7 +1735,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.62.2",
+ "windows-core 0.61.2",
 ]
 
 [[package]]
@@ -4041,7 +4041,7 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-appctl"
 version = "0.1.0"
-source = "git+file:///Users/bmiller/src/dev-infra?branch=master#676168dadc457adb35d734d1eebefa7e294022fc"
+source = "git+file:///Users/bmiller/src/dev-infra?branch=master#323ea7eafd215db81d9b81e7c2058c91602ebace"
 dependencies = [
  "appctl",
  "serde",
@@ -5022,7 +5022,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.48.0",
 ]
 
 [[package]]
