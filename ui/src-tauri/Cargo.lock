@@ -100,7 +100,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 [[package]]
 name = "appctl"
 version = "0.1.0"
-source = "git+file:///Users/bmiller/src/dev-infra?branch=master#793a8f9f7c3fc167cda28e6fb60450c0498fd47d"
+source = "git+file:///Users/bmiller/src/dev-infra?branch=master#676168dadc457adb35d734d1eebefa7e294022fc"
 dependencies = [
  "jiff",
  "rustix",
@@ -1735,7 +1735,7 @@ dependencies = [
  "js-sys",
  "log",
  "wasm-bindgen",
- "windows-core 0.61.2",
+ "windows-core 0.62.2",
 ]
 
 [[package]]
@@ -4023,9 +4023,9 @@ dependencies = [
 
 [[package]]
 name = "tauri-plugin"
-version = "2.6.1"
+version = "2.7.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "eefb2c18e8a605c23edb48fc56bb77381199e1a1e7f6ff0c9b970afe7b3cb8ee"
+checksum = "67fb21a77e8f94e8beb3325e583102488659365af0a3948b7ea244c5b779c291"
 dependencies = [
  "anyhow",
  "glob",
@@ -4040,12 +4040,14 @@ dependencies = [
 [[package]]
 name = "tauri-plugin-appctl"
 version = "0.1.0"
-source = "git+file:///Users/bmiller/src/dev-infra?branch=master#793a8f9f7c3fc167cda28e6fb60450c0498fd47d"
+source = "git+file:///Users/bmiller/src/dev-infra?branch=master#676168dadc457adb35d734d1eebefa7e294022fc"
 dependencies = [
  "appctl",
+ "serde",
  "serde_json",
  "tauri",
  "tauri-plugin",
+ "tauri-plugin-window-state",
 ]
 
 [[package]]
@@ -4084,6 +4086,21 @@ dependencies = [
  "tracing",
  "windows-sys 0.61.2",
  "zbus",
+]
+
+[[package]]
+name = "tauri-plugin-window-state"
+version = "2.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5d6815cab7b212f9cfe16a9d79d8d22f9e14159e4a9460f7dec1467167a008e3"
+dependencies = [
+ "bitflags 2.11.1",
+ "log",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-plugin",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -5004,7 +5021,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.48.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

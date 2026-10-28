@@ -73,7 +73,7 @@ dependencies = [
 [[package]]
 name = "appctl"
 version = "0.1.0"
-source = "git+file:///Users/bmiller/src/dev-infra?branch=master#793a8f9f7c3fc167cda28e6fb60450c0498fd47d"
+source = "git+file:///Users/bmiller/src/dev-infra?branch=master#676168dadc457adb35d734d1eebefa7e294022fc"
 dependencies = [
  "jiff",
  "rustix",
