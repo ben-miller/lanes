@@ -375,6 +375,12 @@ fn apply_edit_mode(
     lanes::logging::perf("ui.emitted_edit_mode_changed", &format!("enabled={enabled}"));
 }
 
+/// `path` with symlinks resolved, or as it is if it can't be (it doesn't
+/// exist yet).
+fn canonical(path: PathBuf) -> PathBuf {
+    std::fs::canonicalize(&path).unwrap_or(path)
+}
+
 fn watch_paths(
     handle: tauri::AppHandle,
     pin_item: CheckMenuItem<tauri::Wry>,
@@ -383,9 +389,13 @@ fn watch_paths(
     last_applied_edit_mode: Arc<AtomicBool>,
 ) {
     let home = std::env::var("HOME").unwrap_or_default();
-    let sessions_dir = PathBuf::from(&home).join(".claude").join("active-sessions");
-    let state_dir = PathBuf::from(&home).join(".local/state/lanes");
-    let lanes_config_dir = lanes::config::config_dir();
+    // Canonical, as the watcher reports event paths: ~/.config/lanes and
+    // ~/.claude are symlinks into ~/src/infra, so a path under the link
+    // never matched an event and config edits only got through when
+    // ~/src/infra happened to be a watched lane repo.
+    let sessions_dir = canonical(PathBuf::from(&home).join(".claude").join("active-sessions"));
+    let state_dir = canonical(PathBuf::from(&home).join(".local/state/lanes"));
+    let lanes_config_dir = canonical(lanes::config::config_dir());
     // Nested inside lanes_config_dir now (~/.config/lanes/lanes.toml), so
     // watching lanes_config_dir already covers it - kept as its own
     // variable/watch anyway since is_relevant_change compares against it by
@@ -413,8 +423,10 @@ fn watch_paths(
         if state_dir.exists() {
             watcher.watch(&state_dir, RecursiveMode::NonRecursive).ok();
         }
+        // Recursive: the contexts (contexts/<id>/*.toml) and layout
+        // templates are config too (CONVENTIONS.md, `live-config`).
         if lanes_config_dir.exists() {
-            watcher.watch(&lanes_config_dir, RecursiveMode::NonRecursive).ok();
+            watcher.watch(&lanes_config_dir, RecursiveMode::Recursive).ok();
         }
         if global_config_path.exists() {
             watcher.watch(&global_config_path, RecursiveMode::NonRecursive).ok();
@@ -638,6 +650,24 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_context_file_under_a_symlinked_config_dir_is_relevant() {
+        // ~/.config/lanes is a symlink into ~/src/infra; the watcher
+        // reports the real path, so the config dir is compared canonical.
+        let root = std::env::temp_dir().join(format!("lanes-ui-test-{}", std::process::id()));
+        let real = root.join("infra/lanes");
+        std::fs::create_dir_all(real.join("contexts/a")).unwrap();
+        let link = root.join("config-lanes");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+        let config_dir = canonical(link.clone());
+        let event = canonical(real.join("contexts/a")).join("lane.toml");
+        let none = Path::new("/nonexistent");
+        assert!(is_relevant_change(&[], none, none, &config_dir, &config_dir.join("lanes.toml"), &event));
+        // Not so for the link's own path, which is what it compared before.
+        assert!(!is_relevant_change(&[], none, none, &link, &link.join("lanes.toml"), &event));
+        std::fs::remove_dir_all(&root).ok();
+    }
 
     #[test]
     fn state_kdl_change_is_relevant() {
