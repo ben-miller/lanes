@@ -11,9 +11,7 @@ metadata:
     - url: https://github.com/ben-miller/lanes
       title: GitHub
   annotations:
-    dev-platform/appctl-app: lanes-cli
-    dev-platform/lanes-context: lanes-dev
-    dev-platform/board: Lanes
+    dev-platform/checks: lanes-cli
 spec:
   type: rust-cli
   lifecycle: production
@@ -29,9 +27,7 @@ metadata:
   description: The lane switcher dashboard, with chips from lensd
   tags: [tauri, rust, lanes]
   annotations:
-    dev-platform/appctl-app: lanes
-    dev-platform/lanes-context: lanes-dev
-    dev-platform/board: Lanes
+    dev-platform/checks: ui
 spec:
   type: tauri-app
   lifecycle: production
