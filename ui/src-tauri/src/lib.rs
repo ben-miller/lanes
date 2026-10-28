@@ -609,6 +609,11 @@ fn publish_lanes_facts(facts: appctl::facts::Facts) {
 }
 
 pub fn run() {
+    // The app's log (~/.local/state/bmiller/lanes/logs/), first so it
+    // captures startup; read it with `appctl logs lanes`. Kept alive for
+    // the app's life (CONVENTIONS.md, `logging`).
+    let _log = appctl::log::init(&appctl::config!("lanes"));
+    tracing::info!("starting");
     tauri::Builder::default()
         // Registered first so a second launch attempt exits as soon as
         // possible (per the plugin's own docs) - a second instance just
