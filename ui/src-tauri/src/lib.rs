@@ -46,14 +46,13 @@ fn arm_pending_running(handle: &tauri::AppHandle, timers: &RunningTimers, pendin
 /// second launch attempt behaves exactly like any other "show the switcher"
 /// trigger rather than its own slightly-different path.
 fn show_main_window(handle: &tauri::AppHandle) {
-    if let Some(win) = handle.get_webview_window("main") {
-        let _ = win.show();
-        let _ = win.set_focus();
-        // The frontend skips its resize/recenter while the window is
-        // hidden (see App.svelte's refresh) - tell it we're visible again
-        // so it re-measures now rather than reappearing at a stale size.
-        handle.emit("switch-shown", ()).ok();
-    }
+    // Raising the window is the shared plugin's (CONVENTIONS.md,
+    // `appctl-socket`), the same as appctl's `show`.
+    tauri_plugin_appctl::show_window(handle);
+    // The frontend skips its resize/recenter while the window is hidden
+    // (see App.svelte's refresh) - tell it we're visible again so it
+    // re-measures now rather than reappearing at a stale size.
+    handle.emit("switch-shown", ()).ok();
 }
 
 /// Listens on a local Unix socket for direct notifications from the `lanes`
@@ -328,8 +327,7 @@ fn apply_pin(app: &tauri::AppHandle, pin_item: &CheckMenuItem<tauri::Wry>, pinne
     if let Some(win) = app.get_webview_window("main") {
         let _ = win.set_always_on_top(pinned);
         if pinned {
-            let _ = win.show();
-            let _ = win.set_focus();
+            tauri_plugin_appctl::show_window(app);
         } else {
             let _ = win.hide();
         }
@@ -371,10 +369,7 @@ fn apply_edit_mode(
     let _ = edit_mode_item.set_checked(enabled);
     let _ = show_inactive_item.set_enabled(!enabled);
     if enabled && raise_on_enable {
-        if let Some(win) = app.get_webview_window("main") {
-            let _ = win.show();
-            let _ = win.set_focus();
-        }
+        tauri_plugin_appctl::show_window(app);
     }
     app.emit("edit-mode-changed", enabled).ok();
     lanes::logging::perf("ui.emitted_edit_mode_changed", &format!("enabled={enabled}"));
