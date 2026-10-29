@@ -12,7 +12,15 @@
 //! it's already listed), and (for `--board`) materializes its
 //! `board.yaml` immediately via the same path `lanes doctor --fix` uses,
 //! so the context passes every `doctor` check right away instead of
-//! needing a follow-up `--fix` run.
+//! needing a follow-up `--fix` run. Only its own: other contexts' missing
+//! boards are `doctor --fix`'s to create, when asked.
+//!
+//! `--after <ctx>` places it in one go: after `<ctx>` in contexts.toml's
+//! order and, with a board, its project after `<ctx>`'s (or the nearest
+//! board before it) in Boards' own order (`.order`; the two orders are
+//! separate since PLAN-lane-board-consolidation.md's divorce, so a later
+//! `ctx move` doesn't move the board: that's `lanes boards`). Without it,
+//! both go last.
 
 use std::io;
 
@@ -23,6 +31,8 @@ pub struct Options {
     pub session: Option<String>,
     /// Repos to add to the lane's scope (`--repo`, any number).
     pub repo: Vec<String>,
+    /// The context to place it after (`--after`), in both orders.
+    pub after: Option<String>,
 }
 
 pub fn run(id: &str, name: &str, opts: Options) {
@@ -54,13 +64,64 @@ pub fn run(id: &str, name: &str, opts: Options) {
     if opts.session.is_some() || !opts.repo.is_empty() {
         created.push("tab.toml".to_string());
     }
+    let project = opts.project.clone().unwrap_or_else(|| name.to_string());
     if opts.board {
         created.push("board.toml".to_string());
-        let cfg = lanes::config::Config::load();
-        let board_yaml_created = super::doctor::materialize_boards_projects(&cfg, &lanes::boards_data_dir());
-        created.extend(board_yaml_created.into_iter().map(|p| format!("board.yaml for {p:?}")));
+        if super::doctor::materialize_boards_project(&lanes::boards_data_dir(), name, &project) {
+            created.push(format!("board.yaml for {project:?}"));
+        }
     }
     println!("{id}: {}", created.join(", "));
+
+    if let Some(after) = &opts.after {
+        if let Err(e) = lanes::config::move_context_after(id, after) {
+            eprintln!("{id}: added, but not placed after {after:?}: {e}");
+            std::process::exit(1);
+        }
+        println!("{id} -> after {after}");
+        if opts.board {
+            place_board(after, &project);
+        }
+    }
+}
+
+/// `--after`'s Boards half: the new project after the board of `after`, or
+/// of the nearest context before it that has one (`board_to_follow`).
+fn place_board(after: &str, project: &str) {
+    let cfg = lanes::config::Config::load();
+    let data_dir = lanes::boards_data_dir();
+    let boards: Vec<(String, String)> = cfg
+        .boards_targets
+        .iter()
+        .filter_map(|(id, _, t)| match &t.driver {
+            lanes::model::TargetDriver::Boards { project } if data_dir.join(project).join("board.yaml").exists() => {
+                Some((id.clone(), project.clone()))
+            }
+            _ => None,
+        })
+        .collect();
+    match board_to_follow(cfg.order.as_deref().unwrap_or_default(), &boards, after, project) {
+        Some(prev) => {
+            if let Err(e) = lanes::config::move_board_after(project, &prev) {
+                eprintln!("Boards: {project:?} not placed after {prev:?}: {e}");
+                std::process::exit(1);
+            }
+            println!("Boards: {project:?} -> after {prev:?}");
+        }
+        None => println!("Boards: no board at or before {after:?} in contexts.toml's order, so {project:?} stays last"),
+    }
+}
+
+/// The Boards project to put a new one (`own`) after, for `--after`:
+/// `after`'s own board, or else that of the nearest context before it in
+/// contexts.toml's `order` that has one. `boards` is (context id, project)
+/// for the boards that exist. None if no context up to `after` has one.
+fn board_to_follow(order: &[String], boards: &[(String, String)], after: &str, own: &str) -> Option<String> {
+    let pos = order.iter().position(|x| x == after)?;
+    order[..=pos]
+        .iter()
+        .rev()
+        .find_map(|id| boards.iter().find(|(c, p)| c == id && p != own).map(|(_, p)| p.clone()))
 }
 
 /// Rejects a request before anything touches the filesystem: `id` must be
@@ -170,7 +231,48 @@ mod tests {
     }
 
     fn opts() -> Options {
-        Options { lane: false, board: false, project: None, session: None, repo: Vec::new() }
+        Options { lane: false, board: false, project: None, session: None, repo: Vec::new(), after: None }
+    }
+
+    fn ids(xs: &[&str]) -> Vec<String> {
+        xs.iter().map(|x| x.to_string()).collect()
+    }
+
+    fn pairs(xs: &[(&str, &str)]) -> Vec<(String, String)> {
+        xs.iter().map(|(a, b)| (a.to_string(), b.to_string())).collect()
+    }
+
+    #[test]
+    fn board_to_follow_is_the_after_contexts_own_board() {
+        let order = ids(&["dev-infra", "console", "conformance", "infra"]);
+        let boards = pairs(&[("dev-infra", "Dev Infra"), ("console", "Console"), ("infra", "Infra")]);
+        assert_eq!(board_to_follow(&order, &boards, "console", "Conformance"), Some("Console".into()));
+    }
+
+    #[test]
+    fn board_to_follow_falls_back_to_the_nearest_board_before_it() {
+        // `lanes-dev` is a lane with no board: the new board goes after the
+        // last one before it, not last.
+        let order = ids(&["dev-infra", "lanes-dev", "new", "infra"]);
+        let boards = pairs(&[("dev-infra", "Dev Infra"), ("infra", "Infra")]);
+        assert_eq!(board_to_follow(&order, &boards, "lanes-dev", "New"), Some("Dev Infra".into()));
+    }
+
+    #[test]
+    fn board_to_follow_is_none_with_no_board_up_to_it_or_an_unknown_context() {
+        let order = ids(&["a", "b"]);
+        let boards = pairs(&[("b", "B")]);
+        assert_eq!(board_to_follow(&order, &boards, "a", "New"), None);
+        assert_eq!(board_to_follow(&order, &boards, "nope", "New"), None);
+    }
+
+    #[test]
+    fn board_to_follow_never_picks_the_new_board_itself() {
+        // Two contexts sharing one project (dev-infra and source-control
+        // both show "Source Control"): never "after itself".
+        let order = ids(&["source-control", "dev-infra"]);
+        let boards = pairs(&[("source-control", "Source Control"), ("dev-infra", "Source Control")]);
+        assert_eq!(board_to_follow(&order, &boards, "dev-infra", "Source Control"), None);
     }
 
     #[test]

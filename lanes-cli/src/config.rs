@@ -345,10 +345,10 @@ fn edit_context_order<T>(id_for_error: &str, f: impl FnOnce(&mut Vec<String>) ->
 }
 
 /// Swaps `id` with its adjacent neighbor in `contexts.toml`'s `order` -
-/// `lanes ctx <id> move up`/`down`. This is the one true order - Boards
-/// and `infra zellij`'s tab order both read it directly (see
-/// DECISIONS.md), nothing derived from it needs a separate push - so
-/// reordering here is reordering everything that matters. For moving
+/// `lanes ctx <id> move up`/`down`. lanes' own order (`infra zellij`'s
+/// tab order reads it directly too); Boards keeps its own `.order` since
+/// the divorce (PLAN-lane-board-consolidation.md, decision 2), reordered
+/// with `move_board_*` (`lanes boards`), so this doesn't move a board. For moving
 /// further than one step, see `move_context_before`/`move_context_after` -
 /// repeatedly calling this one step at a time is what this function used
 /// to require, and hand-editing contexts.toml was the only alternative.

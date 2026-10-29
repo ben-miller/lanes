@@ -255,7 +255,8 @@ enum ContextCommand {
         lane: bool,
 
         /// Give this context a board facet (board.toml), and materialize
-        /// its board.yaml immediately (same as `lanes doctor --fix`).
+        /// its own board.yaml immediately (only its own: `lanes doctor
+        /// --fix` creates every missing one).
         #[arg(long)]
         board: bool,
 
@@ -273,6 +274,13 @@ enum ContextCommand {
         /// there (repeat for several). Requires a lane facet.
         #[arg(long)]
         repo: Vec<String>,
+
+        /// Place it right after this context in contexts.toml's order and,
+        /// with --board, its project after that context's board (or the
+        /// nearest one before it) in Boards' own order. Without it, both
+        /// go last.
+        #[arg(long, value_name = "CONTEXT")]
+        after: Option<String>,
     },
 
     /// The repos this lane works in (tab.toml's `repo` scope entries):
@@ -311,9 +319,10 @@ enum ContextCommand {
         command: BoardFacetCommand,
     },
 
-    /// Move this context up or down in contexts.toml's `order` - the one
-    /// true order (Boards and infra zellij's tab order both read it
-    /// directly now), so this is the only reordering command needed.
+    /// Move this context up or down in contexts.toml's `order` - lanes'
+    /// own order (infra zellij's tab order reads it too). Boards keeps its
+    /// own project order since the divorce (PLAN-lane-board-consolidation.md):
+    /// reorder a board with `lanes boards <project>`.
     Move {
         #[command(subcommand)]
         command: MoveCommand,
@@ -595,8 +604,8 @@ fn main() {
         }
 
         Command::Context { id, command } => match command {
-            ContextCommand::Add { name, lane, board, project, session, repo } => {
-                cmd::add::run(&id, &name, cmd::add::Options { lane, board, project, session, repo });
+            ContextCommand::Add { name, lane, board, project, session, repo, after } => {
+                cmd::add::run(&id, &name, cmd::add::Options { lane, board, project, session, repo, after });
             }
 
             ContextCommand::Remove { delete } => cmd::remove::run(&id, delete),

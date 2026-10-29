@@ -952,26 +952,35 @@ fn check_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path
 /// lanes-cli's to overwrite on every `--fix`. Returns the project names
 /// actually created.
 pub(crate) fn materialize_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Vec<String> {
-    let mut created = Vec::new();
-    for (name, project) in boards_project_names(cfg) {
-        let board_yaml = data_dir.join(project).join("board.yaml");
-        if board_yaml.exists() {
-            continue;
-        }
-        if let Some(parent) = board_yaml.parent() {
-            if std::fs::create_dir_all(parent).is_err() {
-                continue;
-            }
-        }
-        // Double-quoted YAML scalar, so a display name with a colon,
-        // hash, or other flow-scalar-breaking character is still valid.
-        let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
-        let content = format!("title: \"{escaped_name}\"\ncolumns: [Inbox]\n");
-        if std::fs::write(&board_yaml, content).is_ok() {
-            created.push(project.to_string());
+    boards_project_names(cfg)
+        .into_iter()
+        .filter(|(name, project)| materialize_boards_project(data_dir, name, project))
+        .map(|(_, project)| project.to_string())
+        .collect()
+}
+
+/// One project's half of `materialize_boards_projects`: creates
+/// `<data_dir>/<project>/board.yaml` (title `name`, a single `Inbox`
+/// column) unless it exists. True if it created it. `lanes ctx <id> add
+/// --board` calls this for its own project only, never the whole config's:
+/// creating every other context's missing board (a disabled one's
+/// included) is `doctor --fix`'s job, asked for, not a side effect of
+/// adding one context.
+pub(crate) fn materialize_boards_project(data_dir: &std::path::Path, name: &str, project: &str) -> bool {
+    let board_yaml = data_dir.join(project).join("board.yaml");
+    if board_yaml.exists() {
+        return false;
+    }
+    if let Some(parent) = board_yaml.parent() {
+        if std::fs::create_dir_all(parent).is_err() {
+            return false;
         }
     }
-    created
+    // Double-quoted YAML scalar, so a display name with a colon,
+    // hash, or other flow-scalar-breaking character is still valid.
+    let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
+    let content = format!("title: \"{escaped_name}\"\ncolumns: [Inbox]\n");
+    std::fs::write(&board_yaml, content).is_ok()
 }
 
 /// Every external binary a configured target's driver actually needs

@@ -91,6 +91,21 @@ lanes ctx dev-infra add "Dev Infra" --session dev-infra --repo ~/src/x   # on an
 (`src/cmd/scope.rs`. `add --session/--repo` used to rewrite `tab.toml`
 from scratch, dropping the session and every other repo.)
 
+A new context goes where it belongs in one command with `--after`:
+
+```sh
+lanes ctx conformance add Conformance --board --after console
+```
+
+That places it after `console` in contexts.toml's order and, since it has
+a board, its Boards project after Console's board (or the nearest board
+before `console`) in Boards' own order. The two orders are separate
+(`PLAN-lane-board-consolidation.md`, decision 2): `lanes ctx <id> move`
+reorders contexts only, and `lanes boards <project> before/after/up/down`
+reorders Boards' projects. Without `--after`, both go last. `add --board`
+creates only its own `board.yaml`; `lanes doctor --fix` creates every
+missing one.
+
 Example `layout.toml` (same shape whether this is a context's own `contexts/<id>/layout.toml`, a `layout-templates/<name>.toml`, or `layout-templates/default.toml` - see the "Contexts" section above for the cascade):
 
 ```toml
