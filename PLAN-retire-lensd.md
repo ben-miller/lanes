@@ -144,25 +144,26 @@ inbox counts; plus the control relations telling sources what to watch
    and CLI together, verified live against real panes (exact match with
    the Mirror-based output it replaced).
 
-   **4b. WezTerm tab presence - a real port, not a reconciliation.**
-   `lanes_tab`/`lanes_has_tab` (does a lane actually have an open WezTerm
-   tab right now - drives reachability/cyclability and the
-   `SessionMissing` signal) has no equivalent in `lanes-cli` at all today
-   - only cached-tab-id *activation* (`lanes tabs set`, jump-to, not a
-   live query). lensd's version is hard-won, genuinely better than
-   anything written against this elsewhere in the codebase: it finds the
-   live WezTerm GUI socket (the same stale-socket bug `lanes-cli` already
-   independently hit and fixed, per its own `BUG-wezterm-stale-socket.md`
-   - reconcile which fix survives before porting anything new), lists
-   panes, and links a tab to a Zellij session by checking which process
-   is actually running on that pane's tty (`zellij attach <session>`) -
-   not by tab title, which is the fragile heuristic `infra_zellij.py`
-   uses elsewhere in this very codebase. Port this logic (not the title-
-   matching one) into a new `drivers::wezterm` (or wherever the stale-
-   socket fix already lives), as one function covering every lane in one
-   `wezterm cli list` call (not N calls per snapshot). Needs its own
-   careful tests, ported from lensd's where they transfer directly - this
-   is the one piece of step 4 with real correctness risk if rushed.
+   **4b. WezTerm tab presence - done.** Added `drivers::wezterm`
+   (new module - no existing equivalent to reconcile, unlike 4a/steps
+   2-3; `lanes-cli` only had cached-tab-id *activation*, never a live
+   query). `sessions_with_tabs()` ports lensd's tty-based matching (not
+   `infra_zellij.py`'s fragile tab-title heuristic): find the live
+   WezTerm GUI socket (reused `crate::wezterm_socket` - `lanes-cli`
+   already independently fixed the same stale-socket bug lensd's version
+   also had to fix, per `BUG-wezterm-stale-socket.md` - nothing new to
+   port there), list panes, link each one's tty to whichever `zellij
+   attach <session>` process is running on it. One `wezterm cli list` +
+   one `ps` call covers every lane at once. `has_tab`
+   (reachability/cyclability) and the `SessionMissing` signal now read
+   this directly instead of lensd's `lanes_tab`; `SessionNotRunning`
+   (left over from step 4a) now reads `running_sessions` directly too
+   instead of lensd's `lanes_session_not_running` - same data, finishing
+   what 4a started. `lane_from_mirror`'s now-8 live-data parameters
+   (one added per step 1-4b) were collapsed into one `LiveData` struct
+   (clippy flagged 8 positional args; the struct is also just clearer).
+   Verified live: correct cyclable/signal output across every current
+   lane.
 5. **Repos** (branch, dirty) from file events and a git reader; **shell
    commands** from the files the shell hook writes; **builds** by
    following the apps' facts directly - dashboard and CLI together, same

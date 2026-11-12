@@ -525,7 +525,15 @@ fn lanes_snapshot_from_lensd() -> lanes::model::LanewiseSnapshot {
     let claude_sessions = lanes::drivers::claude::enumerate();
     let running_sessions = lanes::drivers::zellij::running_sessions();
     let panes_by_session = lanes::lensd::panes_by_session(&cfg, &running_sessions);
-    lanes::lensd::snapshot_from_mirror(&cfg, &mirror, &inbox_counts, &claude_sessions, &running_sessions, &panes_by_session)
+    let tabbed_sessions = lanes::drivers::wezterm::sessions_with_tabs();
+    let live = lanes::lensd::LiveData {
+        inbox_counts: &inbox_counts,
+        claude_sessions: &claude_sessions,
+        running_sessions: &running_sessions,
+        panes_by_session: &panes_by_session,
+        tabbed_sessions: &tabbed_sessions,
+    };
+    lanes::lensd::snapshot_from_mirror(&cfg, &mirror, &live)
 }
 
 fn main() {

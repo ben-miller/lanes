@@ -387,36 +387,34 @@ fn build_signals(m: &Mirror, lane: &str, resolved_path: &str) -> Vec<Signal> {
     out
 }
 
+/// Everything `snapshot_from_mirror`/`lane_from_mirror` read directly
+/// instead of through lensd's derived relations, bundled into one value
+/// instead of a growing positional-argument list (PLAN-retire-lensd.md
+/// steps 1-4b, one field added per step): Boards' inbox counts
+/// (`boards_inbox_counts`), Claude session state
+/// (`drivers::claude::enumerate`), which zellij sessions are actually
+/// running (`drivers::zellij::running_sessions`), their panes
+/// (`drivers::zellij::panes`, via `panes_by_session`), and which zellij
+/// sessions have an open WezTerm tab
+/// (`drivers::wezterm::sessions_with_tabs`). Each caller fetches these
+/// once per snapshot, not once per lane - the "fetch once up top, pass
+/// pure data down" shape that keeps the Mirror-consuming functions
+/// unit-testable without shelling out.
+pub struct LiveData<'a> {
+    pub inbox_counts: &'a HashMap<String, i64>,
+    pub claude_sessions: &'a [crate::drivers::claude::ClaudeSession],
+    pub running_sessions: &'a HashSet<String>,
+    pub panes_by_session: &'a HashMap<String, Vec<crate::drivers::zellij::LivePane>>,
+    pub tabbed_sessions: &'a HashSet<String>,
+}
+
 /// The UI snapshot built from lensd's rows. Lane definitions come from
-/// Lanes' config; signals and live state come from the mirror, except:
-/// Boards' inbox counts (`inbox_counts`, via `boards_inbox_counts`),
-/// Claude session state (`claude_sessions`, via `drivers::claude::
-/// enumerate`), and which zellij sessions are actually running
-/// (`running_sessions`, via `drivers::zellij::running_sessions`) - each
-/// read directly rather than through lensd's derived relations, per
-/// PLAN-retire-lensd.md. Lanes' own policy (dismissals, disabled
-/// sessions, `cyclable`, `visible`, lifecycle) is applied here, never by
-/// lensd.
-pub fn snapshot_from_mirror(
-    cfg: &Config,
-    m: &Mirror,
-    inbox_counts: &HashMap<String, i64>,
-    claude_sessions: &[crate::drivers::claude::ClaudeSession],
-    running_sessions: &HashSet<String>,
-    panes_by_session: &HashMap<String, Vec<crate::drivers::zellij::LivePane>>,
-) -> LanewiseSnapshot {
-    let empty_panes = Vec::new();
-    let lanes = cfg
-        .lanes
-        .iter()
-        .map(|lane| {
-            let panes = lane
-                .terminal_session()
-                .and_then(|s| panes_by_session.get(s))
-                .unwrap_or(&empty_panes);
-            lane_from_mirror(lane, m, &cfg.shell_ignored_commands, inbox_counts, claude_sessions, running_sessions, panes)
-        })
-        .collect();
+/// Lanes' config; signals and live state come from the mirror, except
+/// what `live` carries - see [`LiveData`]. Lanes' own policy (dismissals,
+/// disabled sessions, `cyclable`, `visible`, lifecycle) is applied here,
+/// never by lensd.
+pub fn snapshot_from_mirror(cfg: &Config, m: &Mirror, live: &LiveData) -> LanewiseSnapshot {
+    let lanes = cfg.lanes.iter().map(|lane| lane_from_mirror(lane, m, &cfg.shell_ignored_commands, live)).collect();
     LanewiseSnapshot {
         taken_at: chrono::Utc::now().to_rfc3339(),
         lanes,
@@ -453,24 +451,19 @@ pub fn pending_running_commands(cfg: &Config, m: &Mirror) -> Vec<(String, u32, i
         .collect()
 }
 
-fn lane_from_mirror(
-    lane: &crate::model::Lane,
-    m: &Mirror,
-    shell_ignored_commands: &[String],
-    inbox_counts: &HashMap<String, i64>,
-    claude_sessions: &[crate::drivers::claude::ClaudeSession],
-    running_sessions: &HashSet<String>,
-    live_panes: &[crate::drivers::zellij::LivePane],
-) -> LaneSnapshot {
+fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_commands: &[String], live: &LiveData) -> LaneSnapshot {
+    let empty_panes = Vec::new();
     let nav_session = lane.scope.iter().find_map(|el| el.zellij_session_name());
     let mut facets: Vec<FacetSnapshot> = lane
         .scope
         .iter()
         .map(|el| {
             if let Some(session) = el.zellij_session_name() {
-                let running = running_sessions.contains(session);
-                let claude = if running { claude_signals(claude_sessions, live_panes, session) } else { vec![] };
-                let needs_you = claude_sessions
+                let running = live.running_sessions.contains(session);
+                let live_panes = live.panes_by_session.get(session).unwrap_or(&empty_panes);
+                let claude = if running { claude_signals(live.claude_sessions, live_panes, session) } else { vec![] };
+                let needs_you = live
+                    .claude_sessions
                     .iter()
                     .any(|cs| cs.zellij_session.as_deref() == Some(session) && matches!(cs.state.as_str(), "idle" | "permission_pending"));
                 let panes = if running { panes_from_zellij(live_panes, needs_you) } else { vec![] };
@@ -487,36 +480,36 @@ fn lane_from_mirror(
     facets.extend(lane.targets.iter().map(|t| FacetSnapshot::Target { driver: t.driver.name().to_string() }));
     facets.extend(lane.targets.iter().find_map(|t| match &t.driver {
         crate::model::TargetDriver::Boards { project } => {
-            Some(FacetSnapshot::Board { project: project.clone(), signals: board_signals(inbox_counts, project) })
+            Some(FacetSnapshot::Board { project: project.clone(), signals: board_signals(live.inbox_counts, project) })
         }
         _ => None,
     }));
 
-    // "Reachable" is now whether a WezTerm tab is showing the lane's session
-    // right now (lensd's wezterm source), not Lanes' cached tab id.
-    let has_tab = m.rows("lanes_tab").any(|r| s(&r[0]) == lane.id);
+    // "Reachable" is whether a WezTerm tab is showing the lane's session
+    // right now - read live from `drivers::wezterm::sessions_with_tabs`
+    // (PLAN-retire-lensd.md step 4b), not Lanes' cached tab id, and not
+    // lensd's derived `lanes_tab` relation anymore either.
+    let has_tab = lane.terminal_session().is_some_and(|s| live.tabbed_sessions.contains(s));
     let reachable = facets.iter().any(|f| matches!(f, FacetSnapshot::Terminal { .. })).then_some(has_tab);
 
     if let Some(FacetSnapshot::Terminal { session, signals, .. }) =
         facets.iter_mut().find(|f| matches!(f, FacetSnapshot::Terminal { .. }))
     {
-        // Both conditions below used to be recomputed client-side
-        // (lane_session_missing/terminal_running == Some(false)) for lack
-        // of negation in lensd's Datalog compiler - lanes_session_missing/
-        // lanes_session_not_running are now real lensd relations (lanes.dl),
-        // so this just reads them rather than re-deriving the same fact a
-        // second way. `active` still gates SessionMissing client-side:
-        // lensd's own rule doesn't know about a lane's active/inactive
-        // state at all, so an inactive lane's missing tab is deliberately
-        // not flagged.
-        if lane.active && m.rows("lanes_session_missing").any(|r| s(&r[0]) == lane.id) {
+        // Both conditions below are now derived straight from
+        // `tabbed_sessions`/`running_sessions` (steps 4a/4b) rather than
+        // lensd's `lanes_session_missing`/`lanes_session_not_running` -
+        // the same facts, read directly instead of through the Mirror.
+        // `active` still gates SessionMissing client-side: a session being
+        // missing only matters for a lane still in the cycling set, not
+        // one the user has deliberately deactivated.
+        if lane.active && !has_tab {
             signals.push(Signal::new(
                 SignalReason::Lanes(LanesReason::SessionMissing),
                 None,
                 Some(format!("no WezTerm tab showing zellij session \"{session}\"")),
             ));
         }
-        if rows_for(m, "lanes_session_not_running", &lane.id, session).next().is_some() {
+        if !live.running_sessions.contains(session.as_str()) {
             signals.push(Signal::new(
                 SignalReason::Lanes(LanesReason::SessionNotRunning),
                 None,
@@ -881,7 +874,16 @@ mod tests {
         let panes = vec![live_pane(3, true, Some("/a"), Some("claude")), live_pane(7, false, None, Some("claude"))];
         let running = HashSet::from(["z".to_string()]);
         let panes_by_session = HashMap::from([("z".to_string(), panes)]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &HashMap::new(), &sessions, &running, &panes_by_session);
+        let tabbed = HashSet::from(["z".to_string()]);
+        let empty_counts = HashMap::new();
+        let live = LiveData {
+            inbox_counts: &empty_counts,
+            claude_sessions: &sessions,
+            running_sessions: &running,
+            panes_by_session: &panes_by_session,
+            tabbed_sessions: &tabbed,
+        };
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &live);
         let (running, panes, signals) = terminal(&snap);
         assert!(*running);
         assert_eq!(panes.len(), 2);
@@ -908,7 +910,16 @@ mod tests {
         rows.push(row("lanes_session_missing", json!(["l"])));
         let sessions = vec![claude_session("s-low", "running", "z", 7), claude_session("s-high", "idle", "z", 3)];
         let running = HashSet::from(["z".to_string()]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &sessions, &running, &HashMap::new());
+        let empty_counts = HashMap::new();
+        let empty_panes = HashMap::new();
+        let live = LiveData {
+            inbox_counts: &empty_counts,
+            claude_sessions: &sessions,
+            running_sessions: &running,
+            panes_by_session: &empty_panes,
+            tabbed_sessions: &HashSet::new(),
+        };
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &live);
         let (_, _, signals) = terminal(&snap);
         assert!(!snap.lanes[0].cyclable);
         assert!(signals.iter().any(|sg| matches!(sg.reason, SignalReason::Lanes(LanesReason::SessionMissing)) && sg.visible));
@@ -925,7 +936,13 @@ mod tests {
             row("lanes_tab", json!(["l", 4])),
             row("lanes_session_not_running", json!(["l", "z"])),
         ];
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &[], &HashSet::new(), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &LiveData {
+            inbox_counts: &HashMap::new(),
+            claude_sessions: &[],
+            running_sessions: &HashSet::new(),
+            panes_by_session: &HashMap::new(),
+            tabbed_sessions: &HashSet::new(),
+        });
         let (running, panes, signals) = terminal(&snap);
         assert!(!*running && panes.is_empty());
         assert!(signals.iter().any(|sg| matches!(sg.reason, SignalReason::Lanes(LanesReason::SessionNotRunning))));
@@ -934,7 +951,13 @@ mod tests {
     #[test]
     fn a_nonempty_inbox_count_becomes_a_boards_signal() {
         let counts = HashMap::from([("Boards".to_string(), 3)]);
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &counts, &[], &HashSet::new(), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &LiveData {
+            inbox_counts: &counts,
+            claude_sessions: &[],
+            running_sessions: &HashSet::new(),
+            panes_by_session: &HashMap::new(),
+            tabbed_sessions: &HashSet::new(),
+        });
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
         assert_eq!(signals.len(), 1);
@@ -945,7 +968,13 @@ mod tests {
     #[test]
     fn a_zero_inbox_count_produces_no_signal() {
         let counts = HashMap::from([("Boards".to_string(), 0)]);
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &counts, &[], &HashSet::new(), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &LiveData {
+            inbox_counts: &counts,
+            claude_sessions: &[],
+            running_sessions: &HashSet::new(),
+            panes_by_session: &HashMap::new(),
+            tabbed_sessions: &HashSet::new(),
+        });
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
         assert!(signals.is_empty());
@@ -953,7 +982,13 @@ mod tests {
 
     #[test]
     fn no_inbox_count_row_at_all_still_yields_the_board_facet_with_no_signal() {
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &HashMap::new(), &[], &HashSet::new(), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &LiveData {
+            inbox_counts: &HashMap::new(),
+            claude_sessions: &[],
+            running_sessions: &HashSet::new(),
+            panes_by_session: &HashMap::new(),
+            tabbed_sessions: &HashSet::new(),
+        });
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
         assert!(signals.is_empty());
@@ -961,7 +996,13 @@ mod tests {
 
     #[test]
     fn a_lane_with_no_boards_target_has_no_board_facet() {
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &HashMap::new(), &[], &HashSet::new(), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &LiveData {
+            inbox_counts: &HashMap::new(),
+            claude_sessions: &[],
+            running_sessions: &HashSet::new(),
+            panes_by_session: &HashMap::new(),
+            tabbed_sessions: &HashSet::new(),
+        });
         assert!(!snap.lanes[0].facets.iter().any(|f| matches!(f, FacetSnapshot::Board { .. })));
     }
 
@@ -980,7 +1021,13 @@ mod tests {
             row("lanes_command", json!(["l", "z", 7, "running", "2026-01-01T00:00:00Z"])),
             row("lanes_command_cmd", json!(["l", "z", 7, "vite"])),
         ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &[], &HashSet::new(), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &LiveData {
+            inbox_counts: &HashMap::new(),
+            claude_sessions: &[],
+            running_sessions: &HashSet::new(),
+            panes_by_session: &HashMap::new(),
+            tabbed_sessions: &HashSet::new(),
+        });
         let (_, _, signals) = terminal(&snap);
         let cmds: Vec<_> = signals.iter().filter(|sg| sg.kind() == crate::model::SignalKind::Command).collect();
         assert_eq!(cmds.len(), 2);
@@ -997,7 +1044,13 @@ mod tests {
         let mut rows = live_rows();
         let just_started = chrono::Utc::now().to_rfc3339();
         rows.extend([row("lanes_command", json!(["l", "z", 7, "running", just_started]))]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &[], &HashSet::new(), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &LiveData {
+            inbox_counts: &HashMap::new(),
+            claude_sessions: &[],
+            running_sessions: &HashSet::new(),
+            panes_by_session: &HashMap::new(),
+            tabbed_sessions: &HashSet::new(),
+        });
         let (_, _, signals) = terminal(&snap);
         assert!(
             !signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command),
@@ -1022,7 +1075,13 @@ mod tests {
         ]);
         let mut cfg = cfg_with(lane());
         cfg.shell_ignored_commands = vec!["claude*".to_string()];
-        let snap = snapshot_from_mirror(&cfg, &mirror(rows), &HashMap::new(), &[], &HashSet::new(), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg, &mirror(rows), &LiveData {
+            inbox_counts: &HashMap::new(),
+            claude_sessions: &[],
+            running_sessions: &HashSet::new(),
+            panes_by_session: &HashMap::new(),
+            tabbed_sessions: &HashSet::new(),
+        });
         let (_, _, signals) = terminal(&snap);
         assert!(!signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command));
     }
@@ -1081,7 +1140,13 @@ mod tests {
             row("lanes_repo_branch", json!(["l", "infra", "feat", "main", "/p/infra"])),
             row("lanes_repo_dirty", json!(["other", "x", "/p/infra"])),
         ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &[], &HashSet::new(), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &LiveData {
+            inbox_counts: &HashMap::new(),
+            claude_sessions: &[],
+            running_sessions: &HashSet::new(),
+            panes_by_session: &HashMap::new(),
+            tabbed_sessions: &HashSet::new(),
+        });
         let FacetSnapshot::Repo { path, signals } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
         assert_eq!(path, "/p/infra");
         assert_eq!(signals.len(), 2);
@@ -1102,7 +1167,13 @@ mod tests {
             row("lanes_build_changed", json!(["other", "/p/infra", "x", "dev-main", "/p/infra", ""])),
             row("lanes_build_rebuilt", json!(["l", "/p/elsewhere", "y", "installed"])),
         ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &[], &HashSet::new(), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &LiveData {
+            inbox_counts: &HashMap::new(),
+            claude_sessions: &[],
+            running_sessions: &HashSet::new(),
+            panes_by_session: &HashMap::new(),
+            tabbed_sessions: &HashSet::new(),
+        });
         let FacetSnapshot::Repo { signals, .. } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
         let builds: Vec<&Signal> = signals.iter().filter(|s| s.kind() == crate::model::SignalKind::Build).collect();
         assert_eq!(builds.len(), 2, "{:?}", builds.iter().map(|s| &s.detail).collect::<Vec<_>>());
