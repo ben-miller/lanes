@@ -26,15 +26,10 @@ impl Status {
     }
 }
 
-pub fn run(fix: bool) {
+pub fn run() {
     let cfg = lanes::config::Config::load();
 
     let boards_dir = boards_data_dir();
-    if fix {
-        for project in materialize_boards_projects(&cfg, &boards_dir) {
-            println!("created {}/board.yaml", boards_dir.join(&project).display());
-        }
-    }
 
     let mut checks = vec![
         check_lanes_registry(),
@@ -914,15 +909,24 @@ fn has_boards_target(cfg: &lanes::config::Config) -> bool {
 }
 
 /// Flags any context whose board.toml names a Boards project that doesn't
-/// exist on disk yet - Boards is deliberately generic (any subfolder of its
+/// exist on disk - Boards is deliberately generic (any subfolder of its
 /// data root with a board.yaml is a project), so this never teaches Boards
-/// anything new, it just checks the folder's there. Not auto-fixed by a
-/// plain `doctor` run - see `materialize_boards_projects` for `--fix`.
+/// anything new, it just checks the folder's there. Never fixed here (no
+/// `doctor --fix`, removed 2026-10-29): a board is created when a context
+/// gets one (`add --board`, `board enable`, `board set-board`), so one
+/// missing later was removed or renamed, which only the user can say;
+/// recreating it guessed "never created" and resurrected or duplicated it.
 fn check_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Check {
-    let missing: Vec<&str> = boards_project_names(cfg)
-        .into_iter()
-        .filter(|(_, project)| !data_dir.join(project).join("board.yaml").exists())
-        .map(|(_, project)| project)
+    // "<project> (context <id>)", so the hint's commands can be run as they are.
+    let missing: Vec<String> = cfg
+        .boards_targets
+        .iter()
+        .filter_map(|(id, _, t)| match &t.driver {
+            lanes::model::TargetDriver::Boards { project } if !data_dir.join(project).join("board.yaml").exists() => {
+                Some(format!("{project} (context {id})"))
+            }
+            _ => None,
+        })
         .collect();
 
     if missing.is_empty() {
@@ -937,35 +941,23 @@ fn check_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path
             label: "boards projects",
             status: Status::Warn,
             message: format!("project(s) missing a board.yaml in {}: {}", data_dir.display(), missing.join(", ")),
-            hint: Some("run `lanes doctor --fix` to create them with default columns".to_string()),
+            hint: Some(
+                "removed on purpose: `lanes ctx <id> board disable`; renamed in Boards: `lanes ctx <id> board set-board <new name>`; \
+                 wanted back empty: `lanes ctx <id> board enable` creates it"
+                    .to_string(),
+            ),
         }
     }
 }
 
-/// Creates `<data_dir>/<project>/board.yaml` for any context's board.toml
-/// project that doesn't exist yet, using the context's display name as the
-/// title and a single `Inbox` column - the user's own convention: every
-/// fresh board starts as just an inbox, with no presumed workflow stages
-/// (no Backlog/Doing/Done baked in), and gets whatever columns it actually
-/// needs added later by hand. Never touches a project that already exists -
-/// once created, its content (columns, cards) is Boards' to own, not
-/// lanes-cli's to overwrite on every `--fix`. Returns the project names
-/// actually created.
-pub(crate) fn materialize_boards_projects(cfg: &lanes::config::Config, data_dir: &std::path::Path) -> Vec<String> {
-    boards_project_names(cfg)
-        .into_iter()
-        .filter(|(name, project)| materialize_boards_project(data_dir, name, project))
-        .map(|(_, project)| project.to_string())
-        .collect()
-}
-
-/// One project's half of `materialize_boards_projects`: creates
-/// `<data_dir>/<project>/board.yaml` (title `name`, a single `Inbox`
-/// column) unless it exists. True if it created it. `lanes ctx <id> add
-/// --board` calls this for its own project only, never the whole config's:
-/// creating every other context's missing board (a disabled one's
-/// included) is `doctor --fix`'s job, asked for, not a side effect of
-/// adding one context.
+/// Creates `<data_dir>/<project>/board.yaml` unless it exists, using the
+/// context's display name as the title and a single `Inbox` column - the
+/// user's own convention: every fresh board starts as just an inbox, with
+/// no presumed workflow stages (no Backlog/Doing/Done baked in), and gets
+/// whatever columns it actually needs added later by hand. Never touches a
+/// project that already exists - once created, its content (columns,
+/// cards) is Boards' to own. True if it created it. Called only where a
+/// context gets a board, for that board alone (`ensure_board`).
 pub(crate) fn materialize_boards_project(data_dir: &std::path::Path, name: &str, project: &str) -> bool {
     let board_yaml = data_dir.join(project).join("board.yaml");
     if board_yaml.exists() {
@@ -981,6 +973,21 @@ pub(crate) fn materialize_boards_project(data_dir: &std::path::Path, name: &str,
     let escaped_name = name.replace('\\', "\\\\").replace('"', "\\\"");
     let content = format!("title: \"{escaped_name}\"\ncolumns: [Inbox]\n");
     std::fs::write(&board_yaml, content).is_ok()
+}
+
+/// Creates context `id`'s Boards project if it's missing: `add --board`,
+/// `board enable` and `board set-board`, the moments a context gets a
+/// board (or a different one) and creating it is plainly what's meant.
+/// Returns the project created, if any. Nothing for a context with no
+/// enabled board facet.
+pub(crate) fn ensure_board(id: &str) -> Option<String> {
+    let cfg = lanes::config::Config::load();
+    cfg.boards_targets.iter().find(|(cid, ..)| cid == id).and_then(|(_, name, t)| match &t.driver {
+        lanes::model::TargetDriver::Boards { project } => {
+            materialize_boards_project(&boards_data_dir(), name, project).then(|| project.clone())
+        }
+        _ => None,
+    })
 }
 
 /// Every external binary a configured target's driver actually needs
@@ -1198,11 +1205,9 @@ mod tests {
     }
 
     #[test]
-    fn materialize_boards_projects_creates_a_missing_board_yaml() {
+    fn materialize_boards_project_creates_a_missing_board_yaml() {
         let dir = boards_test_dir("materialize-new");
-        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("infra-board")])]);
-        let created = materialize_boards_projects(&cfg, &dir);
-        assert_eq!(created, vec!["infra-board".to_string()]);
+        assert!(materialize_boards_project(&dir, "infra", "infra-board"));
 
         let content = std::fs::read_to_string(dir.join("infra-board/board.yaml")).unwrap();
         assert!(content.contains("title: \"infra\""));
@@ -1212,14 +1217,12 @@ mod tests {
     }
 
     #[test]
-    fn materialize_boards_projects_never_overwrites_an_existing_board_yaml() {
+    fn materialize_boards_project_never_overwrites_an_existing_board_yaml() {
         let dir = boards_test_dir("materialize-existing");
         std::fs::create_dir_all(dir.join("infra-board")).unwrap();
         std::fs::write(dir.join("infra-board/board.yaml"), "title: \"Custom\"\ncolumns: [A, B]\n").unwrap();
 
-        let cfg = test_config(vec![lane_with_targets("infra", vec![boards_target("infra-board")])]);
-        let created = materialize_boards_projects(&cfg, &dir);
-        assert!(created.is_empty());
+        assert!(!materialize_boards_project(&dir, "infra", "infra-board"));
 
         let content = std::fs::read_to_string(dir.join("infra-board/board.yaml")).unwrap();
         assert!(content.contains("Custom"));

@@ -9,11 +9,10 @@
 //! everything defaulting to enabled (see DECISIONS.md's "disabled means
 //! absent" design - a freshly created facet has no reason to start
 //! disabled), appends the id to `contexts.toml`'s `order` (a no-op if
-//! it's already listed), and (for `--board`) materializes its
-//! `board.yaml` immediately via the same path `lanes doctor --fix` uses,
-//! so the context passes every `doctor` check right away instead of
-//! needing a follow-up `--fix` run. Only its own: other contexts' missing
-//! boards are `doctor --fix`'s to create, when asked.
+//! it's already listed), and (for `--board`) creates its Boards
+//! project immediately if it doesn't exist (`doctor::ensure_board`), so
+//! the context passes every `doctor` check right away. Only its own:
+//! nothing creates other contexts' missing boards (`doctor` reports them).
 //!
 //! `--after <ctx>` places it in one go: after `<ctx>` in contexts.toml's
 //! order and, with a board, its project after `<ctx>`'s (or the nearest
@@ -67,7 +66,7 @@ pub fn run(id: &str, name: &str, opts: Options) {
     let project = opts.project.clone().unwrap_or_else(|| name.to_string());
     if opts.board {
         created.push("board.toml".to_string());
-        if super::doctor::materialize_boards_project(&lanes::boards_data_dir(), name, &project) {
+        if super::doctor::ensure_board(id).is_some() {
             created.push(format!("board.yaml for {project:?}"));
         }
     }

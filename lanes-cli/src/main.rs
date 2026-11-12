@@ -36,13 +36,7 @@ enum Command {
     Init,
 
     /// Check environment dependencies and configuration
-    Doctor {
-        /// Materialize any missing Boards project (~/boards/<project>/board.yaml)
-        /// named by a context's board.toml. Never touches a project that
-        /// already exists - Boards owns that file once created.
-        #[arg(long)]
-        fix: bool,
-    },
+    Doctor,
 
     /// List every context - bare ids only. `-l`/`--json` for full detail
     /// (every scope element, every target's placement), including
@@ -254,9 +248,8 @@ enum ContextCommand {
         #[arg(long)]
         lane: bool,
 
-        /// Give this context a board facet (board.toml), and materialize
-        /// its own board.yaml immediately (only its own: `lanes doctor
-        /// --fix` creates every missing one).
+        /// Give this context a board facet (board.toml), and create its
+        /// Boards project (board.yaml) if it doesn't exist.
         #[arg(long)]
         board: bool,
 
@@ -579,7 +572,7 @@ fn main() {
 
         Command::Init => lanes::logging::init_state(),
 
-        Command::Doctor { fix } => cmd::doctor::run(fix),
+        Command::Doctor => cmd::doctor::run(),
 
         Command::Ls { long, json } => {
             let cfg = lanes::config::Config::load();
@@ -659,9 +652,19 @@ fn main() {
             },
             ContextCommand::Board { command } => match command {
                 BoardFacetCommand::Disable => set_facet_enabled_or_exit(&id, "board", false),
-                BoardFacetCommand::Enable => set_facet_enabled_or_exit(&id, "board", true),
+                BoardFacetCommand::Enable => {
+                    set_facet_enabled_or_exit(&id, "board", true);
+                    if let Some(p) = cmd::doctor::ensure_board(&id) {
+                        println!("{id}: created board.yaml for {p:?}");
+                    }
+                }
                 BoardFacetCommand::SetBoard { name } => match lanes::config::set_board_project(&id, &name) {
-                    Ok(()) => println!("{id}: board set to {name:?}"),
+                    Ok(()) => {
+                        println!("{id}: board set to {name:?}");
+                        if let Some(p) = cmd::doctor::ensure_board(&id) {
+                            println!("{id}: created board.yaml for {p:?} (no such project yet)");
+                        }
+                    }
                     Err(e) => {
                         eprintln!("{e}");
                         std::process::exit(1);

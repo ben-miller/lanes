@@ -102,9 +102,13 @@ a board, its Boards project after Console's board (or the nearest board
 before `console`) in Boards' own order. The two orders are separate
 (`PLAN-lane-board-consolidation.md`, decision 2): `lanes ctx <id> move`
 reorders contexts only, and `lanes boards <project> before/after/up/down`
-reorders Boards' projects. Without `--after`, both go last. `add --board`
-creates only its own `board.yaml`; `lanes doctor --fix` creates every
-missing one.
+reorders Boards' projects. Without `--after`, both go last.
+
+A context's board is created when it gets one: `add --board`, `lanes ctx
+<id> board enable` and `board set-board <name>` each create the Boards
+project if it doesn't exist. Nothing recreates one that goes missing
+later (there's no `doctor --fix`): `lanes doctor` reports it, and you say
+whether it was removed (`board disable`) or renamed (`board set-board`).
 
 Example `layout.toml` (same shape whether this is a context's own `contexts/<id>/layout.toml`, a `layout-templates/<name>.toml`, or `layout-templates/default.toml` - see the "Contexts" section above for the cascade):
 
