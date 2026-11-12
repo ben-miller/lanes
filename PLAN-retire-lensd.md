@@ -120,9 +120,44 @@ inbox counts; plus the control relations telling sources what to watch
    found along the way, not touched, out of scope here) are now dead
    weight on the Mirror side; cleaning those up is step 6's job
    (`lanes.dl` itself goes then), not this one's.
-4. **Zellij and WezTerm** the same way: the modules moved, polled for
-   enabled lanes only, the session/tab/pane chips switched over - dashboard
-   and CLI together, same reasoning as step 3.
+4. **Zellij and WezTerm - bigger than one step, split in two.** Scoped out
+   2026-11-12 after checking what's actually there (same "check for an
+   existing duplicate first" diligence as step 2):
+
+   **4a. Zellij session/pane chip - moderate, same shape as steps 2-3.**
+   `drivers::zellij` already has `running_sessions()` and
+   `pane_positions()` (cached, single-flight, already used for cycling)
+   and `layout_for_session()` (already used for `navigate_to_repo_pane`).
+   Missing: a function returning full pane info (id + command + cwd +
+   focused, pre-sorted in reading order) - `pane_positions()` only keeps
+   the position tuple, discarding command/cwd. Add that one function,
+   then: `running` switches from `lanes_session_running` to
+   `running_sessions()`; the dashboard's pane list
+   (`panes_from_mirror`) switches from `lanes_pane`/`lanes_pane_cmd`/
+   `lanes_pane_cwd`/`lanes_pane_focused` to it; `claude_signals`' reading
+   order switches from the Mirror's `lanes_pane` positions to
+   `pane_positions()` directly - finishing what step 3 deliberately left
+   on the Mirror. Dashboard and CLI together, same as steps 2-3.
+
+   **4b. WezTerm tab presence - a real port, not a reconciliation.**
+   `lanes_tab`/`lanes_has_tab` (does a lane actually have an open WezTerm
+   tab right now - drives reachability/cyclability and the
+   `SessionMissing` signal) has no equivalent in `lanes-cli` at all today
+   - only cached-tab-id *activation* (`lanes tabs set`, jump-to, not a
+   live query). lensd's version is hard-won, genuinely better than
+   anything written against this elsewhere in the codebase: it finds the
+   live WezTerm GUI socket (the same stale-socket bug `lanes-cli` already
+   independently hit and fixed, per its own `BUG-wezterm-stale-socket.md`
+   - reconcile which fix survives before porting anything new), lists
+   panes, and links a tab to a Zellij session by checking which process
+   is actually running on that pane's tty (`zellij attach <session>`) -
+   not by tab title, which is the fragile heuristic `infra_zellij.py`
+   uses elsewhere in this very codebase. Port this logic (not the title-
+   matching one) into a new `drivers::wezterm` (or wherever the stale-
+   socket fix already lives), as one function covering every lane in one
+   `wezterm cli list` call (not N calls per snapshot). Needs its own
+   careful tests, ported from lensd's where they transfer directly - this
+   is the one piece of step 4 with real correctness risk if rushed.
 5. **Repos** (branch, dirty) from file events and a git reader; **shell
    commands** from the files the shell hook writes; **builds** by
    following the apps' facts directly - dashboard and CLI together, same
