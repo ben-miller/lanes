@@ -269,23 +269,35 @@ fn command_records(m: &Mirror, lane: &str, session: &str) -> Vec<CommandRecord> 
         .collect()
 }
 
-fn claude_signals(m: &Mirror, lane: &str, session: &str) -> Vec<Signal> {
+/// Claude-session signals for one zellij session - read from
+/// `drivers::claude` (a live `enumerate()`/`watch()` scan) rather than
+/// lensd's derived `lanes_claude` relation (PLAN-retire-lensd.md step 3).
+/// Reading order ("same as the on-screen panes") still comes from lensd's
+/// `lanes_pane` positions for now - that's the Zellij/WezTerm chip's own
+/// data (step 4), not Claude session state, so migrating it isn't this
+/// step's job.
+fn claude_signals(m: &Mirror, sessions: &[crate::drivers::claude::ClaudeSession], lane: &str, session: &str) -> Vec<Signal> {
     let positions: HashMap<i64, (i64, i64, i64)> = rows_for(m, "lanes_pane", lane, session)
         .map(|r| (int(&r[2]), (int(&r[3]), int(&r[6]), int(&r[5]))))
         .collect();
-    let mut rows: Vec<&Row> = m.rows("lanes_claude").filter(|r| s(&r[0]) == lane && s(&r[4]) == session).collect();
+    let mut matching: Vec<&crate::drivers::claude::ClaudeSession> =
+        sessions.iter().filter(|cs| cs.zellij_session.as_deref() == Some(session)).collect();
     // Same reading order as the on-screen panes.
-    rows.sort_by_key(|r| (positions.get(&int(&r[3])).copied().unwrap_or((i64::MAX, i64::MAX, i64::MAX)), s(&r[1]).to_string()));
-    rows.into_iter()
-        .map(|r| {
-            let reason = match s(&r[2]) {
+    matching.sort_by_key(|cs| {
+        let pane = cs.zellij_pane_id.map(|p| p as i64).unwrap_or(-1);
+        (positions.get(&pane).copied().unwrap_or((i64::MAX, i64::MAX, i64::MAX)), cs.session_id.clone())
+    });
+    matching
+        .into_iter()
+        .map(|cs| {
+            let reason = match cs.state.as_str() {
                 "idle" => ClaudeSessionReason::Awaiting,
                 "permission_pending" => ClaudeSessionReason::Permission,
                 _ => ClaudeSessionReason::Active,
             };
             Signal::new(
                 SignalReason::ClaudeSession(reason),
-                Some(SignalAction::SwitchClaudeSession { session_id: s(&r[1]).to_string() }),
+                Some(SignalAction::SwitchClaudeSession { session_id: cs.session_id.clone() }),
                 None,
             )
         })
@@ -366,8 +378,17 @@ fn build_signals(m: &Mirror, lane: &str, resolved_path: &str) -> Vec<Signal> {
 /// see PLAN-retire-lensd.md. Lanes' own policy (dismissals, disabled
 /// sessions, `cyclable`, `visible`, lifecycle) is applied here, never by
 /// lensd.
-pub fn snapshot_from_mirror(cfg: &Config, m: &Mirror, inbox_counts: &HashMap<String, i64>) -> LanewiseSnapshot {
-    let lanes = cfg.lanes.iter().map(|lane| lane_from_mirror(lane, m, &cfg.shell_ignored_commands, inbox_counts)).collect();
+pub fn snapshot_from_mirror(
+    cfg: &Config,
+    m: &Mirror,
+    inbox_counts: &HashMap<String, i64>,
+    claude_sessions: &[crate::drivers::claude::ClaudeSession],
+) -> LanewiseSnapshot {
+    let lanes = cfg
+        .lanes
+        .iter()
+        .map(|lane| lane_from_mirror(lane, m, &cfg.shell_ignored_commands, inbox_counts, claude_sessions))
+        .collect();
     LanewiseSnapshot {
         taken_at: chrono::Utc::now().to_rfc3339(),
         lanes,
@@ -404,7 +425,13 @@ pub fn pending_running_commands(cfg: &Config, m: &Mirror) -> Vec<(String, u32, i
         .collect()
 }
 
-fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_commands: &[String], inbox_counts: &HashMap<String, i64>) -> LaneSnapshot {
+fn lane_from_mirror(
+    lane: &crate::model::Lane,
+    m: &Mirror,
+    shell_ignored_commands: &[String],
+    inbox_counts: &HashMap<String, i64>,
+    claude_sessions: &[crate::drivers::claude::ClaudeSession],
+) -> LaneSnapshot {
     let nav_session = lane.scope.iter().find_map(|el| el.zellij_session_name());
     let mut facets: Vec<FacetSnapshot> = lane
         .scope
@@ -412,10 +439,10 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_command
         .map(|el| {
             if let Some(session) = el.zellij_session_name() {
                 let running = rows_for(m, "lanes_session_running", &lane.id, session).next().is_some();
-                let claude = if running { claude_signals(m, &lane.id, session) } else { vec![] };
-                let needs_you = m
-                    .rows("lanes_claude")
-                    .any(|r| s(&r[0]) == lane.id && s(&r[4]) == session && matches!(s(&r[2]), "idle" | "permission_pending"));
+                let claude = if running { claude_signals(m, claude_sessions, &lane.id, session) } else { vec![] };
+                let needs_you = claude_sessions
+                    .iter()
+                    .any(|cs| cs.zellij_session.as_deref() == Some(session) && matches!(cs.state.as_str(), "idle" | "permission_pending"));
                 let panes = if running { panes_from_mirror(m, &lane.id, session, needs_you) } else { vec![] };
                 FacetSnapshot::Terminal { session: session.to_string(), running, panes, signals: claude }
             } else {
@@ -792,9 +819,20 @@ mod tests {
             row("lanes_pane_cmd", json!(["l", "z", 7, "claude"])),
             row("lanes_pane_cwd", json!(["l", "z", 3, "/a"])),
             row("lanes_pane_focused", json!(["l", "z", 3])),
-            row("lanes_claude", json!(["l", "s-low", "running", 7, "z"])),
-            row("lanes_claude", json!(["l", "s-high", "idle", 3, "z"])),
         ]
+    }
+
+    /// A `drivers::claude::ClaudeSession` for tests - the Mirror no longer
+    /// carries Claude session state (`lanes_claude`, now dead weight read
+    /// by nothing - PLAN-retire-lensd.md step 3), so tests exercising
+    /// Claude signals build this directly instead of a `lanes_claude` row.
+    fn claude_session(session_id: &str, state: &str, zellij_session: &str, pane_id: u32) -> crate::drivers::claude::ClaudeSession {
+        crate::drivers::claude::ClaudeSession {
+            session_id: session_id.to_string(),
+            zellij_session: Some(zellij_session.to_string()),
+            state: state.to_string(),
+            zellij_pane_id: Some(pane_id),
+        }
     }
 
     fn terminal(snap: &LanewiseSnapshot) -> (&bool, &Vec<PaneSnapshot>, &Vec<Signal>) {
@@ -806,7 +844,8 @@ mod tests {
 
     #[test]
     fn a_reachable_lane_with_an_idle_claude_has_a_ready_cyclable_signal_in_screen_order() {
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &HashMap::new());
+        let sessions = vec![claude_session("s-low", "running", "z", 7), claude_session("s-high", "idle", "z", 3)];
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &HashMap::new(), &sessions);
         let (running, panes, signals) = terminal(&snap);
         assert!(*running);
         assert_eq!(panes.len(), 2);
@@ -831,7 +870,8 @@ mod tests {
     fn a_lane_without_a_wezterm_tab_is_session_missing_and_not_cyclable() {
         let mut rows: Vec<Value> = live_rows().into_iter().filter(|r| r["relation"] != "lanes_tab").collect();
         rows.push(row("lanes_session_missing", json!(["l"])));
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
+        let sessions = vec![claude_session("s-low", "running", "z", 7), claude_session("s-high", "idle", "z", 3)];
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &sessions);
         let (_, _, signals) = terminal(&snap);
         assert!(!snap.lanes[0].cyclable);
         assert!(signals.iter().any(|sg| matches!(sg.reason, SignalReason::Lanes(LanesReason::SessionMissing)) && sg.visible));
@@ -848,7 +888,7 @@ mod tests {
             row("lanes_tab", json!(["l", 4])),
             row("lanes_session_not_running", json!(["l", "z"])),
         ];
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &[]);
         let (running, panes, signals) = terminal(&snap);
         assert!(!*running && panes.is_empty());
         assert!(signals.iter().any(|sg| matches!(sg.reason, SignalReason::Lanes(LanesReason::SessionNotRunning))));
@@ -857,7 +897,7 @@ mod tests {
     #[test]
     fn a_nonempty_inbox_count_becomes_a_boards_signal() {
         let counts = HashMap::from([("Boards".to_string(), 3)]);
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &counts);
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &counts, &[]);
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
         assert_eq!(signals.len(), 1);
@@ -868,7 +908,7 @@ mod tests {
     #[test]
     fn a_zero_inbox_count_produces_no_signal() {
         let counts = HashMap::from([("Boards".to_string(), 0)]);
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &counts);
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &counts, &[]);
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
         assert!(signals.is_empty());
@@ -876,7 +916,7 @@ mod tests {
 
     #[test]
     fn no_inbox_count_row_at_all_still_yields_the_board_facet_with_no_signal() {
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &HashMap::new(), &[]);
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
         assert!(signals.is_empty());
@@ -884,7 +924,7 @@ mod tests {
 
     #[test]
     fn a_lane_with_no_boards_target_has_no_board_facet() {
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &HashMap::new(), &[]);
         assert!(!snap.lanes[0].facets.iter().any(|f| matches!(f, FacetSnapshot::Board { .. })));
     }
 
@@ -903,7 +943,7 @@ mod tests {
             row("lanes_command", json!(["l", "z", 7, "running", "2026-01-01T00:00:00Z"])),
             row("lanes_command_cmd", json!(["l", "z", 7, "vite"])),
         ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &[]);
         let (_, _, signals) = terminal(&snap);
         let cmds: Vec<_> = signals.iter().filter(|sg| sg.kind() == crate::model::SignalKind::Command).collect();
         assert_eq!(cmds.len(), 2);
@@ -920,7 +960,7 @@ mod tests {
         let mut rows = live_rows();
         let just_started = chrono::Utc::now().to_rfc3339();
         rows.extend([row("lanes_command", json!(["l", "z", 7, "running", just_started]))]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &[]);
         let (_, _, signals) = terminal(&snap);
         assert!(
             !signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command),
@@ -945,7 +985,7 @@ mod tests {
         ]);
         let mut cfg = cfg_with(lane());
         cfg.shell_ignored_commands = vec!["claude*".to_string()];
-        let snap = snapshot_from_mirror(&cfg, &mirror(rows), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg, &mirror(rows), &HashMap::new(), &[]);
         let (_, _, signals) = terminal(&snap);
         assert!(!signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command));
     }
@@ -1004,7 +1044,7 @@ mod tests {
             row("lanes_repo_branch", json!(["l", "infra", "feat", "main", "/p/infra"])),
             row("lanes_repo_dirty", json!(["other", "x", "/p/infra"])),
         ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &[]);
         let FacetSnapshot::Repo { path, signals } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
         assert_eq!(path, "/p/infra");
         assert_eq!(signals.len(), 2);
@@ -1025,7 +1065,7 @@ mod tests {
             row("lanes_build_changed", json!(["other", "/p/infra", "x", "dev-main", "/p/infra", ""])),
             row("lanes_build_rebuilt", json!(["l", "/p/elsewhere", "y", "installed"])),
         ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new(), &[]);
         let FacetSnapshot::Repo { signals, .. } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
         let builds: Vec<&Signal> = signals.iter().filter(|s| s.kind() == crate::model::SignalKind::Build).collect();
         assert_eq!(builds.len(), 2, "{:?}", builds.iter().map(|s| &s.detail).collect::<Vec<_>>());

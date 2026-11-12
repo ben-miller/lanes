@@ -100,18 +100,26 @@ inbox counts; plus the control relations telling sources what to watch
    `appctl::watch`, with the same 5s liveness-rescan lensd's version had,
    for a dead process whose file a hook never rewrites). No new crate -
    see design point 1.
-3. **Not started. Claude chip, dashboard and CLI together:** Lanes Switch
-   computes and publishes it from `drivers::claude` (the dashboard reads
-   it instead of `lanes_claude` from lensd); `lanes-cli`'s
-   `snapshot`/`signals` reads the same module directly for this chip too,
-   not just the dashboard - `lanes cycle` already does (that's what
-   `enumerate()` was for before this plan existed). Not a
-   separate later step for the CLI - its `snapshot`/`signals` now hard-
-   require a live lensd connection with no fallback (changed this
-   session); leaving it on `lanes.sock` through the rest of this migration
-   would mean it's fully exposed to lensd's own incremental dismantling
-   for the whole middle stretch, for no benefit. lensd still running for
-   every other chip.
+3. **Done, mostly as written - except "publishes."** Dashboard and CLI
+   both switched together: `snapshot_from_mirror`/`lane_from_mirror`/
+   `claude_signals` now take a `&[drivers::claude::ClaudeSession]`
+   (from `enumerate()`) instead of reading `lanes_claude` from the
+   Mirror, and both `ui/src-tauri`'s `get_snapshot` and `lanes-cli`'s
+   `lanes_snapshot_from_lensd` supply it - `lanes cycle` already did
+   (that's what `enumerate()` was for before this plan existed). Reading
+   order within a terminal still comes from lensd's `lanes_pane`
+   positions - that's the Zellij/WezTerm chip's own data (step 4), not
+   Claude session state, so it stayed on the Mirror for now, deliberately.
+   Did *not* add a Lanes-Switch-publishes-this-as-a-fact step: nothing
+   reads Claude session state from Lanes today (unlike the inbox count in
+   step 1, which Console or others could plausibly want), so publishing
+   it now would be speculative infra with zero readers - skip it until
+   something actually needs it, same call as step 2's "no new crate yet."
+   `lensd`'s own `lanes_claude` relation and `keys_from_mirror` (a
+   `pub fn` that turned out to have no caller outside its own tests -
+   found along the way, not touched, out of scope here) are now dead
+   weight on the Mirror side; cleaning those up is step 6's job
+   (`lanes.dl` itself goes then), not this one's.
 4. **Zellij and WezTerm** the same way: the modules moved, polled for
    enabled lanes only, the session/tab/pane chips switched over - dashboard
    and CLI together, same reasoning as step 3.

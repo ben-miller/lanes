@@ -522,7 +522,8 @@ fn lanes_snapshot_from_lensd() -> lanes::model::LanewiseSnapshot {
         }
     };
     let inbox_counts = lanes::lensd::boards_inbox_counts();
-    lanes::lensd::snapshot_from_mirror(&cfg, &mirror, &inbox_counts)
+    let claude_sessions = lanes::drivers::claude::enumerate();
+    lanes::lensd::snapshot_from_mirror(&cfg, &mirror, &inbox_counts, &claude_sessions)
 }
 
 fn main() {
