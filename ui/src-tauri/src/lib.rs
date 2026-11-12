@@ -140,7 +140,9 @@ async fn get_snapshot(
         let cfg = lanes::config::Config::load();
         let inbox_counts = lanes::lensd::boards_inbox_counts();
         let claude_sessions = lanes::drivers::claude::enumerate();
-        let snapshot = lanes::lensd::snapshot_from_mirror(&cfg, &mirror, &inbox_counts, &claude_sessions);
+        let running_sessions = lanes::drivers::zellij::running_sessions();
+        let panes_by_session = lanes::lensd::panes_by_session(&cfg, &running_sessions);
+        let snapshot = lanes::lensd::snapshot_from_mirror(&cfg, &mirror, &inbox_counts, &claude_sessions, &running_sessions, &panes_by_session);
         let pending = lanes::lensd::pending_running_commands(&cfg, &mirror);
         lanes::logging::perf("ui.get_snapshot.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
         // Always returns every lane: inactive-lane filtering is the

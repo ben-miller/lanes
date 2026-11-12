@@ -223,6 +223,38 @@ fn positions_from_panes(panes: &[RawPaneInfo]) -> HashMap<u32, (usize, i64, i64)
         .collect()
 }
 
+/// A live terminal pane - `list-panes`' own view, not `dump-layout`'s (see
+/// `layout_for_session`): has the pane id `pane_positions` keys by, plus
+/// the command/cwd/focused info the dashboard's pane list needs, in one
+/// call. `layout_for_session`'s `PaneInfo` has command/cwd/focused too but
+/// no id, which is why this is a separate type rather than reusing it -
+/// matching a Claude session's `zellij_pane_id` to a specific pane needs
+/// the id.
+#[derive(Clone)]
+pub struct LivePane {
+    pub id: u32,
+    pub focused: bool,
+    pub cwd: Option<String>,
+    pub command: Option<String>,
+}
+
+/// Every terminal pane in `session`, in reading order (tab, then top-to-
+/// bottom/left-to-right within it) - same position data `pane_positions`
+/// derives its ordering from, with command/cwd/focused included. Used for
+/// the dashboard's pane list (PLAN-retire-lensd.md step 4a).
+pub fn panes(session: &str) -> Vec<LivePane> {
+    panes_from_raw(&list_panes(session))
+}
+
+fn panes_from_raw(raw: &[RawPaneInfo]) -> Vec<LivePane> {
+    let mut panes: Vec<&RawPaneInfo> = raw.iter().filter(|p| !p.is_plugin).collect();
+    panes.sort_by_key(|p| (p.tab_position, p.pane_y, p.pane_x));
+    panes
+        .into_iter()
+        .map(|p| LivePane { id: p.id, focused: p.is_focused, cwd: p.pane_cwd.clone(), command: p.pane_command.clone() })
+        .collect()
+}
+
 /// `--short` lists a session name regardless of whether it's actually
 /// attachable - a session whose pane died without the session itself being
 /// killed shows up there identically to a genuinely running one, just
@@ -409,6 +441,25 @@ mod tests {
         assert_eq!(positions.len(), 2);
         assert!(positions.contains_key(&0));
         assert!(positions.contains_key(&3));
+    }
+
+    #[test]
+    fn panes_from_raw_excludes_plugins_and_sorts_by_reading_order() {
+        let raw = vec![
+            raw_pane(0, true, false, 0, "Tab #1", None, None),
+            // pane 7 is lower on screen than pane 3 (see raw_pane's y/x
+            // default of 0 - give these explicit, distinct positions).
+            RawPaneInfo { pane_y: 20, ..raw_pane(7, false, false, 0, "Tab #1", Some("claude"), Some("/a")) },
+            RawPaneInfo { pane_y: 1, ..raw_pane(3, false, true, 0, "Tab #1", Some("fish"), Some("/b")) },
+        ];
+        let panes = panes_from_raw(&raw);
+        assert_eq!(panes.len(), 2, "plugin pane excluded");
+        assert_eq!(panes[0].id, 3, "lower y sorts first");
+        assert!(panes[0].focused);
+        assert_eq!(panes[0].cwd.as_deref(), Some("/b"));
+        assert_eq!(panes[0].command.as_deref(), Some("fish"));
+        assert_eq!(panes[1].id, 7);
+        assert!(!panes[1].focused);
     }
 
     #[test]

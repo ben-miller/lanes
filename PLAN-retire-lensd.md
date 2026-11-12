@@ -124,20 +124,25 @@ inbox counts; plus the control relations telling sources what to watch
    2026-11-12 after checking what's actually there (same "check for an
    existing duplicate first" diligence as step 2):
 
-   **4a. Zellij session/pane chip - moderate, same shape as steps 2-3.**
-   `drivers::zellij` already has `running_sessions()` and
-   `pane_positions()` (cached, single-flight, already used for cycling)
-   and `layout_for_session()` (already used for `navigate_to_repo_pane`).
-   Missing: a function returning full pane info (id + command + cwd +
-   focused, pre-sorted in reading order) - `pane_positions()` only keeps
-   the position tuple, discarding command/cwd. Add that one function,
-   then: `running` switches from `lanes_session_running` to
-   `running_sessions()`; the dashboard's pane list
-   (`panes_from_mirror`) switches from `lanes_pane`/`lanes_pane_cmd`/
-   `lanes_pane_cwd`/`lanes_pane_focused` to it; `claude_signals`' reading
-   order switches from the Mirror's `lanes_pane` positions to
-   `pane_positions()` directly - finishing what step 3 deliberately left
-   on the Mirror. Dashboard and CLI together, same as steps 2-3.
+   **4a. Zellij session/pane chip - done.** Added
+   `drivers::zellij::panes()` (full pane info - id, command, cwd, focused
+   - pre-sorted in reading order; `pane_positions()` only kept the
+   position tuple, discarding command/cwd). `running` now comes from
+   `running_sessions()` instead of `lanes_session_running`; the
+   dashboard's pane list (`panes_from_zellij`, replacing
+   `panes_from_mirror`) comes from it instead of `lanes_pane`/
+   `lanes_pane_cmd`/`lanes_pane_cwd`/`lanes_pane_focused`; `claude_signals`'
+   reading order comes from the same already-fetched pane list (a pane's
+   index in it, since it's pre-sorted) instead of the Mirror's `lanes_pane`
+   positions - finishing what step 3 deliberately left on the Mirror.
+   Both `running_sessions` and the per-session pane lists
+   (`lensd::panes_by_session`) are fetched once per snapshot by the
+   caller and threaded through as parameters, same "fetch once up top,
+   pass pure data down" shape as `inbox_counts`/`claude_sessions` - kept
+   `snapshot_from_mirror`/`lane_from_mirror`/`claude_signals` unit-
+   testable without shelling out to the real `zellij` binary. Dashboard
+   and CLI together, verified live against real panes (exact match with
+   the Mirror-based output it replaced).
 
    **4b. WezTerm tab presence - a real port, not a reconciliation.**
    `lanes_tab`/`lanes_has_tab` (does a lane actually have an open WezTerm
