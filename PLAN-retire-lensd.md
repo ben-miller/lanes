@@ -26,7 +26,7 @@ stays the goal; what changes is where the consolidation lives:
 |---|---|---|
 | files, git | file events | `appctl::watch` (exists) |
 | an app's state | pushed over appctl | `appctl::follow` (exists) |
-| Claude sessions | file events | lensd's `claude.rs`, moved |
+| Claude sessions | file events | `lanes-cli`'s `drivers::claude` (done - reconciled with lensd's own `claude.rs`, see step 2) |
 | Zellij, WezTerm | polling (no events) | lensd's `zellij.rs`, `wezterm.rs`, moved |
 | a repo's branch, dirty | file events + git | a `dp::sc`-style reader |
 
@@ -39,6 +39,7 @@ Only Lanes (checked 2026-11-12):
 - **The `lanes` CLI** (`main.rs`, `lanes snapshot` / `lanes signals`,
   `read_snapshot`): one-off reads.
 - `repos.sock` (dev-infra's `rules/repos.dl`) has no reader: drop it now.
+  **Done** (step 1).
 
 What `lanes.dl` derives for them (about 24 relations): each lane's Zellij
 session (running, missing, its panes: command, cwd, focused), its WezTerm
@@ -49,10 +50,13 @@ inbox counts; plus the control relations telling sources what to watch
 
 ## Design points
 
-1. **Where the moved modules go:** a dev-infra crate beside `appctl::watch`
-   and `follow` (a new `sources` crate, or modules in `appctl`), so any app
-   reads Claude sessions or Zellij the same way. Not inside Lanes, which
-   would make them Lanes-only.
+1. **Where the moved modules go:** decided, for Claude sessions at least
+   (step 2) - inside `lanes-cli` itself (`src/drivers/claude.rs`), not a
+   new dev-infra crate, since Lanes is still the only consumer (per "Not
+   decided" below, this was always the sanctioned fallback when nothing
+   else needs it yet). Move to a shared crate beside `appctl::watch`/
+   `follow` only if and when a second reader actually appears - not
+   speculatively.
 2. **Lanes Switch is the owner of lane data:** it runs the modules for its
    lanes and publishes the results as facts over appctl (it already
    publishes the lanes, their order and repos). Console or anything else
@@ -74,18 +78,34 @@ inbox counts; plus the control relations telling sources what to watch
 
 ## Steps, each ending with something working
 
-1. **Drop `repos.dl`/`repos.sock`** (no reader), and switch Boards' inbox
-   count to `appctl::follow` directly - Boards already publishes it
-   correctly today (`inbox::publish`, its own `appctl::config!`'s
-   `.facts(...)`), nothing to move, just change who reads it. Two free
-   wins, landed together as the first commit: the easiest possible proof
-   of the new pattern before the harder modules below.
-2. **Create the shared crate** with the Claude session module, moved from
-   `claude.rs` with its tests: read now, and watch.
-3. **Claude chip, dashboard and CLI together:** Lanes Switch computes and
-   publishes it from that module (the dashboard reads it instead of
-   `lanes_claude` from lensd); `lanes-cli`'s `snapshot`/`signals` reads the
-   same module directly for this chip too, not just the dashboard. Not a
+1. **Done.** Dropped `repos.dl`/`repos.sock` (no reader), and switched
+   Boards' inbox count to a direct, one-shot appctl read
+   (`lensd::boards_inbox_counts`) instead of lensd's derived
+   `lanes_inbox_count` - Boards already published it correctly
+   (`inbox::publish`), nothing to move, just who reads it. Landed as one
+   commit across `lanes`, `dev-infra` (`rules/README.md`) and `lensd` (a
+   stale doc-comment pointer).
+2. **Done, but not as written.** The plan assumed one clean module to
+   move; there turned out to be two independently-evolved Claude-session
+   scanners already: `lensd`'s `source::claude` (fed the dashboard chip,
+   via lensd) and `lanes-cli`'s own pre-existing
+   `drivers::claude::enumerate()` (fed `lanes cycle`'s session-cycling,
+   nothing to do with lensd at all). Each had something the other didn't:
+   lensd's had the TUI-interrupt check (`dump-screen`-based, catching a
+   tool call Escape killed with no hook to report it); `enumerate()`'s had
+   an extra correctness check lensd's lacked (cross-referencing against
+   live Zellij sessions, not just the pid). Kept `enumerate()` as the
+   survivor (already in `lanes-cli`, already had a caller) and ported the
+   TUI-interrupt check into it, plus a new `watch()` (file events via
+   `appctl::watch`, with the same 5s liveness-rescan lensd's version had,
+   for a dead process whose file a hook never rewrites). No new crate -
+   see design point 1.
+3. **Not started. Claude chip, dashboard and CLI together:** Lanes Switch
+   computes and publishes it from `drivers::claude` (the dashboard reads
+   it instead of `lanes_claude` from lensd); `lanes-cli`'s
+   `snapshot`/`signals` reads the same module directly for this chip too,
+   not just the dashboard - `lanes cycle` already does (that's what
+   `enumerate()` was for before this plan existed). Not a
    separate later step for the CLI - its `snapshot`/`signals` now hard-
    require a live lensd connection with no fallback (changed this
    session); leaving it on `lanes.sock` through the rest of this migration
@@ -107,11 +127,14 @@ inbox counts; plus the control relations telling sources what to watch
 ## Who does it
 
 A session started here in lanes, with this plan as its brief: the work
-spans lanes, dev-infra (the shared crate) and the lensd repo (its modules
+spans lanes, maybe dev-infra (a shared crate, only if a module actually
+ends up needing one - see "Not decided") and the lensd repo (its modules
 moved out, then archived). Each step above is a stopping point.
 
 ## Not decided
 
-- The shared crate's name and whether it's part of `appctl`.
-- Whether anything besides Lanes needs these facts yet (if not, step 2's
-  crate could start inside lanes and move when a second reader appears).
+- Whether anything besides Lanes needs these facts yet. Resolved for
+  Claude sessions (step 2): nothing else does yet, so it stayed inside
+  `lanes-cli` rather than becoming a new dev-infra crate. Still open for
+  Zellij/WezTerm and the repo reader (steps 4-5) - decide per module, not
+  all at once, the same way.
