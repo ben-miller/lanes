@@ -1,0 +1,8 @@
+# Review policy: CODEOWNERS' syntax, a policy where the owner would be
+# (dev-infra's README, "Review policy"). @policy/protected: committed only
+# with the user's approval (Console's Commit, which asks for Touch ID),
+# never by a plain git commit. Anything else is unprotected. A protected
+# line must protect at least one tracked file: update this file when you
+# move what it names, in the same commit. Check it with: dp review validate
+
+/REVIEW_POLICY    @policy/protected
