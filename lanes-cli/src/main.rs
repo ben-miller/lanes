@@ -521,7 +521,8 @@ fn lanes_snapshot_from_lensd() -> lanes::model::LanewiseSnapshot {
             std::process::exit(1);
         }
     };
-    lanes::lensd::snapshot_from_mirror(&cfg, &mirror)
+    let inbox_counts = lanes::lensd::boards_inbox_counts();
+    lanes::lensd::snapshot_from_mirror(&cfg, &mirror, &inbox_counts)
 }
 
 fn main() {

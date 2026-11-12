@@ -69,6 +69,47 @@ pub fn default_socket() -> PathBuf {
     PathBuf::from(home).join(".local/state/lensd/lanes.sock")
 }
 
+/// Boards' own `inbox_count(project, count)` facts, read directly over its
+/// appctl socket - `project -> count`, straight from the owner, bypassing
+/// lensd's derived `lanes_inbox_count` entirely (PLAN-retire-lensd.md step
+/// 1: the first chip moved off the daemon). One-shot, not a live follow:
+/// every caller already re-reads this on each snapshot (`lanes snapshot`/
+/// `signals`, and switch-ui's polled `get_snapshot`), the same way they
+/// already re-read `Config::load()` fresh each time - no separate watcher
+/// needed. Boards not running, or genuinely having no projects, both just
+/// mean an empty map - `board_signals` already treats "absent" as "no
+/// signal", same as it did reading lensd's mirror.
+pub fn boards_inbox_counts() -> HashMap<String, i64> {
+    let Some(root) = appctl::default_state_root() else {
+        return HashMap::new();
+    };
+    boards_inbox_counts_at(&root)
+}
+
+fn boards_inbox_counts_at(root: &std::path::Path) -> HashMap<String, i64> {
+    let Ok(mut conn) = appctl::client::connect(root, "boards", None) else {
+        return HashMap::new();
+    };
+    let Ok(rows) = conn.subscribe_facts() else {
+        return HashMap::new();
+    };
+    rows.into_iter()
+        .filter(|r| r.relation == "inbox_count")
+        .filter_map(|r| {
+            let mut values = r.values.into_iter();
+            let project = match values.next()? {
+                appctl::facts::FactValue::Str(s) => s,
+                _ => return None,
+            };
+            let count = match values.next()? {
+                appctl::facts::FactValue::Int(n) => n,
+                _ => return None,
+            };
+            Some((project, count))
+        })
+        .collect()
+}
+
 #[derive(Default)]
 struct Shared {
     mirror: Mirror,
@@ -251,18 +292,14 @@ fn claude_signals(m: &Mirror, lane: &str, session: &str) -> Vec<Signal> {
         .collect()
 }
 
-/// `lanes_inbox_count(Lane, Project, Count)` for this lane, if any - a
-/// signal only when the count is nonzero (an empty Inbox is a clean state,
-/// not a problem, same as a clean repo never producing `PendingCommit`).
-/// `None` entirely absent is distinct from `Some(0)` only in that the
-/// caller already knows whether this lane has a Boards target at all
-/// (from config, same as `repo_signals`' presence is driven by scope, not
-/// by what the mirror happens to contain).
-fn board_signals(m: &Mirror, lane: &str, project: &str) -> Vec<Signal> {
-    let count = m
-        .rows("lanes_inbox_count")
-        .find(|r| s(&r[0]) == lane && s(&r[1]) == project)
-        .map(|r| int(&r[2]));
+/// This project's inbox count, if any - a signal only when it's nonzero
+/// (an empty Inbox is a clean state, not a problem, same as a clean repo
+/// never producing `PendingCommit`). Read straight from Boards' own
+/// `inbox_count` facts (`boards_inbox_counts`), not lensd's derived
+/// `lanes_inbox_count` - see PLAN-retire-lensd.md. A project absent from
+/// the map is indistinguishable from a genuine zero here, same as before.
+fn board_signals(inbox_counts: &HashMap<String, i64>, project: &str) -> Vec<Signal> {
+    let count = inbox_counts.get(project).copied();
     match count {
         Some(n) if n > 0 => vec![Signal::new(
             SignalReason::Boards(crate::model::BoardsReason::InboxNonEmpty),
@@ -323,11 +360,14 @@ fn build_signals(m: &Mirror, lane: &str, resolved_path: &str) -> Vec<Signal> {
 }
 
 /// The UI snapshot built from lensd's rows. Lane definitions come from Lanes'
-/// config; signals and live state come from the mirror. Lanes' own policy
-/// (dismissals, disabled sessions, `cyclable`, `visible`, lifecycle) is
-/// applied here, never by lensd.
-pub fn snapshot_from_mirror(cfg: &Config, m: &Mirror) -> LanewiseSnapshot {
-    let lanes = cfg.lanes.iter().map(|lane| lane_from_mirror(lane, m, &cfg.shell_ignored_commands)).collect();
+/// config; signals and live state come from the mirror, except Boards'
+/// inbox counts (`inbox_counts`), read directly from Boards over appctl
+/// (`boards_inbox_counts`) rather than lensd's derived `lanes_inbox_count` -
+/// see PLAN-retire-lensd.md. Lanes' own policy (dismissals, disabled
+/// sessions, `cyclable`, `visible`, lifecycle) is applied here, never by
+/// lensd.
+pub fn snapshot_from_mirror(cfg: &Config, m: &Mirror, inbox_counts: &HashMap<String, i64>) -> LanewiseSnapshot {
+    let lanes = cfg.lanes.iter().map(|lane| lane_from_mirror(lane, m, &cfg.shell_ignored_commands, inbox_counts)).collect();
     LanewiseSnapshot {
         taken_at: chrono::Utc::now().to_rfc3339(),
         lanes,
@@ -364,7 +404,7 @@ pub fn pending_running_commands(cfg: &Config, m: &Mirror) -> Vec<(String, u32, i
         .collect()
 }
 
-fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_commands: &[String]) -> LaneSnapshot {
+fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_commands: &[String], inbox_counts: &HashMap<String, i64>) -> LaneSnapshot {
     let nav_session = lane.scope.iter().find_map(|el| el.zellij_session_name());
     let mut facets: Vec<FacetSnapshot> = lane
         .scope
@@ -390,7 +430,7 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_command
     facets.extend(lane.targets.iter().map(|t| FacetSnapshot::Target { driver: t.driver.name().to_string() }));
     facets.extend(lane.targets.iter().find_map(|t| match &t.driver {
         crate::model::TargetDriver::Boards { project } => {
-            Some(FacetSnapshot::Board { project: project.clone(), signals: board_signals(m, &lane.id, project) })
+            Some(FacetSnapshot::Board { project: project.clone(), signals: board_signals(inbox_counts, project) })
         }
         _ => None,
     }));
@@ -523,6 +563,44 @@ mod tests {
 
     fn row(rel: &str, values: Value) -> Value {
         json!({"relation": rel, "values": values})
+    }
+
+    #[test]
+    fn boards_inbox_counts_at_reads_a_real_boards_instances_facts() {
+        // Short /tmp path, not std::env::temp_dir()'s long /var/folders/...
+        // one - macOS caps unix socket paths at ~104 bytes (same reason
+        // boards' own appctl test uses a short /tmp path).
+        let state = std::path::PathBuf::from(format!("/tmp/lic-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        let handle = appctl::start(appctl::config!("boards").state_dir(&state).facts(&[("inbox_count", &["project", "count"])])).expect("start appctl");
+        handle
+            .facts()
+            .replace("inbox_count", [vec!["Infra".into(), 3i64.into()], vec!["Lanes".into(), 0i64.into()]])
+            .unwrap();
+
+        // The facts server applies a replace asynchronously; poll briefly
+        // rather than racing it (same pattern other appctl-backed tests in
+        // this codebase use).
+        let mut counts = HashMap::new();
+        for _ in 0..50 {
+            counts = boards_inbox_counts_at(&state);
+            if !counts.is_empty() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        assert_eq!(counts.get("Infra"), Some(&3));
+        assert_eq!(counts.get("Lanes"), Some(&0));
+
+        handle.shutdown();
+        let _ = std::fs::remove_dir_all(&state);
+    }
+
+    #[test]
+    fn boards_inbox_counts_at_is_empty_when_boards_is_not_running() {
+        let state = std::env::temp_dir().join(format!("lanes-inbox-counts-test-absent-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&state);
+        assert_eq!(boards_inbox_counts_at(&state), HashMap::new());
     }
 
     #[test]
@@ -728,7 +806,7 @@ mod tests {
 
     #[test]
     fn a_reachable_lane_with_an_idle_claude_has_a_ready_cyclable_signal_in_screen_order() {
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()));
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &HashMap::new());
         let (running, panes, signals) = terminal(&snap);
         assert!(*running);
         assert_eq!(panes.len(), 2);
@@ -753,7 +831,7 @@ mod tests {
     fn a_lane_without_a_wezterm_tab_is_session_missing_and_not_cyclable() {
         let mut rows: Vec<Value> = live_rows().into_iter().filter(|r| r["relation"] != "lanes_tab").collect();
         rows.push(row("lanes_session_missing", json!(["l"])));
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
         let (_, _, signals) = terminal(&snap);
         assert!(!snap.lanes[0].cyclable);
         assert!(signals.iter().any(|sg| matches!(sg.reason, SignalReason::Lanes(LanesReason::SessionMissing)) && sg.visible));
@@ -770,7 +848,7 @@ mod tests {
             row("lanes_tab", json!(["l", 4])),
             row("lanes_session_not_running", json!(["l", "z"])),
         ];
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
         let (running, panes, signals) = terminal(&snap);
         assert!(!*running && panes.is_empty());
         assert!(signals.iter().any(|sg| matches!(sg.reason, SignalReason::Lanes(LanesReason::SessionNotRunning))));
@@ -778,9 +856,8 @@ mod tests {
 
     #[test]
     fn a_nonempty_inbox_count_becomes_a_boards_signal() {
-        let mut rows = live_rows();
-        rows.push(row("lanes_inbox_count", json!(["l", "Boards", 3])));
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(rows));
+        let counts = HashMap::from([("Boards".to_string(), 3)]);
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &counts);
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
         assert_eq!(signals.len(), 1);
@@ -790,9 +867,8 @@ mod tests {
 
     #[test]
     fn a_zero_inbox_count_produces_no_signal() {
-        let mut rows = live_rows();
-        rows.push(row("lanes_inbox_count", json!(["l", "Boards", 0])));
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(rows));
+        let counts = HashMap::from([("Boards".to_string(), 0)]);
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &counts);
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
         assert!(signals.is_empty());
@@ -800,7 +876,7 @@ mod tests {
 
     #[test]
     fn no_inbox_count_row_at_all_still_yields_the_board_facet_with_no_signal() {
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()));
+        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &HashMap::new());
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
         assert!(signals.is_empty());
@@ -808,7 +884,7 @@ mod tests {
 
     #[test]
     fn a_lane_with_no_boards_target_has_no_board_facet() {
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()));
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &HashMap::new());
         assert!(!snap.lanes[0].facets.iter().any(|f| matches!(f, FacetSnapshot::Board { .. })));
     }
 
@@ -827,7 +903,7 @@ mod tests {
             row("lanes_command", json!(["l", "z", 7, "running", "2026-01-01T00:00:00Z"])),
             row("lanes_command_cmd", json!(["l", "z", 7, "vite"])),
         ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
         let (_, _, signals) = terminal(&snap);
         let cmds: Vec<_> = signals.iter().filter(|sg| sg.kind() == crate::model::SignalKind::Command).collect();
         assert_eq!(cmds.len(), 2);
@@ -844,7 +920,7 @@ mod tests {
         let mut rows = live_rows();
         let just_started = chrono::Utc::now().to_rfc3339();
         rows.extend([row("lanes_command", json!(["l", "z", 7, "running", just_started]))]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
         let (_, _, signals) = terminal(&snap);
         assert!(
             !signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command),
@@ -869,7 +945,7 @@ mod tests {
         ]);
         let mut cfg = cfg_with(lane());
         cfg.shell_ignored_commands = vec!["claude*".to_string()];
-        let snap = snapshot_from_mirror(&cfg, &mirror(rows));
+        let snap = snapshot_from_mirror(&cfg, &mirror(rows), &HashMap::new());
         let (_, _, signals) = terminal(&snap);
         assert!(!signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command));
     }
@@ -928,7 +1004,7 @@ mod tests {
             row("lanes_repo_branch", json!(["l", "infra", "feat", "main", "/p/infra"])),
             row("lanes_repo_dirty", json!(["other", "x", "/p/infra"])),
         ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
         let FacetSnapshot::Repo { path, signals } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
         assert_eq!(path, "/p/infra");
         assert_eq!(signals.len(), 2);
@@ -949,7 +1025,7 @@ mod tests {
             row("lanes_build_changed", json!(["other", "/p/infra", "x", "dev-main", "/p/infra", ""])),
             row("lanes_build_rebuilt", json!(["l", "/p/elsewhere", "y", "installed"])),
         ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows));
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &HashMap::new());
         let FacetSnapshot::Repo { signals, .. } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
         let builds: Vec<&Signal> = signals.iter().filter(|s| s.kind() == crate::model::SignalKind::Build).collect();
         assert_eq!(builds.len(), 2, "{:?}", builds.iter().map(|s| &s.detail).collect::<Vec<_>>());
