@@ -1289,6 +1289,7 @@ fn activate_via_appctl(
     // failure here (e.g. two windows) just means falling back to the old
     // raise-then-place timing for this one switch, not a hard error.
     if let Some((monitor, position)) = pre_place {
+        let t = std::time::Instant::now();
         let mut placement = serde_json::Map::new();
         placement.insert("pid".to_string(), serde_json::json!(pid));
         placement.insert("monitor".to_string(), serde_json::json!(monitor));
@@ -1296,10 +1297,17 @@ fn activate_via_appctl(
         for warning in run_lanes_wm_apply(&[serde_json::Value::Object(placement)]) {
             eprintln!("warning: {app} pre-placement: {warning}");
         }
+        // Timed on its own: lanes-wm goes through the accessibility API,
+        // which can stall on another app that's slow to answer it.
+        logging::perf("focus.appctl_pre_place", &format!("app={app} elapsed_us={}", t.elapsed().as_micros()));
     }
 
     for (name, args) in requests {
-        match conn.request(name, args) {
+        let t = std::time::Instant::now();
+        let result = conn.request(name, args);
+        // Each request timed on its own: the app's own handling of it.
+        logging::perf("focus.appctl_request", &format!("app={app} request={name} elapsed_us={}", t.elapsed().as_micros()));
+        match result {
             Ok(_) => {}
             Err(appctl::client::RequestError::App(msg)) => return AppctlOutcome::AppError(msg),
             Err(appctl::client::RequestError::Io(msg)) => {
