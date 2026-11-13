@@ -164,10 +164,37 @@ inbox counts; plus the control relations telling sources what to watch
    (clippy flagged 8 positional args; the struct is also just clearer).
    Verified live: correct cyclable/signal output across every current
    lane.
-5. **Repos** (branch, dirty) from file events and a git reader; **shell
-   commands** from the files the shell hook writes; **builds** by
-   following the apps' facts directly - dashboard and CLI together, same
-   as above.
+5. **Two of three done; builds not started.**
+   - **Shell commands: done.** Another case like steps 2/4a, not a new
+     port: `lanes-cli` already had `drivers::shell::enumerate()` (reading
+     the same files the shell hook writes, `CommandRecord` and all - its
+     own doc comment already said the live dashboard read these via
+     lensd instead, which is exactly the swap made here). `command_records`
+     now filters an already-fetched `Vec<CommandRecord>` by session
+     instead of querying `lanes_command`/`lanes_command_cmd`/
+     `lanes_command_ended`/`lanes_command_exit`. `int`/`rows_for`/`by_pane`
+     (the Mirror-row helpers only these and the pane-list code used)
+     were fully dead after this and step 4a, so removed.
+   - **Repos (branch, dirty): done, as a reader in `lanes-cli` itself, not
+     a new crate.** No existing duplicate (unlike shell/claude/zellij) -
+     the closest thing was `dev-infra`'s `dp::sc` (used by Console),
+     which does cover this and more, but pulling in the whole `dp` crate
+     for one slice would mean pulling in its unrelated dependencies too
+     (`rusqlite`, `xtask`, ...) just to parse `git status --porcelain=v2`
+     - a packaging mismatch, not a reason to accept the weight or to
+     duplicate the logic wholesale into a new crate either. Landed as:
+     new `drivers::git::status(path)` (dirty + current branch, via one
+     `git status --porcelain=v2 --branch` call) plus reuse, not
+     duplication, of `cmd::doctor`'s existing `cached_origin_head` for
+     the default branch (moved into `drivers::git` so both the dashboard
+     and doctor's own diagnostic share the one reader - doctor's
+     `remote_origin_head`/`parse_ls_remote_symref` stayed in `doctor.rs`,
+     since that slower, live network check is doctor-specific).
+     `repo_signals` reads an already-fetched `HashMap<path, RepoStatus>`
+     (`repo_status_by_path`) instead of `lanes_repo_dirty`/
+     `lanes_repo_branch`.
+   - **Builds: not started.** Still reads `lanes_build_changed`/
+     `lanes_build_rebuilt` from the Mirror.
 6. **Switch lensd off:** its `process-compose.yaml` (the dev daemon's own
    `cargo watch` rebuild/restart supervisor) and `lensd.toml`, `lanes.dl`,
    Lanes' `lensd.rs` client. The repo archived, its README saying where

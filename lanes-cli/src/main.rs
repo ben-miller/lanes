@@ -526,12 +526,16 @@ fn lanes_snapshot_from_lensd() -> lanes::model::LanewiseSnapshot {
     let running_sessions = lanes::drivers::zellij::running_sessions();
     let panes_by_session = lanes::lensd::panes_by_session(&cfg, &running_sessions);
     let tabbed_sessions = lanes::drivers::wezterm::sessions_with_tabs();
+    let shell_records = lanes::drivers::shell::enumerate();
+    let repo_status = lanes::lensd::repo_status_by_path(&cfg);
     let live = lanes::lensd::LiveData {
         inbox_counts: &inbox_counts,
         claude_sessions: &claude_sessions,
         running_sessions: &running_sessions,
         panes_by_session: &panes_by_session,
         tabbed_sessions: &tabbed_sessions,
+        shell_records: &shell_records,
+        repo_status: &repo_status,
     };
     lanes::lensd::snapshot_from_mirror(&cfg, &mirror, &live)
 }

@@ -405,23 +405,12 @@ fn check_git_default_branches(cfg: &lanes::config::Config) -> Check {
 /// that turns out to actually hang in practice), or the cached and actual
 /// values simply agree. Only a confirmed, live mismatch returns `Some`.
 fn check_one_repo_default_branch(path: &str) -> Option<String> {
-    let cached = cached_origin_head(path)?;
+    let cached = lanes::drivers::git::cached_origin_head(path)?;
     let actual = remote_origin_head(path)?;
     if cached == actual {
         return None;
     }
     Some(format!("{path} (cached \"{cached}\", remote says \"{actual}\")"))
-}
-
-fn cached_origin_head(path: &str) -> Option<String> {
-    let out = Command::new("git")
-        .args(["-C", path, "symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD"])
-        .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    String::from_utf8_lossy(&out.stdout).trim().strip_prefix("origin/").map(str::to_string)
 }
 
 fn remote_origin_head(path: &str) -> Option<String> {

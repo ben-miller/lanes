@@ -226,20 +226,6 @@ pub fn read_snapshot(path: &std::path::Path, timeout: Duration) -> std::io::Resu
     Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "socket closed before a snapshot"))
 }
 
-fn int(v: &Value) -> i64 {
-    v.as_i64().unwrap_or(-1)
-}
-
-/// Rows of `rel` whose first column is `lane` and second is `session`.
-fn rows_for<'a>(m: &'a Mirror, rel: &str, lane: &'a str, session: &'a str) -> impl Iterator<Item = &'a Row> {
-    m.rows(rel).filter(move |r| s(&r[0]) == lane && s(&r[1]) == session)
-}
-
-/// `(pane) -> value` for one of the `lanes_pane_*` / `lanes_command_*` side relations.
-fn by_pane<'a>(m: &'a Mirror, rel: &str, lane: &'a str, session: &'a str) -> HashMap<i64, &'a Value> {
-    rows_for(m, rel, lane, session).map(|r| (int(&r[2]), &r[3])).collect()
-}
-
 /// The dashboard's pane list for one zellij session - read live from
 /// `drivers::zellij::panes` (PLAN-retire-lensd.md step 4a), not lensd's
 /// derived `lanes_pane`/`lanes_pane_cmd`/`lanes_pane_cwd`/
@@ -263,27 +249,14 @@ fn panes_from_zellij(panes: &[crate::drivers::zellij::LivePane], any_claude_need
         .collect()
 }
 
-fn command_records(m: &Mirror, lane: &str, session: &str) -> Vec<CommandRecord> {
-    let cmds = by_pane(m, "lanes_command_cmd", lane, session);
-    let ended = by_pane(m, "lanes_command_ended", lane, session);
-    let exits = by_pane(m, "lanes_command_exit", lane, session);
-    rows_for(m, "lanes_command", lane, session)
-        .map(|r| {
-            let pane = int(&r[2]);
-            CommandRecord {
-                v: 1,
-                shell: None,
-                session: session.to_string(),
-                pane: pane.max(0) as u32,
-                argv0: None,
-                cmd: cmds.get(&pane).map(|v| s(v).to_string()),
-                started_at: Some(s(&r[4]).to_string()),
-                state: s(&r[3]).to_string(),
-                ended_at: ended.get(&pane).map(|v| s(v).to_string()),
-                exit_code: exits.get(&pane).and_then(|v| v.as_i64()).map(|c| c as i32),
-            }
-        })
-        .collect()
+/// This session's command records, from an already-fetched
+/// `drivers::shell::enumerate()` list rather than lensd's derived
+/// `lanes_command`/`lanes_command_cmd`/`lanes_command_ended`/
+/// `lanes_command_exit` relations (PLAN-retire-lensd.md step 5). The shell
+/// hook writes these files directly - lensd was always just relaying
+/// Lanes' own data back to it.
+fn command_records(records: &[CommandRecord], session: &str) -> Vec<CommandRecord> {
+    records.iter().filter(|r| r.session == session).cloned().collect()
 }
 
 /// Claude-session signals for one zellij session - read from
@@ -338,18 +311,30 @@ fn board_signals(inbox_counts: &HashMap<String, i64>, project: &str) -> Vec<Sign
     }
 }
 
-fn repo_signals(m: &Mirror, lane: &str, resolved_path: &str, raw_path: &str, session: Option<&str>) -> Vec<Signal> {
+/// Dirty/non-default-branch signals for one repo - read from an already-
+/// fetched `drivers::git::status` (via `repo_status`, keyed by resolved
+/// path) rather than lensd's derived `lanes_repo_dirty`/`lanes_repo_branch`
+/// relations (PLAN-retire-lensd.md step 5).
+fn repo_signals(
+    repo_status: &HashMap<String, crate::drivers::git::RepoStatus>,
+    resolved_path: &str,
+    raw_path: &str,
+    session: Option<&str>,
+) -> Vec<Signal> {
     let action = || session.map(|session| SignalAction::FocusRepoPane { session: session.to_string(), path: raw_path.to_string() });
     let mut out = Vec::new();
-    if m.rows("lanes_repo_dirty").any(|r| s(&r[0]) == lane && s(&r[2]) == resolved_path) {
+    let Some(status) = repo_status.get(resolved_path) else { return out };
+    if status.dirty {
         out.push(Signal::new(SignalReason::Repo(RepoReason::PendingCommit), action(), None));
     }
-    if let Some(r) = m.rows("lanes_repo_branch").find(|r| s(&r[0]) == lane && s(&r[4]) == resolved_path) {
-        out.push(Signal::new(
-            SignalReason::Repo(RepoReason::NonDefaultBranch),
-            action(),
-            Some(format!("on \"{}\", default is \"{}\"", s(&r[2]), s(&r[3]))),
-        ));
+    if let (Some(current), Some(default)) = (&status.branch, &status.default_branch) {
+        if current != default {
+            out.push(Signal::new(
+                SignalReason::Repo(RepoReason::NonDefaultBranch),
+                action(),
+                Some(format!("on \"{current}\", default is \"{default}\"")),
+            ));
+        }
     }
     out
 }
@@ -406,6 +391,27 @@ pub struct LiveData<'a> {
     pub running_sessions: &'a HashSet<String>,
     pub panes_by_session: &'a HashMap<String, Vec<crate::drivers::zellij::LivePane>>,
     pub tabbed_sessions: &'a HashSet<String>,
+    pub shell_records: &'a [CommandRecord],
+    pub repo_status: &'a HashMap<String, crate::drivers::git::RepoStatus>,
+}
+
+/// Every lane repo's git status, fetched once per snapshot (not once per
+/// lane, and not once per *target* of a lane that lists the same repo
+/// twice) via `drivers::git::status` - the "fetch once up top" half of
+/// `LiveData::repo_status` (PLAN-retire-lensd.md step 5).
+pub fn repo_status_by_path(cfg: &Config) -> HashMap<String, crate::drivers::git::RepoStatus> {
+    cfg.lanes
+        .iter()
+        .flat_map(|lane| lane.scope.iter())
+        .filter_map(|el| el.repo_path())
+        .map(resolve_path)
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|path| {
+            let status = crate::drivers::git::status(&path);
+            (path, status)
+        })
+        .collect()
 }
 
 /// The UI snapshot built from lensd's rows. Lane definitions come from
@@ -434,12 +440,12 @@ pub fn snapshot_from_mirror(cfg: &Config, m: &Mirror, live: &LiveData) -> Lanewi
 /// `seconds_remaining` is clamped to 0 defensively but should never
 /// actually be negative, since this is the same elapsed-time check
 /// `command_signal` itself uses to decide visibility.
-pub fn pending_running_commands(cfg: &Config, m: &Mirror) -> Vec<(String, u32, i64)> {
+pub fn pending_running_commands(cfg: &Config, shell_records: &[CommandRecord]) -> Vec<(String, u32, i64)> {
     let now: chrono::DateTime<chrono::FixedOffset> = chrono::Utc::now().into();
     cfg.lanes
         .iter()
-        .filter_map(|lane| Some((lane.id.as_str(), lane.terminal_session()?)))
-        .flat_map(|(lane_id, session)| command_records(m, lane_id, session))
+        .filter_map(|lane| lane.terminal_session())
+        .flat_map(|session| command_records(shell_records, session))
         .filter(|rec| rec.state == "running")
         .filter(|rec| !crate::is_shell_signal_ignored(rec.cmd.as_deref(), rec.argv0.as_deref(), &cfg.shell_ignored_commands))
         .filter_map(|rec| {
@@ -471,7 +477,7 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_command
             } else {
                 let raw = el.repo_path().unwrap_or_default();
                 let resolved = resolve_path(raw);
-                let mut signals = repo_signals(m, &lane.id, &resolved, raw, nav_session);
+                let mut signals = repo_signals(live.repo_status, &resolved, raw, nav_session);
                 signals.extend(build_signals(m, &lane.id, &resolved));
                 FacetSnapshot::Repo { path: raw.to_string(), signals }
             }
@@ -516,7 +522,7 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_command
                 Some(format!("expected zellij session \"{session}\" to be running")),
             ));
         }
-        for rec in command_records(m, &lane.id, session) {
+        for rec in command_records(live.shell_records, session) {
             if crate::state::is_signal_dismissed(&rec.occurrence_id()) {
                 continue;
             }
@@ -860,6 +866,24 @@ mod tests {
         crate::drivers::zellij::LivePane { id, focused, cwd: cwd.map(str::to_string), command: command.map(str::to_string) }
     }
 
+    /// A `drivers::shell::CommandRecord` for tests - command records are no
+    /// longer Mirror rows either (PLAN-retire-lensd.md step 5).
+    #[allow(clippy::too_many_arguments)]
+    fn cmd_record(session: &str, pane: u32, state: &str, started_at: &str, cmd: Option<&str>, ended_at: Option<&str>, exit_code: Option<i32>) -> CommandRecord {
+        CommandRecord {
+            v: 1,
+            shell: None,
+            session: session.to_string(),
+            pane,
+            argv0: None,
+            cmd: cmd.map(str::to_string),
+            started_at: Some(started_at.to_string()),
+            state: state.to_string(),
+            ended_at: ended_at.map(str::to_string),
+            exit_code,
+        }
+    }
+
     fn terminal(snap: &LanewiseSnapshot) -> (&bool, &Vec<PaneSnapshot>, &Vec<Signal>) {
         match &snap.lanes[0].facets[0] {
             FacetSnapshot::Terminal { running, panes, signals, .. } => (running, panes, signals),
@@ -882,6 +906,8 @@ mod tests {
             running_sessions: &running,
             panes_by_session: &panes_by_session,
             tabbed_sessions: &tabbed,
+            shell_records: &[],
+            repo_status: &HashMap::new(),
         };
         let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &live);
         let (running, panes, signals) = terminal(&snap);
@@ -918,6 +944,8 @@ mod tests {
             running_sessions: &running,
             panes_by_session: &empty_panes,
             tabbed_sessions: &HashSet::new(),
+            shell_records: &[],
+            repo_status: &HashMap::new(),
         };
         let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &live);
         let (_, _, signals) = terminal(&snap);
@@ -942,6 +970,8 @@ mod tests {
             running_sessions: &HashSet::new(),
             panes_by_session: &HashMap::new(),
             tabbed_sessions: &HashSet::new(),
+            shell_records: &[],
+            repo_status: &HashMap::new(),
         });
         let (running, panes, signals) = terminal(&snap);
         assert!(!*running && panes.is_empty());
@@ -957,6 +987,8 @@ mod tests {
             running_sessions: &HashSet::new(),
             panes_by_session: &HashMap::new(),
             tabbed_sessions: &HashSet::new(),
+            shell_records: &[],
+            repo_status: &HashMap::new(),
         });
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
@@ -974,6 +1006,8 @@ mod tests {
             running_sessions: &HashSet::new(),
             panes_by_session: &HashMap::new(),
             tabbed_sessions: &HashSet::new(),
+            shell_records: &[],
+            repo_status: &HashMap::new(),
         });
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
@@ -988,6 +1022,8 @@ mod tests {
             running_sessions: &HashSet::new(),
             panes_by_session: &HashMap::new(),
             tabbed_sessions: &HashSet::new(),
+            shell_records: &[],
+            repo_status: &HashMap::new(),
         });
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
@@ -1002,31 +1038,30 @@ mod tests {
             running_sessions: &HashSet::new(),
             panes_by_session: &HashMap::new(),
             tabbed_sessions: &HashSet::new(),
+            shell_records: &[],
+            repo_status: &HashMap::new(),
         });
         assert!(!snap.lanes[0].facets.iter().any(|f| matches!(f, FacetSnapshot::Board { .. })));
     }
 
     #[test]
     fn finished_commands_carry_their_detail_and_dismiss_id() {
-        let mut rows = live_rows();
-        rows.extend([
-            row("lanes_command", json!(["l", "z", 3, "failed", "2026-01-01T00:00:00Z"])),
-            row("lanes_command_cmd", json!(["l", "z", 3, "cargo test"])),
-            row("lanes_command_exit", json!(["l", "z", 3, 101])),
-            row("lanes_command_ended", json!(["l", "z", 3, "2026-01-01T00:00:07Z"])),
+        let records = vec![
+            cmd_record("z", 3, "failed", "2026-01-01T00:00:00Z", Some("cargo test"), Some("2026-01-01T00:00:07Z"), Some(101)),
             // Long since past shell_notice_secs() (real time has moved on
             // from this fixed timestamp), so this one does become a signal
             // too - see running_command_only_becomes_a_signal_past_the_
             // notice_floor for the still-fresh case.
-            row("lanes_command", json!(["l", "z", 7, "running", "2026-01-01T00:00:00Z"])),
-            row("lanes_command_cmd", json!(["l", "z", 7, "vite"])),
-        ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &LiveData {
+            cmd_record("z", 7, "running", "2026-01-01T00:00:00Z", Some("vite"), None, None),
+        ];
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
             panes_by_session: &HashMap::new(),
             tabbed_sessions: &HashSet::new(),
+            shell_records: &records,
+            repo_status: &HashMap::new(),
         });
         let (_, _, signals) = terminal(&snap);
         let cmds: Vec<_> = signals.iter().filter(|sg| sg.kind() == crate::model::SignalKind::Command).collect();
@@ -1041,15 +1076,16 @@ mod tests {
 
     #[test]
     fn running_command_only_becomes_a_signal_past_the_notice_floor() {
-        let mut rows = live_rows();
         let just_started = chrono::Utc::now().to_rfc3339();
-        rows.extend([row("lanes_command", json!(["l", "z", 7, "running", just_started]))]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &LiveData {
+        let records = vec![cmd_record("z", 7, "running", &just_started, None, None, None)];
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
             panes_by_session: &HashMap::new(),
             tabbed_sessions: &HashSet::new(),
+            shell_records: &records,
+            repo_status: &HashMap::new(),
         });
         let (_, _, signals) = terminal(&snap);
         assert!(
@@ -1066,21 +1102,18 @@ mod tests {
         // is_shell_signal_ignored entirely - a config entry excluding a
         // command worked for `lanes snapshot` (gather_lanes) but not for
         // the running switch-ui app, which only ever calls this path.
-        let mut rows = live_rows();
-        rows.extend([
-            row("lanes_command", json!(["l", "z", 7, "failed", "2026-01-01T00:00:00Z"])),
-            row("lanes_command_cmd", json!(["l", "z", 7, "claude --resume boards"])),
-            row("lanes_command_exit", json!(["l", "z", 7, 1])),
-            row("lanes_command_ended", json!(["l", "z", 7, "2026-01-01T00:00:07Z"])),
-        ]);
+        let records =
+            vec![cmd_record("z", 7, "failed", "2026-01-01T00:00:00Z", Some("claude --resume boards"), Some("2026-01-01T00:00:07Z"), Some(1))];
         let mut cfg = cfg_with(lane());
         cfg.shell_ignored_commands = vec!["claude*".to_string()];
-        let snap = snapshot_from_mirror(&cfg, &mirror(rows), &LiveData {
+        let snap = snapshot_from_mirror(&cfg, &mirror(live_rows()), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
             panes_by_session: &HashMap::new(),
             tabbed_sessions: &HashSet::new(),
+            shell_records: &records,
+            repo_status: &HashMap::new(),
         });
         let (_, _, signals) = terminal(&snap);
         assert!(!signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command));
@@ -1088,24 +1121,19 @@ mod tests {
 
     #[test]
     fn pending_running_commands_excludes_an_ignored_command_even_under_the_floor() {
-        let mut rows = live_rows();
         let just_started = chrono::Utc::now().to_rfc3339();
-        rows.extend([
-            row("lanes_command", json!(["l", "z", 7, "running", just_started])),
-            row("lanes_command_cmd", json!(["l", "z", 7, "claude --resume boards"])),
-        ]);
+        let records = vec![cmd_record("z", 7, "running", &just_started, Some("claude --resume boards"), None, None)];
         let mut cfg = cfg_with(lane());
         cfg.shell_ignored_commands = vec!["claude*".to_string()];
-        assert!(pending_running_commands(&cfg, &mirror(rows)).is_empty());
+        assert!(pending_running_commands(&cfg, &records).is_empty());
     }
 
     #[test]
     fn pending_running_commands_finds_fresh_running_records_under_the_floor() {
-        let mut rows = live_rows();
         let just_started = chrono::Utc::now().to_rfc3339();
-        rows.extend([row("lanes_command", json!(["l", "z", 7, "running", just_started]))]);
+        let records = vec![cmd_record("z", 7, "running", &just_started, None, None, None)];
         let cfg = cfg_with(lane());
-        let pending = pending_running_commands(&cfg, &mirror(rows));
+        let pending = pending_running_commands(&cfg, &records);
         assert_eq!(pending.len(), 1);
         let (session, pane, remaining) = &pending[0];
         assert_eq!(session, "z");
@@ -1115,37 +1143,35 @@ mod tests {
 
     #[test]
     fn pending_running_commands_excludes_one_already_past_the_floor() {
-        let mut rows = live_rows();
         // Started well over shell_notice_secs() ago - already a real
         // signal, not pending.
-        rows.extend([row("lanes_command", json!(["l", "z", 7, "running", "2026-01-01T00:00:00Z"]))]);
+        let records = vec![cmd_record("z", 7, "running", "2026-01-01T00:00:00Z", None, None, None)];
         let cfg = cfg_with(lane());
-        assert!(pending_running_commands(&cfg, &mirror(rows)).is_empty());
+        assert!(pending_running_commands(&cfg, &records).is_empty());
     }
 
     #[test]
     fn pending_running_commands_ignores_done_and_failed_records() {
-        let mut rows = live_rows();
         let just_started = chrono::Utc::now().to_rfc3339();
-        rows.extend([row("lanes_command", json!(["l", "z", 7, "done", just_started]))]);
+        let records = vec![cmd_record("z", 7, "done", &just_started, None, None, None)];
         let cfg = cfg_with(lane());
-        assert!(pending_running_commands(&cfg, &mirror(rows)).is_empty());
+        assert!(pending_running_commands(&cfg, &records).is_empty());
     }
 
     #[test]
     fn repo_facets_get_dirty_and_branch_signals_that_focus_the_lanes_session() {
-        let mut rows = live_rows();
-        rows.extend([
-            row("lanes_repo_dirty", json!(["l", "infra", "/p/infra"])),
-            row("lanes_repo_branch", json!(["l", "infra", "feat", "main", "/p/infra"])),
-            row("lanes_repo_dirty", json!(["other", "x", "/p/infra"])),
-        ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &LiveData {
+        let repo_status = HashMap::from([(
+            "/p/infra".to_string(),
+            crate::drivers::git::RepoStatus { dirty: true, branch: Some("feat".to_string()), default_branch: Some("main".to_string()) },
+        )]);
+        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
             panes_by_session: &HashMap::new(),
             tabbed_sessions: &HashSet::new(),
+            shell_records: &[],
+            repo_status: &repo_status,
         });
         let FacetSnapshot::Repo { path, signals } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
         assert_eq!(path, "/p/infra");
@@ -1173,6 +1199,8 @@ mod tests {
             running_sessions: &HashSet::new(),
             panes_by_session: &HashMap::new(),
             tabbed_sessions: &HashSet::new(),
+            shell_records: &[],
+            repo_status: &HashMap::new(),
         });
         let FacetSnapshot::Repo { signals, .. } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
         let builds: Vec<&Signal> = signals.iter().filter(|s| s.kind() == crate::model::SignalKind::Build).collect();
