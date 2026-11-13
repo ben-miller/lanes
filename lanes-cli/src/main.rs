@@ -68,6 +68,16 @@ enum Command {
         name: bool,
     },
 
+    /// Print the id of the lane whose Zellij session is SESSION (its
+    /// `zellij_session` scope) - the lane a process in that session, an
+    /// agent included, belongs to, as opposed to `current`'s focused lane
+    /// (the one you're looking at). The same lookup Lanes itself uses to
+    /// place Claude sessions (Config::lane_for_session), so other tools ask
+    /// here instead of reading the scope format themselves.
+    LaneOf {
+        session: String,
+    },
+
     /// Activate whichever target the currently focused lane has for the
     /// given driver (e.g. "obsidian") - for a context-
     /// aware hotkey, not lane switching (that's the unrelated `activate`,
@@ -567,6 +577,17 @@ fn main() {
                 Some(id) => println!("{}", id),
                 None => {
                     eprintln!("no focused lane");
+                    std::process::exit(1);
+                }
+            }
+        }
+
+        Command::LaneOf { session } => {
+            let cfg = lanes::config::Config::load();
+            match cfg.lane_for_session(&session) {
+                Some(lane) => println!("{}", lane.id),
+                None => {
+                    eprintln!("no lane has Zellij session '{}'", session);
                     std::process::exit(1);
                 }
             }
