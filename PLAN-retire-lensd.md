@@ -164,7 +164,7 @@ inbox counts; plus the control relations telling sources what to watch
    (clippy flagged 8 positional args; the struct is also just clearer).
    Verified live: correct cyclable/signal output across every current
    lane.
-5. **Two of three done; builds not started.**
+5. **Done, all three.**
    - **Shell commands: done.** Another case like steps 2/4a, not a new
      port: `lanes-cli` already had `drivers::shell::enumerate()` (reading
      the same files the shell hook writes, `CommandRecord` and all - its
@@ -193,12 +193,40 @@ inbox counts; plus the control relations telling sources what to watch
      `repo_signals` reads an already-fetched `HashMap<path, RepoStatus>`
      (`repo_status_by_path`) instead of `lanes_repo_dirty`/
      `lanes_repo_branch`.
-   - **Builds: not started.** Still reads `lanes_build_changed`/
-     `lanes_build_rebuilt` from the Mirror.
-6. **Switch lensd off:** its `process-compose.yaml` (the dev daemon's own
-   `cargo watch` rebuild/restart supervisor) and `lensd.toml`, `lanes.dl`,
-   Lanes' `lensd.rs` client. The repo archived, its README saying where
-   each part went.
+   - **Builds: done.** `lensd::build_checks_by_repo` calls
+     `appctl::build::check()` directly per running instance (already
+     available over its existing `hello`, via `appctl::client::list` - no
+     extra round trip), grouped by owning repo into
+     `LiveData::build_checks`. `build_signals` reads that instead of
+     `lanes_build_changed`/`lanes_build_rebuilt`; one chip per instance
+     and reason, same as before (`appctl::build::Check`'s own
+     `Source::Changed` already groups every changed source per instance,
+     so no separate grouping step was needed).
+6. **Done.** `lensd.rs`'s `Mirror`/`Client`/`Shared`/`stream_into`/
+   `read_snapshot`/`default_socket`/`keys_from_mirror`/`watched_repos`/
+   `claude_reason` - all fully dead (the last reader, `lane_from_mirror`'s
+   `m: &Mirror` parameter, had already stopped being read partway through
+   step 5) - deleted; `snapshot_from_mirror`/`lane_from_mirror` renamed to
+   `live_snapshot`/`lane_snapshot`, no daemon connection left anywhere.
+   `main.rs`'s `lanes_snapshot_from_lensd` (renamed `lanes_live_snapshot`)
+   and `ui/src-tauri`'s `get_snapshot` both dropped their socket/`Client`
+   state entirely - the latter's "lensd not connected" branch and the
+   frontend's matching `lensdDown` UI state went with it, since there is
+   no longer a daemon that could be disconnected. The dashboard's 5s
+   WezTerm-tab/Zellij-session poll (previously lensd's own
+   `zellij_poll_secs`-driven push into the UI's `Client`) is now an
+   in-process polling thread in `ui/src-tauri` emitting the same
+   `sessions-changed` event on the same cadence - same "supported as it
+   already was" behavior, no daemon needed to get it. `dev-infra/rules/
+   lanes.dl` deleted (confirmed dead - nothing subscribes to `lanes.sock`
+   anymore) and `rules/README.md` rewritten to say where each relation
+   went; the lensd process stopped (`dp ps down lensd`) and its own
+   README given an "archived" banner at the top pointing to where every
+   module's logic now lives, with the rest kept as a design record rather
+   than deleted. `process-compose.yaml`/`lensd.toml` left in place in the
+   lensd repo (nothing left to invoke them, so nothing to delete) rather
+   than removed - archiving meant stopping and redirecting, not erasing
+   the repo's history.
 
 ## Who does it
 

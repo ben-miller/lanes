@@ -17,17 +17,15 @@
   let panelMaxHeight = 560;
 
   let snapshot = null;
-  // lensd is the only source of signals; while its socket is down there is
-  // nothing to show but this state, and it clears itself on reconnect.
-  let lensdDown = false;
   let activeSignal = null;
   let dashboardEl;
 
-  // get_snapshot() reads lensd's live mirror, so it is cheap, but refresh()
-  // is triggered by every "sessions-changed" event (each lensd diff, plus
-  // config and state.kdl changes), which can arrive in bursts. At most one
-  // refresh runs at a time; a trigger that arrives mid-refresh is coalesced
-  // into a single follow-up rather than dropped, so nothing is missed.
+  // get_snapshot() reads every signal source directly now
+  // (PLAN-retire-lensd.md step 6), but refresh() is triggered by every
+  // "sessions-changed" event (a WezTerm/Zellij poll tick, plus config and
+  // state.kdl changes), which can arrive in bursts. At most one refresh
+  // runs at a time; a trigger that arrives mid-refresh is coalesced into a
+  // single follow-up rather than dropped, so nothing is missed.
   let refreshInFlight = false;
   let refreshPending = false;
 
@@ -40,9 +38,7 @@
     const t0 = performance.now();
     invoke("log_ui_event", { event: "ui.refresh.start", detail: "" });
     try {
-      const next = await invoke("get_snapshot");
-      lensdDown = next.lensd_connected === false;
-      if (!lensdDown) snapshot = next;
+      snapshot = await invoke("get_snapshot");
       await tick();
       // Never resize/reposition the window while the overlay is showing -
       // clicking a signal opens the overlay, then immediately calls
@@ -489,11 +485,7 @@
 
 <svelte:window on:keydown={handleKeydown} />
 
-{#if lensdDown}
-  <div class="dashboard" bind:this={dashboardEl} style="width: {panelWidth}px">
-    <div class="lensd-down">lensd not connected</div>
-  </div>
-{:else if snapshot}
+{#if snapshot}
   <div class="dashboard" bind:this={dashboardEl} style="width: {panelWidth}px">
     <div class="panel" class:pulse-noop={pulseNoop} style="max-height: {panelMaxHeight}px">
       {#each visibleLanes as lane}
@@ -682,12 +674,6 @@
     background: var(--ground);
     border-radius: 12px;
     padding: 0.6rem;
-  }
-
-  .lensd-down {
-    padding: 0.8rem;
-    text-align: center;
-    opacity: 0.6;
   }
 
   .panel {

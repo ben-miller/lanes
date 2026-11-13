@@ -507,20 +507,11 @@ fn set_facet_enabled_or_exit(id: &str, facet: &str, enabled: bool) {
 
 /// `snapshot`/`signals` used to build this from `gather_lanes()`, a second,
 /// independently-drifting implementation of "turn facts into lane
-/// signals" alongside `lensd::snapshot_from_mirror` (the one `switch-ui`
-/// uses). Collapsed to one: this now requires a live lensd connection,
-/// where it used to work standalone - a real behavior change, not just a
-/// refactor.
-fn lanes_snapshot_from_lensd() -> lanes::model::LanewiseSnapshot {
+/// signals" alongside `lensd::live_snapshot` (the one `switch-ui` uses).
+/// Collapsed to one (PLAN-retire-lensd.md step 6: no daemon connection
+/// left at all, everything read directly - see [`lanes::lensd::LiveData`]).
+fn lanes_live_snapshot() -> lanes::model::LanewiseSnapshot {
     let cfg = lanes::config::Config::load();
-    let path = lanes::lensd::default_socket();
-    let mirror = match lanes::lensd::read_snapshot(&path, std::time::Duration::from_secs(5)) {
-        Ok(m) => m,
-        Err(e) => {
-            eprintln!("cannot read lensd socket {}: {e}", path.display());
-            std::process::exit(1);
-        }
-    };
     let inbox_counts = lanes::lensd::boards_inbox_counts();
     let claude_sessions = lanes::drivers::claude::enumerate();
     let running_sessions = lanes::drivers::zellij::running_sessions();
@@ -528,6 +519,7 @@ fn lanes_snapshot_from_lensd() -> lanes::model::LanewiseSnapshot {
     let tabbed_sessions = lanes::drivers::wezterm::sessions_with_tabs();
     let shell_records = lanes::drivers::shell::enumerate();
     let repo_status = lanes::lensd::repo_status_by_path(&cfg);
+    let build_checks = lanes::lensd::build_checks_by_repo(&cfg);
     let live = lanes::lensd::LiveData {
         inbox_counts: &inbox_counts,
         claude_sessions: &claude_sessions,
@@ -536,8 +528,9 @@ fn lanes_snapshot_from_lensd() -> lanes::model::LanewiseSnapshot {
         tabbed_sessions: &tabbed_sessions,
         shell_records: &shell_records,
         repo_status: &repo_status,
+        build_checks: &build_checks,
     };
-    lanes::lensd::snapshot_from_mirror(&cfg, &mirror, &live)
+    lanes::lensd::live_snapshot(&cfg, &live)
 }
 
 fn main() {
@@ -596,7 +589,7 @@ fn main() {
         }
 
         Command::Snapshot { out } => {
-            let snapshot = lanes_snapshot_from_lensd();
+            let snapshot = lanes_live_snapshot();
             let json = serde_json::to_string_pretty(&snapshot).expect("serialization failed");
             match out {
                 Some(path) => std::fs::write(&path, &json).expect("failed to write output file"),
@@ -605,7 +598,7 @@ fn main() {
         }
 
         Command::Signals => {
-            let snapshot = lanes_snapshot_from_lensd();
+            let snapshot = lanes_live_snapshot();
             let signaled: Vec<_> = snapshot.lanes.iter()
                 .filter(|l| l.has_signals())
                 .collect();

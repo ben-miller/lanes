@@ -17,8 +17,8 @@ struct RunningTimers(Arc<Mutex<HashSet<(String, u32)>>>);
 
 /// Arms a one-shot timer per pane in `pending` that doesn't already have one
 /// running, so a command still under the notice floor gets a second look
-/// once it crosses it - nothing else would, since lensd only re-diffs a
-/// fact that's actually changed, and "N seconds have now elapsed" isn't a
+/// once it crosses it - nothing else would, since a refresh only re-reads
+/// facts that already changed, and "N seconds have now elapsed" isn't a
 /// fact change on its own. No cancellation: if the command finishes before
 /// the timer fires, the resulting refetch just shows `done`/`failed`
 /// instead of `running`, which is correct, not a bug.
@@ -121,22 +121,18 @@ fn start_switch_socket(
 
 /// `async` + `spawn_blocking` keeps the config and state.kdl reads off the
 /// main thread, which Tauri v2 otherwise uses to run non-async commands.
-/// Signals come from lensd's live mirror; with lensd down the answer is
-/// `{"lensd_connected": false}` and there is no fallback.
+/// Every signal source is read directly now (PLAN-retire-lensd.md step 6:
+/// lensd retired entirely) - see `lanes::lensd::LiveData` - so there is no
+/// "daemon not connected" case to report anymore.
 #[tauri::command]
 async fn get_snapshot(
     handle: tauri::AppHandle,
-    lensd: tauri::State<'_, lanes::lensd::Client>,
     running_timers: tauri::State<'_, RunningTimers>,
 ) -> Result<serde_json::Value, ()> {
-    let lensd = lensd.inner().clone();
     let running_timers = running_timers.inner().clone();
     let (value, pending) = tauri::async_runtime::spawn_blocking(move || {
         let t0 = std::time::Instant::now();
         lanes::logging::perf("ui.get_snapshot.start", "");
-        let Some(mirror) = lensd.current() else {
-            return (serde_json::json!({ "lensd_connected": false }), Vec::new());
-        };
         let cfg = lanes::config::Config::load();
         let inbox_counts = lanes::lensd::boards_inbox_counts();
         let claude_sessions = lanes::drivers::claude::enumerate();
@@ -145,6 +141,7 @@ async fn get_snapshot(
         let tabbed_sessions = lanes::drivers::wezterm::sessions_with_tabs();
         let shell_records = lanes::drivers::shell::enumerate();
         let repo_status = lanes::lensd::repo_status_by_path(&cfg);
+        let build_checks = lanes::lensd::build_checks_by_repo(&cfg);
         let live = lanes::lensd::LiveData {
             inbox_counts: &inbox_counts,
             claude_sessions: &claude_sessions,
@@ -153,8 +150,9 @@ async fn get_snapshot(
             tabbed_sessions: &tabbed_sessions,
             shell_records: &shell_records,
             repo_status: &repo_status,
+            build_checks: &build_checks,
         };
-        let snapshot = lanes::lensd::snapshot_from_mirror(&cfg, &mirror, &live);
+        let snapshot = lanes::lensd::live_snapshot(&cfg, &live);
         let pending = lanes::lensd::pending_running_commands(&cfg, &shell_records);
         lanes::logging::perf("ui.get_snapshot.done", &format!("elapsed_us={}", t0.elapsed().as_micros()));
         // Always returns every lane: inactive-lane filtering is the
@@ -568,11 +566,18 @@ pub fn run() {
                 ).into());
             }
 
-            let lensd_handle = app.handle().clone();
-            let lensd = lanes::lensd::Client::start(lanes::lensd::default_socket(), move || {
-                lensd_handle.emit("sessions-changed", ()).ok();
+            // Replaces lensd's own poll loop (zellij_poll_secs = 5 in its
+            // config, reused for WezTerm too) now that nothing pushes a
+            // change event for a WezTerm tab opening/closing or a Zellij
+            // session starting/stopping - neither has a filesystem event
+            // the watcher below could catch. Same cadence, just moved
+            // in-process instead of living inside a separate daemon
+            // (PLAN-retire-lensd.md step 6).
+            let poll_handle = app.handle().clone();
+            std::thread::spawn(move || loop {
+                std::thread::sleep(std::time::Duration::from_secs(5));
+                poll_handle.emit("sessions-changed", ()).ok();
             });
-            app.manage(lensd);
             app.manage(RunningTimers::default());
 
             let pinned_at_startup = lanes::state::read_switch_pinned();

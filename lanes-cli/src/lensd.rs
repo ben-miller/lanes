@@ -1,17 +1,11 @@
-//! Client for lensd's `lanes` socket. [`Client`] keeps a [`Mirror`] of the
-//! rule set's rows current on a background thread and reconnects when lensd
-//! goes away. [`snapshot_from_mirror`] builds a `LanewiseSnapshot` from that
-//! `Mirror` plus Lanes' own config - the one place lane snapshots get built,
-//! used by `switch-ui` and by `lanes snapshot`/`lanes signals`.
+//! Builds Lanes' live snapshot (`live_snapshot`) - the one place lane
+//! snapshots get built, used by `switch-ui` and by `lanes snapshot`/
+//! `lanes signals`. Used to be built from a `Mirror` of lensd's `lanes`
+//! socket; as of PLAN-retire-lensd.md step 6, lensd is retired entirely -
+//! everything here reads its own live sources directly (see [`LiveData`]),
+//! not a daemon's derived copy of them.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
-use std::io::{BufRead, BufReader};
-use std::os::unix::net::UnixStream;
-use std::path::PathBuf;
-use std::sync::{Arc, Mutex};
-use std::time::Duration;
-
-use serde_json::Value;
 
 use crate::config::Config;
 use crate::drivers::shell::CommandRecord;
@@ -19,55 +13,6 @@ use crate::model::{
     ClaudeSessionReason, FacetSnapshot, LaneSnapshot, LanesReason, LanewiseSnapshot, PaneKind, PaneSnapshot, RepoReason,
     Signal, SignalAction, SignalReason,
 };
-
-pub type Row = Vec<Value>;
-
-/// The current rows per relation, rebuilt from a snapshot and kept current by diffs.
-#[derive(Default, Debug, Clone)]
-pub struct Mirror {
-    pub rels: HashMap<String, HashSet<Row>>,
-    pub epoch: Option<u64>,
-}
-
-impl Mirror {
-    /// Applies one newline-delimited protocol message. Unknown messages are ignored.
-    pub fn apply(&mut self, line: &str) {
-        let Ok(msg) = serde_json::from_str::<Value>(line) else { return };
-        if let Some(snap) = msg.get("snapshot") {
-            self.rels.clear();
-            self.epoch = snap.get("epoch").and_then(Value::as_u64);
-            for row in snap.get("rows").and_then(Value::as_array).into_iter().flatten() {
-                if let Some((rel, values)) = relation_values(row) {
-                    self.rels.entry(rel).or_default().insert(values);
-                }
-            }
-        } else if let Some(diff) = msg.get("diff") {
-            self.epoch = diff.get("epoch").and_then(Value::as_u64);
-            for ch in diff.get("changes").and_then(Value::as_array).into_iter().flatten() {
-                let Some((rel, values)) = relation_values(ch) else { continue };
-                let rows = self.rels.entry(rel).or_default();
-                if ch.get("weight").and_then(Value::as_i64).unwrap_or(0) > 0 {
-                    rows.insert(values);
-                } else {
-                    rows.remove(&values);
-                }
-            }
-        }
-    }
-
-    fn rows(&self, rel: &str) -> impl Iterator<Item = &Row> {
-        self.rels.get(rel).into_iter().flatten()
-    }
-}
-
-fn relation_values(v: &Value) -> Option<(String, Row)> {
-    Some((v.get("relation")?.as_str()?.to_string(), v.get("values")?.as_array()?.clone()))
-}
-
-pub fn default_socket() -> PathBuf {
-    let home = std::env::var("HOME").unwrap_or_default();
-    PathBuf::from(home).join(".local/state/lensd/lanes.sock")
-}
 
 /// Boards' own `inbox_count(project, count)` facts, read directly over its
 /// appctl socket - `project -> count`, straight from the owner, bypassing
@@ -112,7 +57,7 @@ fn boards_inbox_counts_at(root: &std::path::Path) -> HashMap<String, i64> {
 
 /// Every running lane's zellij session, fetched once per snapshot (not
 /// once per lane) via `drivers::zellij::panes` - the "fetch once up top"
-/// half of `snapshot_from_mirror`'s `panes_by_session` parameter
+/// half of `live_snapshot`'s `panes_by_session` parameter
 /// (PLAN-retire-lensd.md step 4a). A session not in `running_sessions`
 /// (`drivers::zellij::running_sessions`) is skipped - no point asking
 /// Zellij for panes of a session that isn't running.
@@ -123,107 +68,6 @@ pub fn panes_by_session(cfg: &Config, running_sessions: &HashSet<String>) -> Has
         .filter(|session| running_sessions.contains(*session))
         .map(|session| (session.to_string(), crate::drivers::zellij::panes(session)))
         .collect()
-}
-
-#[derive(Default)]
-struct Shared {
-    mirror: Mirror,
-    connected: bool,
-    version: u64,
-}
-
-/// A live view of lensd's `lanes` stream. Not connected means lensd is not
-/// running (or restarting): there is no data, and no fallback.
-#[derive(Clone)]
-pub struct Client {
-    shared: Arc<Mutex<Shared>>,
-}
-
-const BACKOFF_START: Duration = Duration::from_millis(100);
-const BACKOFF_MAX: Duration = Duration::from_secs(5);
-
-impl Client {
-    /// Starts the background connection. `on_change` runs on that thread after
-    /// every snapshot, diff and connect/disconnect, with no lock held.
-    pub fn start(path: PathBuf, on_change: impl Fn() + Send + 'static) -> Client {
-        Self::start_with_backoff(path, BACKOFF_START, BACKOFF_MAX, on_change)
-    }
-
-    pub fn start_with_backoff(
-        path: PathBuf,
-        backoff_start: Duration,
-        backoff_max: Duration,
-        on_change: impl Fn() + Send + 'static,
-    ) -> Client {
-        let shared = Arc::new(Mutex::new(Shared::default()));
-        let client = Client { shared: shared.clone() };
-        std::thread::spawn(move || {
-            let mut backoff = backoff_start;
-            loop {
-                if let Ok(stream) = UnixStream::connect(&path) {
-                    if stream_into(stream, &shared, &on_change) {
-                        backoff = backoff_start;
-                    }
-                    let mut g = shared.lock().unwrap();
-                    g.mirror = Mirror::default();
-                    g.connected = false;
-                    g.version += 1;
-                    drop(g);
-                    on_change();
-                }
-                std::thread::sleep(backoff);
-                backoff = (backoff * 2).min(backoff_max);
-            }
-        });
-        client
-    }
-
-    /// The current rows, or `None` while not connected.
-    pub fn current(&self) -> Option<Mirror> {
-        let g = self.shared.lock().unwrap();
-        g.connected.then(|| g.mirror.clone())
-    }
-
-    pub fn connected(&self) -> bool {
-        self.shared.lock().unwrap().connected
-    }
-
-    /// Increases on every change, including connect and disconnect.
-    pub fn version(&self) -> u64 {
-        self.shared.lock().unwrap().version
-    }
-}
-
-/// Reads one connection until it ends. Returns whether a snapshot arrived.
-fn stream_into(stream: UnixStream, shared: &Mutex<Shared>, on_change: &impl Fn()) -> bool {
-    let mut got_snapshot = false;
-    for line in BufReader::new(stream).lines() {
-        let Ok(line) = line else { break };
-        {
-            let mut g = shared.lock().unwrap();
-            g.mirror.apply(&line);
-            g.connected = g.mirror.epoch.is_some();
-            got_snapshot |= g.connected;
-            g.version += 1;
-        }
-        on_change();
-    }
-    got_snapshot
-}
-
-/// Connects and reads until the snapshot has arrived.
-pub fn read_snapshot(path: &std::path::Path, timeout: Duration) -> std::io::Result<Mirror> {
-    let stream = UnixStream::connect(path)?;
-    stream.set_read_timeout(Some(timeout))?;
-    let mut mirror = Mirror::default();
-    for line in BufReader::new(stream).lines() {
-        let line = line?;
-        mirror.apply(&line);
-        if mirror.epoch.is_some() {
-            return Ok(mirror);
-        }
-    }
-    Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "socket closed before a snapshot"))
 }
 
 /// The dashboard's pane list for one zellij session - read live from
@@ -344,35 +188,42 @@ fn repo_signals(
 /// One chip per instance and reason; a source-changed chip names the
 /// changed sources (`src-tauri`, or `dev-infra/crates/appctl` for a path
 /// dependency in another repo).
-fn build_signals(m: &Mirror, lane: &str, resolved_path: &str) -> Vec<Signal> {
+/// "Running build is stale" chips for one lane repo, from an already-
+/// fetched `build_checks_by_repo` (one `appctl::build::check` per running
+/// instance whose own repo is this one), rather than lensd's derived
+/// `lanes_build_changed`/`lanes_build_rebuilt` relations
+/// (PLAN-retire-lensd.md step 5). One chip per instance and reason, same
+/// as before - a source-changed chip names every changed source in one
+/// go (`appctl::build::Check`'s own `Source::Changed` already groups
+/// them per instance, so no separate grouping step is needed here).
+fn build_signals(checks: &[(String, String, appctl::build::Check)], resolved_path: &str) -> Vec<Signal> {
     use crate::model::BuildReason;
-    let mut changed: std::collections::BTreeMap<(String, String), BTreeSet<String>> = Default::default();
-    for r in m.rows("lanes_build_changed").filter(|r| s(&r[0]) == lane && s(&r[1]) == resolved_path) {
-        let (repo, path) = (s(&r[4]), s(&r[5]));
-        let label = if repo == resolved_path {
-            if path.is_empty() { "source".to_string() } else { path.to_string() }
-        } else {
-            let name = std::path::Path::new(repo).file_name().and_then(|n| n.to_str()).unwrap_or(repo);
-            if path.is_empty() { name.to_string() } else { format!("{name}/{path}") }
-        };
-        changed.entry((s(&r[2]).to_string(), s(&r[3]).to_string())).or_default().insert(label);
+    let mut out = Vec::new();
+    for (app, instance, check) in checks {
+        if let appctl::build::Source::Changed { changed } = &check.source {
+            let labels: BTreeSet<String> = changed
+                .iter()
+                .map(|c| {
+                    let repo = resolve_path(&c.now.repo);
+                    if repo == resolved_path {
+                        if c.now.path.is_empty() { "source".to_string() } else { c.now.path.clone() }
+                    } else {
+                        let name = std::path::Path::new(&c.now.repo).file_name().and_then(|n| n.to_str()).unwrap_or(&c.now.repo);
+                        if c.now.path.is_empty() { name.to_string() } else { format!("{name}/{}", c.now.path) }
+                    }
+                })
+                .collect();
+            let detail = format!("{app} {instance} · {}", labels.into_iter().collect::<Vec<_>>().join(", "));
+            out.push(Signal::new(SignalReason::Build(BuildReason::SourceChanged), None, Some(detail)));
+        }
+        if check.rebuilt_since_launch == Some(true) {
+            out.push(Signal::new(SignalReason::Build(BuildReason::RebuiltSinceLaunch), None, Some(format!("{app} {instance}"))));
+        }
     }
-    let mut out: Vec<Signal> = changed
-        .into_iter()
-        .map(|((app, instance), sources)| {
-            let detail = format!("{app} {instance} · {}", sources.into_iter().collect::<Vec<_>>().join(", "));
-            Signal::new(SignalReason::Build(BuildReason::SourceChanged), None, Some(detail))
-        })
-        .collect();
-    let rebuilt: BTreeSet<(&str, &str)> =
-        m.rows("lanes_build_rebuilt").filter(|r| s(&r[0]) == lane && s(&r[1]) == resolved_path).map(|r| (s(&r[2]), s(&r[3]))).collect();
-    out.extend(rebuilt.into_iter().map(|(app, instance)| {
-        Signal::new(SignalReason::Build(BuildReason::RebuiltSinceLaunch), None, Some(format!("{app} {instance}")))
-    }));
     out
 }
 
-/// Everything `snapshot_from_mirror`/`lane_from_mirror` read directly
+/// Everything `live_snapshot`/`lane_snapshot` read directly
 /// instead of through lensd's derived relations, bundled into one value
 /// instead of a growing positional-argument list (PLAN-retire-lensd.md
 /// steps 1-4b, one field added per step): Boards' inbox counts
@@ -393,6 +244,33 @@ pub struct LiveData<'a> {
     pub tabbed_sessions: &'a HashSet<String>,
     pub shell_records: &'a [CommandRecord],
     pub repo_status: &'a HashMap<String, crate::drivers::git::RepoStatus>,
+    pub build_checks: &'a HashMap<String, Vec<(String, String, appctl::build::Check)>>,
+}
+
+/// For each lane repo, every running `appctl` instance whose own repo is
+/// that one, with its build staleness (`appctl::build::check`) - read
+/// directly over each instance's existing `hello` (already in
+/// `appctl::client::list`'s result, no extra round trip per instance)
+/// rather than lensd's derived `lanes_build_changed`/`lanes_build_rebuilt`
+/// (PLAN-retire-lensd.md step 5). Fetched once per snapshot, the "fetch
+/// once up top" half of `LiveData::build_checks`.
+pub fn build_checks_by_repo(cfg: &Config) -> HashMap<String, Vec<(String, String, appctl::build::Check)>> {
+    let Some(root) = appctl::default_state_root() else {
+        return HashMap::new();
+    };
+    let repo_paths: HashSet<String> = cfg.lanes.iter().flat_map(|lane| lane.scope.iter()).filter_map(|el| el.repo_path()).map(resolve_path).collect();
+    let mut out: HashMap<String, Vec<(String, String, appctl::build::Check)>> = HashMap::new();
+    for entry in appctl::client::list(&root) {
+        let appctl::client::Status::Live(info) = entry.status else { continue };
+        let Some(primary) = info.build.as_ref().and_then(|b| b.sources.first()) else { continue };
+        let repo = resolve_path(&primary.repo);
+        if !repo_paths.contains(&repo) {
+            continue;
+        }
+        let check = appctl::build::check(&info);
+        out.entry(repo).or_default().push((info.app.clone(), info.instance.clone(), check));
+    }
+    out
 }
 
 /// Every lane repo's git status, fetched once per snapshot (not once per
@@ -419,8 +297,8 @@ pub fn repo_status_by_path(cfg: &Config) -> HashMap<String, crate::drivers::git:
 /// what `live` carries - see [`LiveData`]. Lanes' own policy (dismissals,
 /// disabled sessions, `cyclable`, `visible`, lifecycle) is applied here,
 /// never by lensd.
-pub fn snapshot_from_mirror(cfg: &Config, m: &Mirror, live: &LiveData) -> LanewiseSnapshot {
-    let lanes = cfg.lanes.iter().map(|lane| lane_from_mirror(lane, m, &cfg.shell_ignored_commands, live)).collect();
+pub fn live_snapshot(cfg: &Config, live: &LiveData) -> LanewiseSnapshot {
+    let lanes = cfg.lanes.iter().map(|lane| lane_snapshot(lane, &cfg.shell_ignored_commands, live)).collect();
     LanewiseSnapshot {
         taken_at: chrono::Utc::now().to_rfc3339(),
         lanes,
@@ -431,7 +309,7 @@ pub fn snapshot_from_mirror(cfg: &Config, m: &Mirror, live: &LiveData) -> Lanewi
 
 /// `(session, pane, seconds_remaining)` for every `running` shell record
 /// that exists right now but hasn't crossed `shell_notice_secs()` yet - so
-/// its signal is correctly absent from `snapshot_from_mirror`'s output.
+/// its signal is correctly absent from `live_snapshot`'s output.
 /// Nothing re-diffs a fact that hasn't itself changed, so without this
 /// there'd be no second look once the floor actually passes - a command
 /// that's still running at exactly the 3s mark would just never get a chip
@@ -457,7 +335,7 @@ pub fn pending_running_commands(cfg: &Config, shell_records: &[CommandRecord]) -
         .collect()
 }
 
-fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_commands: &[String], live: &LiveData) -> LaneSnapshot {
+fn lane_snapshot(lane: &crate::model::Lane, shell_ignored_commands: &[String], live: &LiveData) -> LaneSnapshot {
     let empty_panes = Vec::new();
     let nav_session = lane.scope.iter().find_map(|el| el.zellij_session_name());
     let mut facets: Vec<FacetSnapshot> = lane
@@ -478,7 +356,9 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_command
                 let raw = el.repo_path().unwrap_or_default();
                 let resolved = resolve_path(raw);
                 let mut signals = repo_signals(live.repo_status, &resolved, raw, nav_session);
-                signals.extend(build_signals(m, &lane.id, &resolved));
+                let empty_checks = Vec::new();
+                let checks = live.build_checks.get(&resolved).unwrap_or(&empty_checks);
+                signals.extend(build_signals(checks, &resolved));
                 FacetSnapshot::Repo { path: raw.to_string(), signals }
             }
         })
@@ -543,63 +423,6 @@ fn lane_from_mirror(lane: &crate::model::Lane, m: &Mirror, shell_ignored_command
     LaneSnapshot { id: lane.id.clone(), name: lane.name.clone(), active: lane.active, cyclable, facets }
 }
 
-fn s(v: &Value) -> &str {
-    v.as_str().unwrap_or("")
-}
-
-fn claude_reason(state: &str) -> &'static str {
-    match state {
-        "idle" => "awaiting",
-        "permission_pending" => "permission",
-        _ => "active",
-    }
-}
-
-/// Comparable signal keys implied by lensd's rows. `is_dismissed` is Lanes' own filter.
-pub fn keys_from_mirror(m: &Mirror, is_dismissed: impl Fn(&str) -> bool) -> BTreeSet<String> {
-    let mut keys = BTreeSet::new();
-    for r in m.rows("lanes_claude") {
-        keys.insert(format!("{}|claude_session|{}|{}", s(&r[0]), claude_reason(s(&r[2])), s(&r[1])));
-    }
-    for r in m.rows("lanes_command") {
-        let reason = match s(&r[3]) {
-            "done" => "done",
-            "failed" => "failed",
-            _ => continue,
-        };
-        let (session, pane, started) = (s(&r[1]), r[2].as_i64().unwrap_or(-1), s(&r[4]));
-        if is_dismissed(&format!("command:{session}--{pane}--{started}")) {
-            continue;
-        }
-        keys.insert(format!("{}|command|{reason}|{session}:{pane}", s(&r[0])));
-    }
-    for r in m.rows("lanes_repo_dirty") {
-        keys.insert(format!("{}|repo|pending_commit|{}", s(&r[0]), s(&r[1])));
-    }
-    for r in m.rows("lanes_repo_branch") {
-        keys.insert(format!("{}|repo|non_default_branch|{}", s(&r[0]), s(&r[1])));
-    }
-    for r in m.rows("lanes_build_changed") {
-        keys.insert(format!("{}|build|source_changed|{}:{}", s(&r[0]), s(&r[2]), s(&r[3])));
-    }
-    for r in m.rows("lanes_build_rebuilt") {
-        keys.insert(format!("{}|build|rebuilt_since_launch|{}:{}", s(&r[0]), s(&r[2]), s(&r[3])));
-    }
-    let running: HashSet<(&str, &str)> = m.rows("lanes_session_running").map(|r| (s(&r[0]), s(&r[1]))).collect();
-    for r in m.rows("lanes_session") {
-        if !running.contains(&(s(&r[0]), s(&r[1]))) {
-            keys.insert(format!("{}|lanes|session_not_running|", s(&r[0])));
-        }
-    }
-    keys
-}
-
-/// Resolved path -> repo name for the lane repos lensd actually watches
-/// (those also in its own config).
-pub fn watched_repos(m: &Mirror) -> HashMap<String, String> {
-    m.rows("lanes_repo_watched").map(|r| (s(&r[2]).to_string(), s(&r[1]).to_string())).collect()
-}
-
 fn resolve_path(path: &str) -> String {
     let expanded = crate::expand_tilde(path);
     let trimmed = expanded.trim_end_matches('/');
@@ -609,17 +432,7 @@ fn resolve_path(path: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
-
-    fn mirror(rows: Vec<Value>) -> Mirror {
-        let mut m = Mirror::default();
-        m.apply(&json!({"snapshot": {"epoch": 1, "rows": rows}}).to_string());
-        m
-    }
-
-    fn row(rel: &str, values: Value) -> Value {
-        json!({"relation": rel, "values": values})
-    }
+    use std::time::Duration;
 
     #[test]
     fn boards_inbox_counts_at_reads_a_real_boards_instances_facts() {
@@ -657,127 +470,6 @@ mod tests {
         let state = std::env::temp_dir().join(format!("lanes-inbox-counts-test-absent-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&state);
         assert_eq!(boards_inbox_counts_at(&state), HashMap::new());
-    }
-
-    #[test]
-    fn diffs_add_and_remove_rows_after_a_snapshot() {
-        let mut m = mirror(vec![row("lanes_claude", json!(["l", "s1", "idle"]))]);
-        m.apply(&json!({"diff": {"epoch": 2, "changes": [
-            {"relation": "lanes_claude", "values": ["l", "s1", "idle"], "weight": -1},
-            {"relation": "lanes_claude", "values": ["l", "s1", "permission_pending"], "weight": 1}]}}).to_string());
-        assert_eq!(m.epoch, Some(2));
-        assert_eq!(
-            keys_from_mirror(&m, |_| false),
-            BTreeSet::from(["l|claude_session|permission|s1".to_string()])
-        );
-    }
-
-    #[test]
-    fn dismissed_commands_are_filtered_and_running_ones_ignored() {
-        let m = mirror(vec![
-            row("lanes_command", json!(["l", "z", 3, "failed", "T1"])),
-            row("lanes_command", json!(["l", "z", 4, "failed", "T2"])),
-            row("lanes_command", json!(["l", "z", 5, "running", "T3"])),
-        ]);
-        let keys = keys_from_mirror(&m, |id| id == "command:z--3--T1");
-        assert_eq!(keys, BTreeSet::from(["l|command|failed|z:4".to_string()]));
-    }
-
-    #[test]
-    fn repo_rows_become_repo_keys_and_watched_names_are_listed() {
-        let m = mirror(vec![
-            row("lanes_repo_dirty", json!(["l", "infra"])),
-            row("lanes_repo_branch", json!(["l", "infra", "feat", "main"])),
-            row("lanes_repo_watched", json!(["l", "infra", "/p/infra"])),
-        ]);
-        assert_eq!(
-            keys_from_mirror(&m, |_| false),
-            BTreeSet::from(["l|repo|pending_commit|infra".to_string(), "l|repo|non_default_branch|infra".to_string()])
-        );
-        assert_eq!(watched_repos(&m), HashMap::from([("/p/infra".to_string(), "infra".to_string())]));
-    }
-
-    #[test]
-    fn a_lane_session_that_is_not_running_is_a_session_not_running_key() {
-        let m = mirror(vec![
-            row("lanes_session", json!(["a", "up"])),
-            row("lanes_session", json!(["b", "down"])),
-            row("lanes_session_running", json!(["a", "up"])),
-        ]);
-        assert_eq!(keys_from_mirror(&m, |_| false), BTreeSet::from(["b|lanes|session_not_running|".to_string()]));
-    }
-
-    fn socket_path(tag: &str) -> PathBuf {
-        let dir = std::env::temp_dir().join(format!("lanes-lensd-{}-{tag}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        dir.join("t.sock")
-    }
-
-    fn wait_until(what: &str, cond: impl Fn() -> bool) {
-        let deadline = std::time::Instant::now() + Duration::from_secs(5);
-        while !cond() {
-            assert!(std::time::Instant::now() < deadline, "timed out waiting for {what}");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
-    fn send(c: &mut UnixStream, line: &str) {
-        use std::io::Write;
-        writeln!(c, "{line}").unwrap();
-    }
-
-    #[test]
-    fn client_follows_diffs_reports_disconnect_and_reconnects_with_a_fresh_snapshot() {
-        let path = socket_path("client");
-        let notified = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let n = notified.clone();
-        // Started before the socket exists: not connected, and keeps retrying.
-        let client = Client::start_with_backoff(path.clone(), Duration::from_millis(20), Duration::from_millis(50), move || {
-            n.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        });
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(!client.connected());
-        assert!(client.current().is_none());
-
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let (mut c, _) = listener.accept().unwrap();
-        send(&mut c, r#"{"hello":{"protocol":1,"set":"lanes"}}"#);
-        send(&mut c, r#"{"snapshot":{"epoch":1,"rows":[{"relation":"lanes_session","values":["a","z"]}]}}"#);
-        wait_until("snapshot", || client.connected());
-        assert_eq!(client.current().unwrap().rels["lanes_session"].len(), 1);
-
-        let v = client.version();
-        send(&mut c, r#"{"diff":{"epoch":2,"changes":[{"relation":"lanes_session","values":["b","y"],"weight":1}]}}"#);
-        wait_until("diff", || client.version() > v);
-        assert_eq!(client.current().unwrap().rels["lanes_session"].len(), 2);
-        assert!(notified.load(std::sync::atomic::Ordering::SeqCst) >= 2);
-
-        // lensd goes away: no data, not a stale mirror.
-        drop(c);
-        wait_until("disconnect", || !client.connected());
-        assert!(client.current().is_none());
-
-        // It comes back: a fresh snapshot replaces everything, nothing doubled.
-        let (mut c, _) = listener.accept().unwrap();
-        send(&mut c, r#"{"snapshot":{"epoch":9,"rows":[{"relation":"lanes_session","values":["c","x"]}]}}"#);
-        wait_until("reconnect", || client.connected());
-        let m = client.current().unwrap();
-        assert_eq!(m.epoch, Some(9));
-        assert_eq!(m.rels["lanes_session"], HashSet::from([vec![Value::from("c"), Value::from("x")]]));
-        std::fs::remove_dir_all(path.parent().unwrap()).ok();
-    }
-
-    #[test]
-    fn a_connection_that_closes_before_a_snapshot_is_not_connected() {
-        let path = socket_path("nosnap");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let client = Client::start_with_backoff(path.clone(), Duration::from_millis(20), Duration::from_millis(50), || {});
-        let (mut c, _) = listener.accept().unwrap();
-        send(&mut c, r#"{"hello":{"protocol":1,"set":"lanes"}}"#);
-        drop(c);
-        std::thread::sleep(Duration::from_millis(100));
-        assert!(!client.connected(), "hello alone is not data");
-        std::fs::remove_dir_all(path.parent().unwrap()).ok();
     }
 
     fn cfg_with(lane: crate::model::Lane) -> Config {
@@ -836,20 +528,8 @@ mod tests {
             .expect("expected a Board facet")
     }
 
-    fn live_rows() -> Vec<Value> {
-        vec![
-            row("lanes_session", json!(["l", "z"])),
-            row("lanes_tab", json!(["l", 4])),
-            // "session running" and the pane list are no longer the
-            // Mirror's job (PLAN-retire-lensd.md step 4a) - see
-            // `running_sessions`/`live_panes` test fixtures below instead.
-        ]
-    }
-
-    /// A `drivers::claude::ClaudeSession` for tests - the Mirror no longer
-    /// carries Claude session state (`lanes_claude`, now dead weight read
-    /// by nothing - PLAN-retire-lensd.md step 3), so tests exercising
-    /// Claude signals build this directly instead of a `lanes_claude` row.
+    /// A `drivers::claude::ClaudeSession` for tests - built directly rather
+    /// than through a daemon's derived row (PLAN-retire-lensd.md step 3).
     fn claude_session(session_id: &str, state: &str, zellij_session: &str, pane_id: u32) -> crate::drivers::claude::ClaudeSession {
         crate::drivers::claude::ClaudeSession {
             session_id: session_id.to_string(),
@@ -859,15 +539,14 @@ mod tests {
         }
     }
 
-    /// A `drivers::zellij::LivePane` for tests, same reasoning as
-    /// `claude_session` - the pane list is no longer a Mirror row either
-    /// (PLAN-retire-lensd.md step 4a).
+    /// A `drivers::zellij::LivePane` for tests, built directly rather than
+    /// through a daemon's derived row (PLAN-retire-lensd.md step 4a).
     fn live_pane(id: u32, focused: bool, cwd: Option<&str>, command: Option<&str>) -> crate::drivers::zellij::LivePane {
         crate::drivers::zellij::LivePane { id, focused, cwd: cwd.map(str::to_string), command: command.map(str::to_string) }
     }
 
-    /// A `drivers::shell::CommandRecord` for tests - command records are no
-    /// longer Mirror rows either (PLAN-retire-lensd.md step 5).
+    /// A `drivers::shell::CommandRecord` for tests, built directly rather
+    /// than through a daemon's derived row (PLAN-retire-lensd.md step 5).
     #[allow(clippy::too_many_arguments)]
     fn cmd_record(session: &str, pane: u32, state: &str, started_at: &str, cmd: Option<&str>, ended_at: Option<&str>, exit_code: Option<i32>) -> CommandRecord {
         CommandRecord {
@@ -908,8 +587,9 @@ mod tests {
             tabbed_sessions: &tabbed,
             shell_records: &[],
             repo_status: &HashMap::new(),
+            build_checks: &HashMap::new(),
         };
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &live);
+        let snap = live_snapshot(&cfg_with(lane()), &live);
         let (running, panes, signals) = terminal(&snap);
         assert!(*running);
         assert_eq!(panes.len(), 2);
@@ -932,8 +612,6 @@ mod tests {
 
     #[test]
     fn a_lane_without_a_wezterm_tab_is_session_missing_and_not_cyclable() {
-        let mut rows: Vec<Value> = live_rows().into_iter().filter(|r| r["relation"] != "lanes_tab").collect();
-        rows.push(row("lanes_session_missing", json!(["l"])));
         let sessions = vec![claude_session("s-low", "running", "z", 7), claude_session("s-high", "idle", "z", 3)];
         let running = HashSet::from(["z".to_string()]);
         let empty_counts = HashMap::new();
@@ -946,8 +624,9 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &[],
             repo_status: &HashMap::new(),
+            build_checks: &HashMap::new(),
         };
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &live);
+        let snap = live_snapshot(&cfg_with(lane()), &live);
         let (_, _, signals) = terminal(&snap);
         assert!(!snap.lanes[0].cyclable);
         assert!(signals.iter().any(|sg| matches!(sg.reason, SignalReason::Lanes(LanesReason::SessionMissing)) && sg.visible));
@@ -959,12 +638,7 @@ mod tests {
 
     #[test]
     fn a_session_that_is_not_running_has_no_panes_and_a_not_running_signal() {
-        let rows = vec![
-            row("lanes_session", json!(["l", "z"])),
-            row("lanes_tab", json!(["l", 4])),
-            row("lanes_session_not_running", json!(["l", "z"])),
-        ];
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &LiveData {
+        let snap = live_snapshot(&cfg_with(lane()), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
@@ -972,6 +646,7 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &[],
             repo_status: &HashMap::new(),
+            build_checks: &HashMap::new(),
         });
         let (running, panes, signals) = terminal(&snap);
         assert!(!*running && panes.is_empty());
@@ -981,7 +656,7 @@ mod tests {
     #[test]
     fn a_nonempty_inbox_count_becomes_a_boards_signal() {
         let counts = HashMap::from([("Boards".to_string(), 3)]);
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &LiveData {
+        let snap = live_snapshot(&cfg_with(lane_with_boards_target("Boards")), &LiveData {
             inbox_counts: &counts,
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
@@ -989,6 +664,7 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &[],
             repo_status: &HashMap::new(),
+            build_checks: &HashMap::new(),
         });
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
@@ -1000,7 +676,7 @@ mod tests {
     #[test]
     fn a_zero_inbox_count_produces_no_signal() {
         let counts = HashMap::from([("Boards".to_string(), 0)]);
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &LiveData {
+        let snap = live_snapshot(&cfg_with(lane_with_boards_target("Boards")), &LiveData {
             inbox_counts: &counts,
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
@@ -1008,6 +684,7 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &[],
             repo_status: &HashMap::new(),
+            build_checks: &HashMap::new(),
         });
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
@@ -1016,7 +693,7 @@ mod tests {
 
     #[test]
     fn no_inbox_count_row_at_all_still_yields_the_board_facet_with_no_signal() {
-        let snap = snapshot_from_mirror(&cfg_with(lane_with_boards_target("Boards")), &mirror(live_rows()), &LiveData {
+        let snap = live_snapshot(&cfg_with(lane_with_boards_target("Boards")), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
@@ -1024,6 +701,7 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &[],
             repo_status: &HashMap::new(),
+            build_checks: &HashMap::new(),
         });
         let (project, signals) = board_facet(&snap);
         assert_eq!(project, "Boards");
@@ -1032,7 +710,7 @@ mod tests {
 
     #[test]
     fn a_lane_with_no_boards_target_has_no_board_facet() {
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &LiveData {
+        let snap = live_snapshot(&cfg_with(lane()), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
@@ -1040,6 +718,7 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &[],
             repo_status: &HashMap::new(),
+            build_checks: &HashMap::new(),
         });
         assert!(!snap.lanes[0].facets.iter().any(|f| matches!(f, FacetSnapshot::Board { .. })));
     }
@@ -1054,7 +733,7 @@ mod tests {
             // notice_floor for the still-fresh case.
             cmd_record("z", 7, "running", "2026-01-01T00:00:00Z", Some("vite"), None, None),
         ];
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &LiveData {
+        let snap = live_snapshot(&cfg_with(lane()), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
@@ -1062,6 +741,7 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &records,
             repo_status: &HashMap::new(),
+            build_checks: &HashMap::new(),
         });
         let (_, _, signals) = terminal(&snap);
         let cmds: Vec<_> = signals.iter().filter(|sg| sg.kind() == crate::model::SignalKind::Command).collect();
@@ -1078,7 +758,7 @@ mod tests {
     fn running_command_only_becomes_a_signal_past_the_notice_floor() {
         let just_started = chrono::Utc::now().to_rfc3339();
         let records = vec![cmd_record("z", 7, "running", &just_started, None, None, None)];
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &LiveData {
+        let snap = live_snapshot(&cfg_with(lane()), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
@@ -1086,6 +766,7 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &records,
             repo_status: &HashMap::new(),
+            build_checks: &HashMap::new(),
         });
         let (_, _, signals) = terminal(&snap);
         assert!(
@@ -1095,9 +776,9 @@ mod tests {
     }
 
     #[test]
-    fn lane_from_mirror_honors_shell_ignored_commands_not_just_gather_lanes() {
-        // Regression: lane_from_mirror (the actual live-dashboard path via
-        // snapshot_from_mirror) used to build Command signals through its
+    fn lane_snapshot_honors_shell_ignored_commands_not_just_gather_lanes() {
+        // Regression: lane_snapshot (the actual live-dashboard path via
+        // live_snapshot) used to build Command signals through its
         // own direct crate::command_signal call, bypassing
         // is_shell_signal_ignored entirely - a config entry excluding a
         // command worked for `lanes snapshot` (gather_lanes) but not for
@@ -1106,7 +787,7 @@ mod tests {
             vec![cmd_record("z", 7, "failed", "2026-01-01T00:00:00Z", Some("claude --resume boards"), Some("2026-01-01T00:00:07Z"), Some(1))];
         let mut cfg = cfg_with(lane());
         cfg.shell_ignored_commands = vec!["claude*".to_string()];
-        let snap = snapshot_from_mirror(&cfg, &mirror(live_rows()), &LiveData {
+        let snap = live_snapshot(&cfg, &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
@@ -1114,6 +795,7 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &records,
             repo_status: &HashMap::new(),
+            build_checks: &HashMap::new(),
         });
         let (_, _, signals) = terminal(&snap);
         assert!(!signals.iter().any(|sg| sg.kind() == crate::model::SignalKind::Command));
@@ -1164,7 +846,7 @@ mod tests {
             "/p/infra".to_string(),
             crate::drivers::git::RepoStatus { dirty: true, branch: Some("feat".to_string()), default_branch: Some("main".to_string()) },
         )]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(live_rows()), &LiveData {
+        let snap = live_snapshot(&cfg_with(lane()), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
@@ -1172,6 +854,7 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &[],
             repo_status: &repo_status,
+            build_checks: &HashMap::new(),
         });
         let FacetSnapshot::Repo { path, signals } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
         assert_eq!(path, "/p/infra");
@@ -1181,19 +864,32 @@ mod tests {
         assert!(matches!(&signals[0].action, Some(SignalAction::FocusRepoPane { session, path }) if session == "z" && path == "/p/infra"));
     }
 
+    fn source_tree(repo: &str, path: &str) -> appctl::build::SourceTree {
+        appctl::build::SourceTree {
+            repo: repo.to_string(),
+            path: path.to_string(),
+            commit: None,
+            tree: String::new(),
+            dirty: false,
+            exclude: Vec::new(),
+        }
+    }
+
+    fn changed(now_repo: &str, now_path: &str) -> appctl::build::Changed {
+        appctl::build::Changed { built: source_tree(now_repo, now_path), now: source_tree(now_repo, now_path) }
+    }
+
     #[test]
     fn stale_builds_get_visible_warning_chips_on_the_owning_repo_facet() {
-        let mut rows = live_rows();
-        rows.extend([
-            // Two of the app's own sources changed, plus one in another repo.
-            row("lanes_build_changed", json!(["l", "/p/infra", "boards", "dev-main", "/p/infra", "src-tauri"])),
-            row("lanes_build_changed", json!(["l", "/p/infra", "boards", "dev-main", "/s/dev-infra", "crates/appctl"])),
-            row("lanes_build_rebuilt", json!(["l", "/p/infra", "boards", "installed"])),
-            // Another lane's, and another repo of this lane's: not here.
-            row("lanes_build_changed", json!(["other", "/p/infra", "x", "dev-main", "/p/infra", ""])),
-            row("lanes_build_rebuilt", json!(["l", "/p/elsewhere", "y", "installed"])),
-        ]);
-        let snap = snapshot_from_mirror(&cfg_with(lane()), &mirror(rows), &LiveData {
+        // Two of the app's own sources changed, plus one in another repo.
+        let check = appctl::build::Check {
+            source: appctl::build::Source::Changed {
+                changed: vec![changed("/p/infra", "src-tauri"), changed("/s/dev-infra", "crates/appctl")],
+            },
+            rebuilt_since_launch: Some(true),
+        };
+        let build_checks = HashMap::from([("/p/infra".to_string(), vec![("boards".to_string(), "dev-main".to_string(), check)])]);
+        let snap = live_snapshot(&cfg_with(lane()), &LiveData {
             inbox_counts: &HashMap::new(),
             claude_sessions: &[],
             running_sessions: &HashSet::new(),
@@ -1201,6 +897,7 @@ mod tests {
             tabbed_sessions: &HashSet::new(),
             shell_records: &[],
             repo_status: &HashMap::new(),
+            build_checks: &build_checks,
         });
         let FacetSnapshot::Repo { signals, .. } = &snap.lanes[0].facets[1] else { panic!("repo facet") };
         let builds: Vec<&Signal> = signals.iter().filter(|s| s.kind() == crate::model::SignalKind::Build).collect();
@@ -1209,41 +906,11 @@ mod tests {
         assert!(matches!(builds[0].reason, SignalReason::Build(crate::model::BuildReason::SourceChanged)));
         assert_eq!(builds[0].detail.as_deref(), Some("boards dev-main · dev-infra/crates/appctl, src-tauri"));
         assert!(matches!(builds[1].reason, SignalReason::Build(crate::model::BuildReason::RebuiltSinceLaunch)));
-        assert_eq!(builds[1].detail.as_deref(), Some("boards installed"));
+        assert_eq!(builds[1].detail.as_deref(), Some("boards dev-main"));
         for chip in builds {
             assert_eq!(chip.urgency, crate::model::Urgency::Warning);
             assert!(chip.visible, "shown whether or not the lane is cyclable");
             assert!(chip.action.is_none());
         }
-    }
-
-    #[test]
-    fn stale_build_keys_are_comparable() {
-        let m = mirror(vec![
-            row("lanes_build_changed", json!(["l", "/p/infra", "boards", "dev-main", "/p/infra", "src-tauri"])),
-            row("lanes_build_rebuilt", json!(["l", "/p/infra", "boards", "installed"])),
-        ]);
-        let keys = keys_from_mirror(&m, |_| false);
-        assert!(keys.contains("l|build|source_changed|boards:dev-main"), "{keys:?}");
-        assert!(keys.contains("l|build|rebuilt_since_launch|boards:installed"), "{keys:?}");
-    }
-
-    #[test]
-    fn socket_snapshot_round_trip() {
-        let dir = std::env::temp_dir().join(format!("lanes-lensd-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("t.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        let server = std::thread::spawn(move || {
-            use std::io::Write;
-            let (mut c, _) = listener.accept().unwrap();
-            writeln!(c, r#"{{"hello":{{"protocol":1,"set":"lanes"}}}}"#).unwrap();
-            writeln!(c, r#"{{"snapshot":{{"epoch":7,"rows":[{{"relation":"lanes_session","values":["a","z"]}}]}}}}"#).unwrap();
-        });
-        let m = read_snapshot(&path, Duration::from_secs(5)).unwrap();
-        server.join().unwrap();
-        std::fs::remove_dir_all(&dir).ok();
-        assert_eq!(m.epoch, Some(7));
-        assert_eq!(m.rels["lanes_session"].len(), 1);
     }
 }
