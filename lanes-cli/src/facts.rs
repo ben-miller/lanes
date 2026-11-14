@@ -26,6 +26,10 @@ pub const RELATIONS: &[(&str, &[&str])] = &[
     ("lane_zellij", &["lane", "session"]),
     ("lane_repo", &["lane", "repo"]),
     ("lane_repo_path", &["lane", "path"]),
+    // Each repo's place in its lane's tab.toml, 0 first: facts are a set, so
+    // lane_repo_path's rows arrive in no particular order (by value, in
+    // appctl's store), and the lane's own order of its repos is this.
+    ("lane_repo_order", &["lane", "path", "position"]),
     ("lane_boards_project", &["lane", "project"]),
     ("shell_command", &["session", "pane", "state"]),
     ("shell_command_cmd", &["session", "pane", "cmd"]),
@@ -161,6 +165,7 @@ pub fn scan_contexts(dir: &Path) -> Vec<FactRow> {
         if lane.active.unwrap_or(true) {
             facts.push(row("lane_active", vec![FactValue::from(id.clone())]));
         }
+        let mut repo_position: i64 = 0;
         for scope in tab.scope {
             match (scope.kind.as_str(), scope.session, scope.path) {
                 ("zellij_session", Some(session), _) => {
@@ -174,7 +179,9 @@ pub fn scan_contexts(dir: &Path) -> Vec<FactRow> {
                         .map(|n| n.to_string_lossy().into_owned())
                         .unwrap_or(path);
                     facts.push(row("lane_repo", vec![FactValue::from(id.clone()), FactValue::from(name)]));
-                    facts.push(row("lane_repo_path", vec![FactValue::from(id.clone()), FactValue::from(resolved)]));
+                    facts.push(row("lane_repo_path", vec![FactValue::from(id.clone()), FactValue::from(resolved.clone())]));
+                    facts.push(row("lane_repo_order", vec![FactValue::from(id.clone()), FactValue::from(resolved), FactValue::Int(repo_position)]));
+                    repo_position += 1;
                 }
                 _ => {}
             }
